@@ -20,7 +20,7 @@ use crate::granite_features::{FrameBuffers, GraniteFrontEnd};
 use crate::parakeet::Timings;
 
 /// Encoder frames the next block must have before the one before it freezes, unless set.
-const DEFAULT_FREEZE_LAG: usize = 0;
+const DEFAULT_FREEZE_LAG: usize = 16;
 
 /// One layer's cached activations.
 #[derive(Default)]
@@ -94,8 +94,9 @@ impl GraniteStream {
     }
 
     /// Sets how many encoder frames (80 ms each) the next 10.24 s block must have before the one
-    /// before it freezes. With 0, the default, a block freezes at the first update after the next
-    /// one starts.
+    /// before it freezes, 16 (1.28 s) by default. With 0, a block freezes at the first update
+    /// after the next one starts. Each frame of lag costs an update about one frame of encoding
+    /// on average, and buys the frozen block's edge more of the next block as context.
     pub fn set_freeze_lag(&mut self, frames: usize) {
         self.lag = frames;
     }
