@@ -104,6 +104,16 @@ fn model_in(precision: Precision) -> Granite {
     model
 }
 
+fn cosine(a: &[f32], b: &[f32]) -> f64 {
+    let (mut ab, mut aa, mut bb) = (0f64, 0f64, 0f64);
+    for (&x, &y) in a.iter().zip(b) {
+        ab += x as f64 * y as f64;
+        aa += x as f64 * x as f64;
+        bb += y as f64 * y as f64;
+    }
+    ab / (aa.sqrt() * bb.sqrt())
+}
+
 /// ||got - want|| / ||want||.
 fn relative_l2(got: &[f32], want: &[f32]) -> f64 {
     assert_eq!(got.len(), want.len());
@@ -349,6 +359,57 @@ fn the_scalar_kernels_give_the_same_text() {
     }
 }
 
+/// Runs every clip through a model with narrow weights, comparing each saved block's output by
+/// cosine similarity and the CTC tokens with the reference. Returns the worst cosine, the clips
+/// with identical tokens and the number of clips.
+fn check_narrow(label: &str, model: &Granite) -> (f64, usize, usize) {
+    let (mut worst, mut same, mut total) = (1f64, 0, 0);
+    for mut clip in clips() {
+        total += 1;
+        let st = &mut clip.tensors;
+        let features = model.features(&clip.samples).unwrap();
+        let mut line = format!("{label} {}:", clip.id);
+        let encoded = model
+            .encode(
+                &features.data,
+                features.frames,
+                &mut Timings::default(),
+                &mut |name, _, x| {
+                    if st.info(name).is_none() {
+                        return;
+                    }
+                    let (_, want) = f32s(st, name);
+                    let cos = cosine(x, &want);
+                    line += &format!(" {name} {cos:.6}");
+                    worst = worst.min(cos);
+                },
+            )
+            .unwrap();
+        let tokens: Vec<i64> = ctc_tokens(&model.frame_ids(&encoded), model.config().blank)
+            .iter()
+            .map(|t| t.id as i64)
+            .collect();
+        let identical = tokens == i64s(st, "tokens");
+        same += identical as usize;
+        eprintln!(
+            "{line} tokens {}",
+            if identical { "identical" } else { "differ" }
+        );
+        if !identical {
+            let ids: Vec<u32> = tokens.iter().map(|&t| t as u32).collect();
+            eprintln!(
+                "  got  {}\n  want {}",
+                model.tokenizer().decode(&ids),
+                clip.text
+            );
+        }
+    }
+    eprintln!(
+        "{label}: worst layer cosine {worst:.6}, identical tokens on {same} of {total} clips"
+    );
+    (worst, same, total)
+}
+
 #[test]
 #[ignore = "needs the model files, see the top of this file"]
 fn bf16_weights_give_the_same_output_as_f32() {
@@ -374,4 +435,29 @@ fn bf16_weights_give_the_same_output_as_f32() {
         .zip(&outputs[1])
         .all(|(a, b)| a.to_bits() == b.to_bits());
     assert!(same, "bf16 weights give a different encoder output");
+}
+
+#[test]
+#[ignore = "needs the model files, see the top of this file"]
+fn narrow_weights_stay_close_to_the_reference() {
+    let mut failures = Vec::new();
+    for precision in [Precision::F16, Precision::Int8, Precision::Q8_0] {
+        let model = model_in(precision);
+        let (worst, same, total) = check_narrow(precision.name(), &model);
+        let floor = if precision.value_bytes() == 2 {
+            0.999
+        } else {
+            0.995
+        };
+        if worst < floor {
+            failures.push(format!(
+                "{}: a layer's cosine similarity is {worst}",
+                precision.name()
+            ));
+        }
+        if 2 * same < total {
+            failures.push(format!("{}: tokens differ on most clips", precision.name()));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
 }
