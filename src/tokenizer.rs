@@ -19,6 +19,9 @@ enum Piece {
 #[derive(Debug, Clone)]
 pub struct Tokenizer {
     pieces: Vec<Piece>,
+    /// Whether the file's decoder includes `ByteFallback`, which decodes each run of byte pieces
+    /// on its own and turns a run that isn't valid UTF-8 into one U+FFFD per byte.
+    byte_runs: bool,
 }
 
 impl Tokenizer {
@@ -87,7 +90,15 @@ impl Tokenizer {
                 parse_piece(content)
             };
         }
-        Ok(Tokenizer { pieces })
+        let decoder = root.get("decoder");
+        let byte_runs = decoder.is_some_and(|d| {
+            d.get("type").and_then(|t| t.as_str()) == Some("ByteFallback")
+                || d.get("decoders").and_then(|l| l.as_array()).is_some_and(|l| {
+                    l.iter()
+                        .any(|d| d.get("type").and_then(|t| t.as_str()) == Some("ByteFallback"))
+                })
+        });
+        Ok(Tokenizer { pieces, byte_runs })
     }
 
     /// The vocabulary size, added tokens included.
@@ -101,18 +112,43 @@ impl Tokenizer {
 
     /// Joins the pieces of `ids` into text. Special tokens are left out, byte pieces are joined
     /// into UTF-8, and the space the first word's `▁` stands for is dropped.
+    ///
+    /// With a `ByteFallback` decoder, as in Hugging Face's tokenizers, each run of byte pieces
+    /// decodes on its own, and a run that isn't valid UTF-8 becomes one U+FFFD per byte. Without
+    /// it, the bytes of all pieces decode together and each invalid sequence becomes one U+FFFD.
     pub fn decode(&self, ids: &[u32]) -> String {
         let mut bytes = Vec::new();
+        let mut text = String::new();
         for &id in ids {
             match self.pieces.get(id as usize) {
-                Some(Piece::Text(text)) => bytes.extend_from_slice(text.as_bytes()),
+                Some(Piece::Text(piece)) if self.byte_runs => {
+                    flush_byte_run(&mut bytes, &mut text);
+                    text.push_str(piece);
+                }
+                Some(Piece::Text(piece)) => bytes.extend_from_slice(piece.as_bytes()),
                 Some(Piece::Byte(b)) => bytes.push(*b),
                 Some(Piece::Control) | None => {}
             }
         }
-        let text = String::from_utf8_lossy(&bytes);
-        text.strip_prefix(' ').unwrap_or(&text).to_string()
+        if self.byte_runs {
+            flush_byte_run(&mut bytes, &mut text);
+        } else {
+            text = String::from_utf8_lossy(&bytes).into_owned();
+        }
+        match text.strip_prefix(' ') {
+            Some(rest) => rest.to_string(),
+            None => text,
+        }
     }
+}
+
+/// Appends a run of byte pieces as `ByteFallback` decodes it.
+fn flush_byte_run(bytes: &mut Vec<u8>, text: &mut String) {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => text.push_str(s),
+        Err(_) => text.extend(std::iter::repeat_n('\u{FFFD}', bytes.len())),
+    }
+    bytes.clear();
 }
 
 fn parse_piece(piece: &str) -> Piece {
@@ -140,6 +176,32 @@ mod tests {
         assert_eq!(tok.decode(&[1, 6, 7]), "hel\u{e9}");
         assert_eq!(tok.decode(&[]), "");
         assert_eq!(tok.decode(&[99]), "");
+    }
+
+    #[test]
+    fn a_byte_fallback_decoder_decodes_each_run_of_bytes_alone() {
+        let vocab = r#""model":{"type":"BPE","vocab":{"<unk>":0,"▁a":1,"b":2,"<0xC3>":3,"<0xA9>":4,"<0x41>":5,"<0xFF>":6}}"#;
+        let added = r#""added_tokens":[{"id":0,"content":"<unk>","special":true}]"#;
+        let plain = Tokenizer::from_json(format!("{{{added},{vocab}}}").as_bytes()).unwrap();
+        let runs = Tokenizer::from_json(
+            format!(
+                r#"{{{added},"decoder":{{"type":"Sequence","decoders":[{{"type":"Replace"}},{{"type":"ByteFallback"}},{{"type":"Fuse"}}]}},{vocab}}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        for tok in [&plain, &runs] {
+            assert_eq!(tok.decode(&[1, 3, 4, 2]), "a\u{e9}b");
+            // A special token between byte pieces doesn't end their run.
+            assert_eq!(tok.decode(&[3, 0, 4]), "\u{e9}");
+        }
+        // A run that isn't valid UTF-8 gives one replacement character per byte, the valid ones too.
+        assert_eq!(runs.decode(&[5, 6, 2]), "\u{FFFD}\u{FFFD}b");
+        assert_eq!(plain.decode(&[5, 6, 2]), "A\u{FFFD}b");
+        // Bytes on both sides of a text piece don't join.
+        assert_eq!(runs.decode(&[3, 2, 4]), "\u{FFFD}b\u{FFFD}");
+        assert_eq!(plain.decode(&[3, 2, 4]), "\u{FFFD}b\u{FFFD}");
+        assert_eq!(runs.decode(&[1]), "a");
     }
 
     #[test]
