@@ -2,8 +2,10 @@
 //! with the time of each step and a check that every thread count gives bit-identical output.
 //!
 //! ```text
-//! cargo bench --bench rtf -- MODEL_DIR LIST.tsv [--threads 1,6] [--seconds 2,5,10,20,30,60] [--runs 3] [--isa scalar|avx2]
+//! cargo bench --bench rtf -- MODEL LIST.tsv [--threads 1,6] [--seconds 2,5,10,20,30,60] [--runs 3] [--isa scalar|avx2] [--precision P]
 //! ```
+//!
+//! MODEL is what `Parakeet::load` takes. `--precision` applies when it isn't a pack.
 //!
 //! The clips are consecutive utterances of LIST.tsv (`id<TAB>wav path<TAB>text`, 16 kHz audio)
 //! joined end to end and cut to length.
@@ -13,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use notate::kernels::Isa;
 use notate::parakeet::Timings;
-use notate::{Options, Parakeet};
+use notate::{Options, Parakeet, Precision};
 
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
@@ -21,6 +23,7 @@ fn main() {
     let mut seconds = vec![2.0, 5.0, 10.0, 20.0, 30.0, 60.0];
     let mut runs = 3;
     let mut isa = None;
+    let mut precision = Precision::F32;
     let mut positional: Vec<String> = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -48,12 +51,15 @@ fn main() {
                     Isa::Avx2
                 })
             }
+            "--precision" => {
+                precision = Precision::from_name(&args.next().unwrap()).expect("a precision")
+            }
             _ => positional.push(arg),
         }
     }
     let [model_dir, list] = positional.as_slice() else {
         eprintln!(
-            "Usage: rtf MODEL_DIR LIST.tsv [--threads 1,6] [--seconds 2,5,...] [--runs 3] [--isa scalar|avx2]"
+            "Usage: rtf MODEL LIST.tsv [--threads 1,6] [--seconds 2,5,...] [--runs 3] [--isa scalar|avx2] [--precision P]"
         );
         std::process::exit(2);
     };
@@ -74,11 +80,16 @@ fn main() {
     let mut outputs: Vec<Vec<Vec<f32>>> = vec![Vec::new(); seconds.len()];
     for &t in &threads {
         let start = Instant::now();
-        let model = Parakeet::load(&PathBuf::from(model_dir), &Options { threads: t, isa })
-            .expect("the model loads");
+        let options = Options {
+            threads: t,
+            isa,
+            precision,
+        };
+        let model = Parakeet::load(&PathBuf::from(model_dir), &options).expect("the model loads");
         println!(
-            "{t} threads, {} kernels, loaded in {:.2} s",
+            "{t} threads, {} kernels, {} weights, loaded in {:.2} s",
             model.isa().name(),
+            model.precision().map_or("mixed", |p| p.name()),
             start.elapsed().as_secs_f64()
         );
         println!(
@@ -111,11 +122,12 @@ fn main() {
             if i + 1 == seconds.len() {
                 let total = timings.total().as_secs_f64();
                 println!("  steps of the {s:.0} s pass:");
-                for (name, d) in &timings.steps {
+                for ((name, d), calls) in timings.steps.iter().zip(&timings.calls) {
                     println!(
-                        "  {name:<16} {:>9.2} ms {:>5.1}%",
+                        "  {name:<16} {:>9.2} ms {:>5.1}% {calls:>6} calls {:>9.1} us each",
                         d.as_secs_f64() * 1e3,
-                        100.0 * d.as_secs_f64() / total
+                        100.0 * d.as_secs_f64() / total,
+                        d.as_secs_f64() * 1e6 / *calls as f64
                     );
                 }
             }

@@ -401,11 +401,13 @@ impl Gguf {
             .ok_or_else(|| Error::Model(format!("Tensor {name} is missing from the GGUF file.")))?
             .clone();
         if let Some(shape) = shape {
-            // Trailing (outer) dimensions of 1 are the same tensor.
+            // Dimensions of 1 at either end leave the same tensor, as a pointwise
+            // convolution's `[n, k, 1]` and a linear layer's `[n, k]` are.
             let got: Vec<usize> = info.shape();
             let strip = |s: &[usize]| -> Vec<usize> {
                 let first = s.iter().position(|&d| d != 1).unwrap_or(s.len());
-                s[first..].to_vec()
+                let last = s.iter().rposition(|&d| d != 1).map_or(first, |l| l + 1);
+                s[first..last].to_vec()
             };
             if strip(&got) != strip(shape) {
                 return Err(Error::Model(format!(

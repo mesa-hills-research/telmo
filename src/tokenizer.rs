@@ -99,6 +99,16 @@ impl Tokenizer {
         self.pieces.is_empty()
     }
 
+    /// Whether the vocabulary starts with these pieces (as written in the vocabulary, with
+    /// `▁` for spaces). Special tokens match anything.
+    pub fn has_pieces(&self, pieces: &[&str]) -> bool {
+        pieces.len() <= self.pieces.len()
+            && pieces
+                .iter()
+                .zip(&self.pieces)
+                .all(|(p, mine)| *mine == Piece::Control || parse_piece(p) == *mine)
+    }
+
     /// Joins the pieces of `ids` into text. Special tokens are left out, byte pieces are joined
     /// into UTF-8, and the space the first word's `▁` stands for is dropped.
     pub fn decode(&self, ids: &[u32]) -> String {
@@ -140,6 +150,8 @@ mod tests {
         assert_eq!(tok.decode(&[1, 6, 7]), "hel\u{e9}");
         assert_eq!(tok.decode(&[]), "");
         assert_eq!(tok.decode(&[99]), "");
+        assert!(tok.has_pieces(&["<unk>", "▁hel", "lo"]));
+        assert!(!tok.has_pieces(&["<unk>", "▁hel", "la"]));
     }
 
     #[test]

@@ -81,6 +81,68 @@ impl Value {
     }
 }
 
+impl Value {
+    /// The value as compact JSON text. Numbers are written as they were read.
+    pub fn to_json(&self) -> String {
+        let mut out = String::new();
+        self.write(&mut out);
+        out
+    }
+
+    fn write(&self, out: &mut String) {
+        match self {
+            Value::Null => out.push_str("null"),
+            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::Number(n) => out.push_str(n),
+            Value::String(s) => quote(s, out),
+            Value::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    item.write(out);
+                }
+                out.push(']');
+            }
+            Value::Object(members) => {
+                out.push('{');
+                for (i, (key, value)) in members.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    quote(key, out);
+                    out.push(':');
+                    value.write(out);
+                }
+                out.push('}');
+            }
+        }
+    }
+
+    /// A number value.
+    pub fn number(n: impl std::fmt::Display) -> Value {
+        Value::Number(n.to_string())
+    }
+}
+
+/// Writes `s` as a JSON string.
+fn quote(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
 /// Parses a whole document. Whitespace may surround the value, nothing else.
 pub fn parse(text: &[u8]) -> Result<Value> {
     let mut parser = Parser { text, pos: 0 };
@@ -365,6 +427,14 @@ mod tests {
         assert_eq!(ok("9007199254740993").as_u64(), Some(9007199254740993));
         assert_eq!(ok("1.5").as_u64(), None);
         assert_eq!(ok("-3").as_i64(), Some(-3));
+    }
+
+    #[test]
+    fn values_write_back_as_the_same_json() {
+        let text = br#"{"a":[1,-2.5e3,true,null],"b":"q\"uote\\ \n\u0001 \u00e9","c":{}}"#;
+        let value = parse(text).unwrap();
+        assert_eq!(parse(value.to_json().as_bytes()).unwrap(), value);
+        assert_eq!(Value::String("\u{1}".into()).to_json(), "\"\\u0001\"");
     }
 
     #[test]

@@ -3,9 +3,12 @@
 //! divided by the reference words.
 //!
 //! ```text
-//! cargo run --release --example wer -- MODEL_DIR LIST.tsv... [--threads N] [--limit N] [--seed S] [--out DIR] [--compare DIR]
+//! cargo run --release --example wer -- MODEL LIST.tsv... [--threads N] [--precision P] [--limit N] [--seed S] [--out DIR] [--compare DIR]
 //! cargo run --release --example wer -- --hyp HYP.tsv LIST.tsv [--compare DIR]
 //! ```
+//!
+//! MODEL is what `Parakeet::load` takes: a pack, a checkpoint directory or a GGUF file, the
+//! latter two converted in memory to `--precision`.
 //!
 //! A list has one utterance per line, `id<TAB>path to a 16 kHz WAV<TAB>reference text`.
 //! `--limit` scores a fixed random subset of each list (`--seed` picks it). `--out` writes the
@@ -25,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use notate::{Options, Parakeet};
+use notate::{Options, Parakeet, Precision};
 use score::Errors;
 
 struct Utterance {
@@ -73,6 +76,10 @@ fn run() -> Result<(), String> {
                     .parse()
                     .map_err(|_| "--seed takes a number")?
             }
+            "--precision" => {
+                options.precision = Precision::from_name(&value("--precision")?)
+                    .ok_or("--precision takes f32, f16, bf16, int8 or q8_0")?
+            }
             "--out" => out = Some(PathBuf::from(value("--out")?)),
             "--hyp" => hyp = Some(PathBuf::from(value("--hyp")?)),
             "--compare" => compare = Some(PathBuf::from(value("--compare")?)),
@@ -106,16 +113,17 @@ fn run() -> Result<(), String> {
     }
 
     if positional.len() < 2 {
-        return Err("Usage: wer MODEL_DIR LIST.tsv... [--threads N] [--limit N] [--seed S] [--out DIR] [--compare DIR], or wer --hyp HYP.tsv LIST.tsv".into());
+        return Err("Usage: wer MODEL LIST.tsv... [--threads N] [--precision P] [--limit N] [--seed S] [--out DIR] [--compare DIR], or wer --hyp HYP.tsv LIST.tsv".into());
     }
     let model_dir = positional.remove(0);
     let start = Instant::now();
     let model = Parakeet::load(&model_dir, &options).map_err(|e| e.to_string())?;
     eprintln!(
-        "Loaded in {:.1} s, {} threads, {} kernels.",
+        "Loaded in {:.1} s, {} threads, {} kernels, {} weights.",
         start.elapsed().as_secs_f64(),
         model.threads(),
-        model.isa().name()
+        model.isa().name(),
+        model.precision().map_or("mixed", |p| p.name())
     );
 
     for list in &positional {

@@ -7,6 +7,9 @@
 //! ```text
 //! PARAKEET_TDT_DIR=/path/to/parakeet-tdt-0.6b-v3 cargo test --release --test goldens -- --include-ignored
 //! ```
+//!
+//! With `PARAKEET_TDT_GGUF` set to NVIDIA's 8-bit GGUF file (with `tokenizer.json` beside it),
+//! the comparison of narrow weights covers that file too.
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +18,7 @@ use notate::json::{self, Value};
 use notate::kernels::Isa;
 use notate::parakeet::{DecodeTrace, Timings};
 use notate::safetensors::SafeTensors;
-use notate::{Options, Parakeet};
+use notate::{Options, Parakeet, Precision};
 
 /// Features may differ by this much (after normalization to unit variance). The reference
 /// computes its STFT in f32, and the rounding shows most in the lowest mel filters, which sum
@@ -74,10 +77,31 @@ fn clips() -> Vec<Clip> {
         .collect()
 }
 
+fn model_dir() -> PathBuf {
+    std::env::var_os("PARAKEET_TDT_DIR")
+        .expect("set PARAKEET_TDT_DIR to the model's directory to run this test")
+        .into()
+}
+
 fn model(isa: Option<Isa>, threads: usize) -> Parakeet {
-    let dir = std::env::var_os("PARAKEET_TDT_DIR")
-        .expect("set PARAKEET_TDT_DIR to the model's directory to run this test");
-    Parakeet::load(Path::new(&dir), &Options { threads, isa }).expect("the model loads")
+    let options = Options {
+        threads,
+        isa,
+        precision: Precision::F32,
+    };
+    Parakeet::load(&model_dir(), &options).expect("the model loads")
+}
+
+/// got . want / (||got|| ||want||).
+fn cosine(got: &[f32], want: &[f32]) -> f64 {
+    assert_eq!(got.len(), want.len());
+    let (mut dot, mut gg, mut ww) = (0f64, 0f64, 0f64);
+    for (&g, &w) in got.iter().zip(want) {
+        dot += g as f64 * w as f64;
+        gg += (g as f64).powi(2);
+        ww += (w as f64).powi(2);
+    }
+    dot / (gg.sqrt() * ww.sqrt())
 }
 
 /// ||got - want|| / ||want|| over the first `rows` rows of `width`.
@@ -282,4 +306,92 @@ fn the_scalar_kernels_give_the_same_tokens() {
         let transcript = model.transcribe(&clip.samples).unwrap();
         assert_eq!(transcript.text, clip.reference_text, "{}", clip.id);
     }
+}
+
+/// Runs every clip with narrow weights: each saved layer's cosine similarity with the reference,
+/// and whether the tokens equal the reference's.
+fn check_narrow(label: &str, model: &Parakeet) -> (f64, usize, usize) {
+    let mut worst = 1f64;
+    let mut same = 0;
+    let clips = clips();
+    let total = clips.len();
+    for mut clip in clips {
+        let st = &mut clip.tensors;
+        let features = model.features(&clip.samples).unwrap();
+        let mut line = format!("{label} {}:", clip.id);
+        let encoded = model.encode(
+            &features.data,
+            features.frames,
+            &mut Timings::default(),
+            &mut |name, _, x| {
+                if st.info(name).is_none() {
+                    return;
+                }
+                let (_, want) = f32s(st, name);
+                let cos = cosine(x, &want[..x.len()]);
+                line += &format!(" {name} {cos:.6}");
+                worst = worst.min(cos);
+            },
+        );
+        let tokens = model.decode(&encoded, &mut Timings::default(), None);
+        let ids: Vec<i64> = tokens.iter().map(|t| t.id as i64).collect();
+        let identical = ids == i64s(st, "tokens");
+        same += identical as usize;
+        eprintln!(
+            "{line} tokens {}",
+            if identical { "identical" } else { "differ" }
+        );
+        if !identical {
+            let text = model
+                .tokenizer()
+                .decode(&tokens.iter().map(|t| t.id).collect::<Vec<_>>());
+            eprintln!("  got  {text}\n  want {}", clip.reference_text);
+        }
+    }
+    eprintln!(
+        "{label}: worst layer cosine {worst:.6}, identical tokens on {same} of {total} clips"
+    );
+    (worst, same, total)
+}
+
+#[test]
+#[ignore = "needs the model files, see the top of this file"]
+fn narrow_weights_stay_close_to_the_reference() {
+    let mut sources: Vec<(String, PathBuf, Precision)> = [
+        Precision::F16,
+        Precision::Bf16,
+        Precision::Int8,
+        Precision::Q8_0,
+    ]
+    .into_iter()
+    .map(|p| (p.name().to_string(), model_dir(), p))
+    .collect();
+    if let Some(gguf) = std::env::var_os("PARAKEET_TDT_GGUF") {
+        sources.push(("gguf-q8_0".into(), gguf.into(), Precision::Q8_0));
+    }
+    let mut failures = Vec::new();
+    for (label, path, precision) in sources {
+        let options = Options {
+            threads: 6,
+            isa: None,
+            precision,
+        };
+        let model = Parakeet::load(&path, &options).expect("the model loads");
+        assert_eq!(model.precision(), Some(precision));
+        let (worst, same, total) = check_narrow(&label, &model);
+        // 16-bit weights keep every layer within 0.999 of the reference. 8-bit weights lose
+        // more in the last layer, whose output has a few channels far larger than the rest.
+        let floor = if precision.value_bytes() == 2 {
+            0.999
+        } else {
+            0.995
+        };
+        if worst < floor {
+            failures.push(format!("{label}: a layer's cosine similarity is {worst}"));
+        }
+        if 2 * same < total {
+            failures.push(format!("{label}: tokens differ on most clips"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
 }
