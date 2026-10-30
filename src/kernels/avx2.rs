@@ -15,6 +15,7 @@ pub(crate) fn kernels() -> Kernels {
         tile_rows: TILE_ROWS,
         tile,
         widen,
+        tile_narrow: Some(tile_narrow),
         store: |acc, c, bias, act, scale, accumulate| unsafe {
             store(acc, c, bias, act, scale, accumulate)
         },
@@ -99,6 +100,136 @@ unsafe fn tile_rows<const R: usize>(
     }
     for r in 0..R {
         unsafe {
+            _mm256_storeu_ps(out.add(r * PANEL), acc0[r]);
+            _mm256_storeu_ps(out.add(r * PANEL + 8), acc1[r]);
+        }
+    }
+}
+
+/// # Safety
+/// As for `tile`, with `b` holding `k` runs of 16 narrow values and `scales` as `widen` takes
+/// them, and the CPU must have AVX2, FMA and F16C.
+unsafe fn tile_narrow(
+    precision: Precision,
+    k: usize,
+    a: *const f32,
+    lda: usize,
+    rows: usize,
+    b: *const u8,
+    scales: *const f32,
+    out: *mut f32,
+    load: bool,
+) {
+    macro_rules! rows {
+        ($p:expr) => {
+            match rows {
+                6 => tile_narrow_rows::<6, { $p }>(k, a, lda, b, scales, out, load),
+                5 => tile_narrow_rows::<5, { $p }>(k, a, lda, b, scales, out, load),
+                4 => tile_narrow_rows::<4, { $p }>(k, a, lda, b, scales, out, load),
+                3 => tile_narrow_rows::<3, { $p }>(k, a, lda, b, scales, out, load),
+                2 => tile_narrow_rows::<2, { $p }>(k, a, lda, b, scales, out, load),
+                1 => tile_narrow_rows::<1, { $p }>(k, a, lda, b, scales, out, load),
+                _ => unreachable!("tiles have 1 to 6 rows"),
+            }
+        };
+    }
+    // SAFETY: passed on from the caller.
+    unsafe {
+        match precision {
+            Precision::F32 => unreachable!("f32 weights use the plain tile"),
+            Precision::F16 => rows!(F16),
+            Precision::Bf16 => rows!(BF16),
+            Precision::Int8 => rows!(INT8),
+            Precision::Q8_0 => rows!(Q8_0),
+        }
+    }
+}
+
+const F16: u8 = 0;
+const BF16: u8 = 1;
+const INT8: u8 = 2;
+const Q8_0: u8 = 3;
+
+/// An `R x 16` register tile over narrow weights, each input's 16 values widened once in
+/// registers (int8 times its scale) and shared by the `R` rows. The values and the order of the
+/// fused multiply-adds are those of `widen` followed by `tile_rows`, so the sums are identical.
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn tile_narrow_rows<const R: usize, const P: u8>(
+    k: usize,
+    a: *const f32,
+    lda: usize,
+    b: *const u8,
+    scales: *const f32,
+    out: *mut f32,
+    load: bool,
+) {
+    let mut acc0 = [_mm256_setzero_ps(); R];
+    let mut acc1 = [_mm256_setzero_ps(); R];
+    // SAFETY: the caller guarantees `out` holds R rows of 16, `a` R rows of `k` values, `b`
+    // `k` runs of 16 values, and the scales.
+    unsafe {
+        if load {
+            for r in 0..R {
+                acc0[r] = _mm256_loadu_ps(out.add(r * PANEL));
+                acc1[r] = _mm256_loadu_ps(out.add(r * PANEL + 8));
+            }
+        }
+        let mut rows = [a; R];
+        for (r, row) in rows.iter_mut().enumerate() {
+            *row = a.add(r * lda);
+        }
+        let step = if P == F16 || P == BF16 { 32 } else { 16 };
+        let (mut s0, mut s1) = (_mm256_set1_ps(1.0), _mm256_set1_ps(1.0));
+        if P == INT8 {
+            s0 = _mm256_loadu_ps(scales);
+            s1 = _mm256_loadu_ps(scales.add(8));
+        }
+        let mut i = 0;
+        while i < k {
+            let end = if P == Q8_0 {
+                let s = scales.add(i / Q8_BLOCK * PANEL);
+                s0 = _mm256_loadu_ps(s);
+                s1 = _mm256_loadu_ps(s.add(8));
+                (i + Q8_BLOCK).min(k)
+            } else {
+                k
+            };
+            while i < end {
+                let p = b.add(i * step);
+                let (w0, w1) = if P == F16 {
+                    let p = p as *const __m128i;
+                    (
+                        _mm256_cvtph_ps(_mm_loadu_si128(p)),
+                        _mm256_cvtph_ps(_mm_loadu_si128(p.add(1))),
+                    )
+                } else if P == BF16 {
+                    let p = p as *const __m128i;
+                    (
+                        _mm256_castsi256_ps(_mm256_slli_epi32::<16>(_mm256_cvtepu16_epi32(
+                            _mm_loadu_si128(p),
+                        ))),
+                        _mm256_castsi256_ps(_mm256_slli_epi32::<16>(_mm256_cvtepu16_epi32(
+                            _mm_loadu_si128(p.add(1)),
+                        ))),
+                    )
+                } else {
+                    let q0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                        p as *const __m128i,
+                    )));
+                    let q1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                        p.add(8) as *const __m128i
+                    )));
+                    (_mm256_mul_ps(q0, s0), _mm256_mul_ps(q1, s1))
+                };
+                for r in 0..R {
+                    let av = _mm256_broadcast_ss(&*rows[r].add(i));
+                    acc0[r] = _mm256_fmadd_ps(av, w0, acc0[r]);
+                    acc1[r] = _mm256_fmadd_ps(av, w1, acc1[r]);
+                }
+                i += 1;
+            }
+        }
+        for r in 0..R {
             _mm256_storeu_ps(out.add(r * PANEL), acc0[r]);
             _mm256_storeu_ps(out.add(r * PANEL + 8), acc1[r]);
         }

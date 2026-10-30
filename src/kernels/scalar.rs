@@ -9,6 +9,7 @@ pub(crate) fn kernels() -> Kernels {
         tile_rows: TILE_ROWS,
         tile,
         widen,
+        tile_narrow: None,
         store,
         layer_norm,
         softmax,

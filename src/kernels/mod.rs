@@ -360,6 +360,24 @@ pub struct Kernels {
         scales: *const f32,
         out: *mut f32,
     ),
+    /// Like `tile`, reading narrow weights straight from their panel (`k_stride` 16) and
+    /// widening them in registers with the scales `widen` takes. Used when all rows fit in one
+    /// tile, where widening into a buffer first would cost more than the product. It must give
+    /// exactly the sums of `tile` over the widened values. Instruction sets without it widen
+    /// into a buffer for every size.
+    tile_narrow: Option<
+        unsafe fn(
+            precision: Precision,
+            k: usize,
+            a: *const f32,
+            lda: usize,
+            rows: usize,
+            b: *const u8,
+            scales: *const f32,
+            out: *mut f32,
+            load: bool,
+        ),
+    >,
     /// Applies the epilogue to one tile row and stores `cols` values.
     store: fn(
         acc: &[f32],
@@ -453,11 +471,18 @@ impl Kernels {
         }
         let vb = b.precision.value_bytes();
         let blocks = k.div_ceil(Q8_BLOCK);
-        // Narrow weights are widened a block of KC inputs at a time into this buffer, which
+        // With rows for one tile only, narrow weights are widened in registers as the tile
+        // reads them, since each value is used once.
+        let direct = if narrow && m <= self.tile_rows {
+            self.tile_narrow
+        } else {
+            None
+        };
+        // Otherwise they are widened a block of KC inputs at a time into this buffer, which
         // stays in L1 while every row passes over it. Widening is exact (or, for int8, the same
         // rounded product on every instruction set), so the sums equal those of f32 weights
         // holding the widened values.
-        let mut wide = if narrow {
+        let mut wide = if narrow && direct.is_none() {
             vec![0f32; KC * PANEL]
         } else {
             Vec::new()
@@ -473,12 +498,30 @@ impl Kernels {
             let mut k0 = 0;
             while k0 < k {
                 let kc = (k - k0).min(KC);
-                let (bp, k_stride) = if narrow {
-                    let scales = match b.precision {
-                        Precision::Int8 => &b.scales[p * PANEL..(p + 1) * PANEL],
-                        Precision::Q8_0 => &b.scales[(p * blocks + k0 / Q8_BLOCK) * PANEL..],
-                        _ => &[],
+                let scales = match b.precision {
+                    Precision::Int8 => &b.scales[p * PANEL..(p + 1) * PANEL],
+                    Precision::Q8_0 => &b.scales[(p * blocks + k0 / Q8_BLOCK) * PANEL..],
+                    _ => &[],
+                };
+                if let Some(tile_narrow) = direct {
+                    // SAFETY: as for `widen` below, and `a` holds `m` rows of `k` values.
+                    unsafe {
+                        tile_narrow(
+                            b.precision,
+                            kc,
+                            a.as_ptr().add(k0),
+                            lda,
+                            m,
+                            b.data.as_ptr().add((p * k + k0) * PANEL * vb),
+                            scales.as_ptr(),
+                            partial.as_mut_ptr(),
+                            k0 > 0,
+                        )
                     };
+                    k0 += kc;
+                    continue;
+                }
+                let (bp, k_stride) = if narrow {
                     // SAFETY: `PackedWeights` holds `k` runs of 16 values per panel, and the
                     // scales indexed above. `wide` holds KC runs.
                     unsafe {
@@ -840,7 +883,13 @@ mod tests {
     fn narrow_weights_give_the_sums_of_their_widened_values() {
         let pool = Pool::new(3);
         for kernels in all_kernels() {
-            for &(m, k, n) in &[(1, 64, 20), (7, 288, 33), (13, 544, 16), (6, 32, 5)] {
+            for &(m, k, n) in &[
+                (1, 64, 20),
+                (7, 288, 33),
+                (13, 544, 16),
+                (6, 32, 5),
+                (3, 544, 40),
+            ] {
                 let a = random(m * k, 21);
                 let w: Vec<f32> = random(n * k, 22)
                     .iter()
@@ -871,17 +920,18 @@ mod tests {
                         kernels.isa()
                     );
                     let want = reference(&a, m, k, &w, n, &epi, &[]);
-                    // Rounding errors of the weights add up over the k inputs.
-                    let tol = match precision {
-                        Precision::F16 => 2e-3,
-                        Precision::Bf16 => 2e-2,
-                        _ => 0.01 * (k as f32).sqrt(),
+                    // Rounding errors of the weights add up over the k inputs, in proportion
+                    // to the largest weight of the output's row.
+                    let unit = match precision {
+                        Precision::F16 => 1e-3,
+                        Precision::Bf16 => 8e-3,
+                        _ => 1e-2,
                     };
-                    for (g, w) in c1.iter().zip(&want) {
-                        assert!(
-                            (g - w).abs() <= tol * (1.0 + w.abs()),
-                            "{precision}: {g} vs {w}"
-                        );
+                    for (i, (g, x)) in c1.iter().zip(&want).enumerate() {
+                        let row = &w[(i % n) * k..(i % n + 1) * k];
+                        let wmax = row.iter().fold(0f32, |m, v| m.max(v.abs()));
+                        let tol = unit * (k as f32).sqrt() * wmax;
+                        assert!((g - x).abs() <= tol, "{precision}: {g} vs {x}");
                     }
                 }
             }
