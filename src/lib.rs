@@ -13,6 +13,7 @@ pub mod pack;
 pub mod parakeet;
 pub mod quant;
 pub mod region;
+pub mod resample;
 pub mod safetensors;
 pub mod source;
 pub mod stream;
