@@ -1,0 +1,23 @@
+[package]
+name = "dicta"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Speech recognition on the CPU in pure Rust"
+readme = "README.md"
+keywords = ["speech", "asr", "transcription", "parakeet"]
+categories = ["multimedia::audio", "science"]
+publish = false
+
+[lib]
+name = "dicta"
+
+[dependencies]
+
+[profile.release]
+debug = "line-tables-only"
+
+# The golden tests run the whole model, which is far too slow without optimization.
+[profile.test]
+opt-level = 3
+debug = "line-tables-only"
