@@ -12,7 +12,7 @@ enum Piece {
     Text(String),
     /// A byte-fallback piece such as `<0x0A>`.
     Byte(u8),
-    /// An added token such as `<unk>` or a language tag, left out of the text.
+    /// An added token marked special, such as `<unk>` or `<blank>`, left out of the text.
     Control,
 }
 
@@ -54,13 +54,18 @@ impl Tokenizer {
                     .and_then(|i| i.as_u64())
                     .ok_or_else(|| bad("An added token has no id."))?
                     as usize;
-                added.push(id);
+                let content = token.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                let special = token
+                    .get("special")
+                    .and_then(|s| s.as_bool())
+                    .unwrap_or(true);
+                added.push((id, special, content));
             }
         }
         let size = entries
             .iter()
             .map(|e| e.0)
-            .chain(added.iter().copied())
+            .chain(added.iter().map(|a| a.0))
             .max()
             .map_or(0, |m| m + 1);
         if size > 1 << 20 {
@@ -74,8 +79,13 @@ impl Tokenizer {
             }
             pieces[id] = parse_piece(piece);
         }
-        for id in added {
-            pieces[id] = Piece::Control;
+        // Added tokens that aren't special, such as the digits, are text like any piece.
+        for (id, special, content) in added {
+            pieces[id] = if special {
+                Piece::Control
+            } else {
+                parse_piece(content)
+            };
         }
         Ok(Tokenizer { pieces })
     }
@@ -89,7 +99,7 @@ impl Tokenizer {
         self.pieces.is_empty()
     }
 
-    /// Joins the pieces of `ids` into text. Added tokens are left out, byte pieces are joined
+    /// Joins the pieces of `ids` into text. Special tokens are left out, byte pieces are joined
     /// into UTF-8, and the space the first word's `▁` stands for is dropped.
     pub fn decode(&self, ids: &[u32]) -> String {
         let mut bytes = Vec::new();
@@ -121,11 +131,12 @@ mod tests {
 
     #[test]
     fn pieces_join_into_words() {
-        let json = r#"{"added_tokens":[{"id":0,"content":"<unk>"},{"id":5,"content":"<blank>"}],
-            "model":{"type":"BPE","vocab":{"<unk>":0,"▁hel":1,"lo":2,"▁wor":3,"ld,":4,"<0xC3>":6,"<0xA9>":7}}}"#;
+        let json = r#"{"added_tokens":[{"id":0,"content":"<unk>","special":true},{"id":5,"content":"<blank>","special":true},{"id":8,"content":"7","special":false}],
+            "model":{"type":"BPE","vocab":{"<unk>":0,"▁hel":1,"lo":2,"▁wor":3,"ld,":4,"<0xC3>":6,"<0xA9>":7,"7":8}}}"#;
         let tok = Tokenizer::from_json(json.as_bytes()).unwrap();
-        assert_eq!(tok.len(), 8);
+        assert_eq!(tok.len(), 9);
         assert_eq!(tok.decode(&[1, 2, 5, 3, 4, 0]), "hello world,");
+        assert_eq!(tok.decode(&[3, 8, 8]), "wor77");
         assert_eq!(tok.decode(&[1, 6, 7]), "hel\u{e9}");
         assert_eq!(tok.decode(&[]), "");
         assert_eq!(tok.decode(&[99]), "");
