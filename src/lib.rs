@@ -20,6 +20,7 @@ pub mod source;
 pub mod stream;
 pub mod threads;
 pub mod tokenizer;
+pub mod vad;
 pub mod wav;
 
 pub use error::{Error, Result};

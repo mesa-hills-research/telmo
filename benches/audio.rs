@@ -8,6 +8,7 @@
 use std::time::Instant;
 
 use notate::resample::Resampler;
+use notate::vad::{Vad, VadConfig};
 
 const SECONDS: usize = 60;
 const RUNS: usize = 3;
@@ -26,6 +27,15 @@ fn main() {
         });
         report(&format!("resample {from} Hz to {to} Hz"), per_second);
     }
+
+    let audio = noise(16000 * SECONDS);
+    let per_second = best_of(|| {
+        let mut vad = Vad::new(VadConfig::default());
+        for block in audio.chunks(320) {
+            std::hint::black_box(vad.push(block));
+        }
+    });
+    report("voice activity", per_second);
 }
 
 /// The best time of `RUNS` runs of `f`, in seconds per second of audio.
