@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use notate::kernels::Isa;
 use notate::parakeet::Timings;
-use notate::{Options, Parakeet};
+use notate::{Model, Options};
 
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
@@ -74,10 +74,11 @@ fn main() {
     let mut outputs: Vec<Vec<Vec<f32>>> = vec![Vec::new(); seconds.len()];
     for &t in &threads {
         let start = Instant::now();
-        let model = Parakeet::load(&PathBuf::from(model_dir), &Options { threads: t, isa })
+        let model = Model::load(&PathBuf::from(model_dir), &Options { threads: t, isa })
             .expect("the model loads");
         println!(
-            "{t} threads, {} kernels, loaded in {:.2} s",
+            "{}, {t} threads, {} kernels, loaded in {:.2} s",
+            model.name(),
             model.isa().name(),
             start.elapsed().as_secs_f64()
         );
@@ -97,7 +98,10 @@ fn main() {
                 }
             }
             let (elapsed, timings) = best.unwrap();
-            let decoder = timings.get("enc_proj") + timings.get("predict") + timings.get("joint");
+            let decoder = timings.get("enc_proj")
+                + timings.get("predict")
+                + timings.get("joint")
+                + timings.get("ctc_head");
             let encoder =
                 timings.total() - decoder - timings.get("features") - timings.get("detokenize");
             println!(
@@ -120,14 +124,22 @@ fn main() {
                 }
             }
             // The encoder output, to compare across thread counts.
-            let features = model.features(samples).unwrap();
-            let encoded = model.encode(
-                &features.data,
-                features.frames,
-                &mut Timings::default(),
-                &mut |_, _, _| {},
-            );
-            outputs[i].push(encoded.data);
+            let encoded = match &model {
+                Model::Parakeet(m) => {
+                    let features = m.features(samples).unwrap();
+                    let mut timings = Timings::default();
+                    m.encode(&features.data, features.frames, &mut timings, &mut |_, _, _| {})
+                        .data
+                }
+                Model::Granite(m) => {
+                    let features = m.features(samples).unwrap();
+                    let mut timings = Timings::default();
+                    m.encode(&features.data, features.frames, &mut timings, &mut |_, _, _| {})
+                        .unwrap()
+                        .data
+                }
+            };
+            outputs[i].push(encoded);
         }
     }
     let identical = outputs.iter().all(|per_threads| {

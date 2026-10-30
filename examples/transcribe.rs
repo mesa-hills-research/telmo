@@ -5,14 +5,15 @@
 //! ```
 //!
 //! MODEL_DIR holds `model.safetensors`, `config.json` and `tokenizer.json` of
-//! nvidia/parakeet-tdt-0.6b-v3. The audio must be 16 kHz.
+//! nvidia/parakeet-tdt-0.6b-v3 or ibm-granite/granite-speech-5.0-470m-turboctc. The audio must be
+//! 16 kHz.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use notate::kernels::Isa;
-use notate::{Options, Parakeet};
+use notate::{Model, Options};
 
 fn main() -> ExitCode {
     match run() {
@@ -61,10 +62,11 @@ fn run() -> Result<(), String> {
     let model_dir = paths.remove(0);
 
     let start = Instant::now();
-    let model = Parakeet::load(&model_dir, &options).map_err(|e| e.to_string())?;
+    let model = Model::load(&model_dir, &options).map_err(|e| e.to_string())?;
     let load = start.elapsed();
     eprintln!(
-        "Loaded in {:.2} s, {} threads, {} kernels, {:.0} MB of weights.",
+        "Loaded {} in {:.2} s, {} threads, {} kernels, {:.0} MB of weights.",
+        model.name(),
         load.as_secs_f64(),
         model.threads(),
         model.isa().name(),

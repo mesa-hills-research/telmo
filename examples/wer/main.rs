@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use notate::{Options, Parakeet};
+use notate::{Model, Options};
 use score::Errors;
 
 struct Utterance {
@@ -110,9 +110,10 @@ fn run() -> Result<(), String> {
     }
     let model_dir = positional.remove(0);
     let start = Instant::now();
-    let model = Parakeet::load(&model_dir, &options).map_err(|e| e.to_string())?;
+    let model = Model::load(&model_dir, &options).map_err(|e| e.to_string())?;
     eprintln!(
-        "Loaded in {:.1} s, {} threads, {} kernels.",
+        "Loaded {} in {:.1} s, {} threads, {} kernels.",
+        model.name(),
         start.elapsed().as_secs_f64(),
         model.threads(),
         model.isa().name()
