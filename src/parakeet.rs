@@ -310,21 +310,6 @@ pub struct Parakeet {
     precision: Option<Precision>,
 }
 
-/// The precision a pack's weight matrices are in, if they share one.
-fn pack_precision(pack: &Pack) -> Option<Precision> {
-    let mut found = None;
-    for entry in pack.entries() {
-        if let crate::pack::Kind::Matrix { precision, .. } = entry.kind {
-            match found {
-                None => found = Some(precision),
-                Some(p) if p != precision => return None,
-                _ => {}
-            }
-        }
-    }
-    found
-}
-
 /// Transposes a row-major `[rows, cols]` matrix.
 fn transpose(w: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let mut out = vec![0f32; rows * cols];
@@ -670,30 +655,6 @@ pub fn convert_path(path: &Path, precision: Precision, sink: &mut dyn Sink) -> R
     convert(&mut src, config.as_bytes(), &tokenizer, precision, sink)
 }
 
-/// Pack metadata describing a conversion.
-pub fn pack_metadata(path: &Path, precision: Precision) -> Vec<(String, String)> {
-    let source = path
-        .file_name()
-        .map_or(String::new(), |n| n.to_string_lossy().into_owned());
-    let bytes = if path.is_dir() {
-        std::fs::metadata(path.join("model.safetensors")).map(|m| m.len())
-    } else {
-        std::fs::metadata(path).map(|m| m.len())
-    };
-    vec![
-        ("precision".into(), precision.name().into()),
-        ("source".into(), source),
-        (
-            "source_bytes".into(),
-            bytes.map_or(String::new(), |b| b.to_string()),
-        ),
-        (
-            "engine".into(),
-            format!("notate {}", env!("CARGO_PKG_VERSION")),
-        ),
-    ]
-}
-
 impl Parakeet {
     /// Loads a model from a pack file, a Hugging Face checkpoint directory (`model.safetensors`,
     /// `config.json` and `tokenizer.json`) or NVIDIA's GGUF file (with `tokenizer.json` beside
@@ -704,7 +665,10 @@ impl Parakeet {
         if is_pack {
             return Parakeet::from_pack(&Pack::open(path)?, options);
         }
-        let mut sink = MemorySink::new(PACK_MODEL, pack_metadata(path, options.precision));
+        let mut sink = MemorySink::new(
+            PACK_MODEL,
+            crate::pack::metadata_for(path, options.precision),
+        );
         convert_path(path, options.precision, &mut sink)?;
         Parakeet::from_pack(&sink.finish()?, options)
     }
@@ -812,7 +776,7 @@ impl Parakeet {
             tokenizer,
             kernels,
             pool: Pool::new(options.threads),
-            precision: pack_precision(pack),
+            precision: pack.precision(),
         })
     }
 

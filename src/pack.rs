@@ -323,10 +323,50 @@ impl Pack {
         }
     }
 
+    /// The precision of the weight matrices, if they share one.
+    pub fn precision(&self) -> Option<Precision> {
+        let mut found = None;
+        for entry in &self.entries {
+            if let Kind::Matrix { precision, .. } = entry.kind {
+                match found {
+                    None => found = Some(precision),
+                    Some(p) if p != precision => return None,
+                    _ => {}
+                }
+            }
+        }
+        found
+    }
+
     /// Bytes of all entries' data.
     pub fn data_bytes(&self) -> usize {
         self.entries.iter().map(Entry::size).sum()
     }
+}
+
+/// Metadata describing the conversion of the model at `path` (a checkpoint directory or a
+/// GGUF file) into a pack.
+pub fn metadata_for(path: &Path, precision: Precision) -> Vec<(String, String)> {
+    let source = path
+        .file_name()
+        .map_or(String::new(), |n| n.to_string_lossy().into_owned());
+    let bytes = if path.is_dir() {
+        std::fs::metadata(path.join("model.safetensors")).map(|m| m.len())
+    } else {
+        std::fs::metadata(path).map(|m| m.len())
+    };
+    vec![
+        ("precision".into(), precision.name().into()),
+        ("source".into(), source),
+        (
+            "source_bytes".into(),
+            bytes.map_or(String::new(), |b| b.to_string()),
+        ),
+        (
+            "engine".into(),
+            format!("notate {}", env!("CARGO_PKG_VERSION")),
+        ),
+    ]
 }
 
 fn bad(message: &str) -> Error {
