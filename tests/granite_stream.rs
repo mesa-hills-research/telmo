@@ -24,8 +24,9 @@ fn golden_dir() -> PathBuf {
 fn model_in(precision: Precision) -> Granite {
     let dir = std::env::var_os("GRANITE_SPEECH_DIR")
         .expect("set GRANITE_SPEECH_DIR to the model's directory to run this test");
+    let threads = std::env::var("GRANITE_STREAM_THREADS").map_or(6, |t| t.parse().unwrap());
     let options = Options {
-        threads: 6,
+        threads,
         isa: None,
         precision,
     };
@@ -61,12 +62,16 @@ struct Offline {
 }
 
 fn offline(model: &Granite, samples: &[f32]) -> Offline {
-    let features = model.features(samples).unwrap();
+    offline_from_features(model, &model.features(samples).unwrap().data)
+}
+
+fn offline_from_features(model: &Granite, features: &[f32]) -> Offline {
+    let rows = features.len() / (4 * model.config().n_mels);
     let mut layers: Vec<Vec<f32>> = Vec::new();
     let encoded = model
         .encode(
-            &features.data,
-            features.frames,
+            features,
+            rows,
             &mut Timings::default(),
             &mut |name, _, x| {
                 if name.starts_with("layer.") {
@@ -104,9 +109,16 @@ fn relative_l2(got: &[f32], want: &[f32]) -> f64 {
 
 /// Pushes `samples` in pieces of 0.25 to 1 s, a fixed sequence from `seed`, with an update after
 /// each, the last one finished.
-fn stream_in_pieces(model: &Granite, samples: &[f32], seed: u64, lag: usize) -> GraniteStream {
+fn stream_in_pieces(
+    model: &Granite,
+    samples: &[f32],
+    seed: u64,
+    lag: Option<usize>,
+) -> GraniteStream {
     let mut stream = GraniteStream::new(model);
-    stream.set_freeze_lag(lag);
+    if let Some(lag) = lag {
+        stream.set_freeze_lag(lag);
+    }
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let mut at = 0;
     while at < samples.len() {
@@ -231,19 +243,56 @@ fn streaming_in_pieces_stays_close_to_offline() {
     for (id, samples) in clips() {
         let reference = offline(&model, &samples);
         for &lag in &lags {
-            let stream = stream_in_pieces(&model, &samples, 1, lag);
+            let stream = stream_in_pieces(&model, &samples, 1, Some(lag));
             let c = compare(&model, &stream, &reference);
             eprintln!("{}", describe(&format!("{id} lag {lag}"), &c));
         }
-        let stream = stream_in_pieces(&model, &samples, 1, 0);
+        let stream = stream_in_pieces(&model, &samples, 1, None);
         let c = compare(&model, &stream, &reference);
         eprintln!("{}", describe(&id, &c));
         if stream.frozen() == 0 {
-            // Within one 10.24 s block nothing freezes, and only the running peak of the
-            // features differs from offline.
+            // Within one 10.24 s block nothing freezes, and the finished update leaves every row
+            // floored at the utterance's peak, so the result is the offline one.
+            let same = stream
+                .encoder_output(&model, 0, c.frames)
+                .iter()
+                .zip(&reference.encoded)
+                .all(|(a, b)| a.to_bits() == b.to_bits());
+            assert!(same, "{id}: the encoder output differs");
             assert_eq!(stream.frame_ids(), &reference.ids[..], "{id}");
         }
     }
+}
+
+/// Words of a transcript, lowercased and without punctuation.
+fn words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '\'')
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// The word edit distance between two transcripts.
+fn word_distance(a: &str, b: &str) -> usize {
+    let (a, b) = (words(a), words(b));
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, wa) in a.iter().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, wb) in b.iter().enumerate() {
+            let next = (row[j] + 1)
+                .min(row[j + 1] + 1)
+                .min(diagonal + usize::from(wa != wb));
+            diagonal = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()]
 }
 
 #[test]
@@ -251,18 +300,26 @@ fn streaming_in_pieces_stays_close_to_offline() {
 fn long_joined_audio_streams_close_to_offline() {
     let list = std::env::var_os("GRANITE_STREAM_LIST")
         .expect("set GRANITE_STREAM_LIST to a LibriSpeech list");
+    let lags: Vec<usize> = std::env::var("GRANITE_STREAM_LAGS")
+        .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
+        .unwrap_or_else(|_| vec![0, 16, 32]);
+    let lengths: Vec<usize> = std::env::var("GRANITE_STREAM_SECONDS")
+        .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
+        .unwrap_or_else(|_| vec![30, 45, 60, 75, 90]);
     let text = std::fs::read_to_string(&list).unwrap();
-    let mut rows: Vec<(&str, &str)> = text
+    let mut rows: Vec<(&str, &str, &str)> = text
         .lines()
         .filter_map(|l| {
             let mut f = l.split('\t');
-            Some((f.next()?, f.next()?))
+            Some((f.next()?, f.next()?, f.next()?))
         })
         .collect();
     rows.sort();
     let model = model_in(Precision::F32);
+    // Clips of 30 to 90 s, each a run of consecutive utterances cut to length.
+    let mut totals = vec![(0usize, 0usize, 0usize, 0usize, 0usize, 0usize); lags.len()];
     let mut next = 0;
-    for (n, seconds) in [30usize, 45, 60, 75, 90].into_iter().enumerate() {
+    for (n, &seconds) in lengths.iter().enumerate() {
         let mut samples = Vec::new();
         while samples.len() < seconds * 16000 {
             let audio = notate::wav::read(Path::new(rows[next].1)).unwrap();
@@ -271,10 +328,52 @@ fn long_joined_audio_streams_close_to_offline() {
         }
         samples.truncate(seconds * 16000);
         let reference = offline(&model, &samples);
-        for lag in [0, 16] {
-            let stream = stream_in_pieces(&model, &samples, n as u64 + 7, lag);
+        let offline_words = words(&reference.text).len();
+        for (k, &lag) in lags.iter().enumerate() {
+            let stream = stream_in_pieces(&model, &samples, n as u64 + 7, Some(lag));
             let c = compare(&model, &stream, &reference);
-            eprintln!("{}", describe(&format!("{seconds} s, lag {lag}"), &c));
+            let distance = word_distance(&stream.text(&model), &reference.text);
+            eprintln!(
+                "{}, {distance} of {offline_words} words differ",
+                describe(&format!("{seconds} s, lag {lag}"), &c)
+            );
+            // The offline encoder over the stream's own feature rows leaves only the freezing.
+            let own = offline_from_features(&model, stream.features());
+            let f = compare(&model, &stream, &own);
+            eprintln!(
+                "  against offline on the same features: {:.2}% of frame ids equal, text {}, frozen blocks worst L2 {:.2e}",
+                100.0 * f.same_ids as f64 / f.frames as f64,
+                if f.same_text { "equal" } else { "differs" },
+                f.frozen_l2[2..].iter().fold(0f64, |m, &e| m.max(e))
+            );
+            eprintln!(
+                "  frozen blocks L2 by block: {}",
+                c.frozen_l2[2..]
+                    .iter()
+                    .map(|e| format!("{e:.1e}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let t = &mut totals[k];
+            t.0 += c.same_ids;
+            t.1 += c.frames;
+            t.2 += usize::from(c.same_text);
+            t.3 += distance;
+            t.4 += offline_words;
+            t.5 += f.same_ids;
         }
+    }
+    for (lag, t) in lags.iter().zip(&totals) {
+        eprintln!(
+            "lag {lag}: {:.2}% of {} frame ids equal ({:.2}% against offline on the same features), text equal on {} of {} clips, {} of {} words differ ({:.2}%)",
+            100.0 * t.0 as f64 / t.1 as f64,
+            t.1,
+            100.0 * t.5 as f64 / t.1 as f64,
+            t.2,
+            lengths.len(),
+            t.3,
+            t.4,
+            100.0 * t.3 as f64 / t.4 as f64
+        );
     }
 }

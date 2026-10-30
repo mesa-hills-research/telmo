@@ -19,6 +19,9 @@ use crate::granite::{Granite, Scratch, ctc_tokens, timed};
 use crate::granite_features::{FrameBuffers, GraniteFrontEnd};
 use crate::parakeet::Timings;
 
+/// Encoder frames the next block must have before the one before it freezes, unless set.
+const DEFAULT_FREEZE_LAG: usize = 16;
+
 /// One layer's cached activations.
 #[derive(Default)]
 struct LayerCache {
@@ -38,9 +41,13 @@ pub struct GraniteStream {
     /// log10 mel energies of every frame computed, before the floor, `[frames, n_mels]`.
     logs: Vec<f32>,
     peak: f32,
+    /// The peak the cached feature rows were floored with.
+    floor_peak: f32,
     finished: bool,
     /// Feature rows encoded so far, the first layer's input frames.
     rows: usize,
+    /// The feature rows, `[rows, width]`.
+    features: Vec<f32>,
     /// The input projection of every row, `[rows, d_model]`.
     input: Vec<f32>,
     layers: Vec<LayerCache>,
@@ -72,12 +79,14 @@ impl GraniteStream {
             samples: Vec::new(),
             logs: Vec::new(),
             peak: f32::NEG_INFINITY,
+            floor_peak: f32::NEG_INFINITY,
             finished: false,
             rows: 0,
+            features: Vec::new(),
             input: Vec::new(),
             layers: (0..c.layers).map(|_| LayerCache::default()).collect(),
             frozen: 0,
-            lag: 0,
+            lag: DEFAULT_FREEZE_LAG,
             ids: Vec::new(),
             first_changed: 0,
             scratch: None,
@@ -85,7 +94,9 @@ impl GraniteStream {
     }
 
     /// Sets how many encoder frames (80 ms each) the next 10.24 s block must have before the one
-    /// before it freezes. With 0, a block freezes at the first update after the next one starts.
+    /// before it freezes, 16 (1.28 s) by default. With 0, a block freezes at the first update
+    /// after the next one starts. Each frame of lag costs an update about one frame of encoding
+    /// on average, and buys the frozen block's edge more of the next block as context.
     pub fn set_freeze_lag(&mut self, frames: usize) {
         self.lag = frames;
     }
@@ -134,6 +145,11 @@ impl GraniteStream {
         let d = model.config().d_model;
         let out = &self.layers.last().expect("the model has layers").out;
         &out[first * d..(first + rows) * d]
+    }
+
+    /// The feature rows so far, `[rows, 320]`, as the first block read them.
+    pub fn features(&self) -> &[f32] {
+        &self.features
     }
 
     /// The outputs of block `layer` so far, at its output rate, `[frames, d_model]`, for
@@ -194,18 +210,33 @@ impl GraniteStream {
         }
 
         // Rows of the first layer's current attention block are stacked again, so they all take
-        // the floor of the loudest frame so far.
-        let first_row = self.rows / ctx * ctx;
+        // the floor of the loudest frame so far. When that frame got louder, so are the rows that
+        // the unfrozen frames of the later blocks read, back through the strided blocks'
+        // convolutions and attention blocks.
+        let mut first_row = self.rows / ctx * ctx;
+        if self.peak > self.floor_peak {
+            let mut row = self.frozen;
+            for _ in 0..c.subsample_layers.len() {
+                row = (2 * row).saturating_sub(half) / ctx * ctx;
+            }
+            first_row = first_row.min(row);
+            self.floor_peak = self.peak;
+        }
         let width = self.front_end.width();
-        let mut features = vec![0f32; (rows - first_row) * width];
+        self.features.resize(rows * width, 0.0);
         timed(timings, "features", || {
-            self.front_end
-                .stack_rows(&self.logs, self.peak, first_row, rows, &mut features)
+            self.front_end.stack_rows(
+                &self.logs,
+                self.peak,
+                first_row,
+                rows,
+                &mut self.features[first_row * width..],
+            )
         });
         self.input.resize(rows * d, 0.0);
         timed(timings, "input_linear", || {
             model.input_projection(
-                &features,
+                &self.features[first_row * width..],
                 rows - first_row,
                 &mut self.input[first_row * d..],
             )
