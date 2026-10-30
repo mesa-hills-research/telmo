@@ -7,6 +7,13 @@
 //! (Apache-2.0). That is the code behind the leaderboard's scores of 2025, before it changed its
 //! normalizer in April 2026.
 //!
+//! [`Version::V2026`] follows the same file at commit 2aaa07a5ea7c5b18ea53c511426d2079b35d1200
+//! (2026), which the leaderboard scores with now. It removes more filler words, drops the ":00" of
+//! whole hours, expands "'s" only after a few pronouns and adverbs, joins compounds such as
+//! "wi fi", reads "oh" as a zero only inside a run of digits, maps name variants to one spelling
+//! and joins runs of single letters such as "b b c". Its tables of spelling changes and names are
+//! in `english-2026.tsv`.
+//!
 //! The output matches the Python code character for character, Python's Unicode rules included.
 //! Each regular expression of the original is a hand-written scan here, and the comment above it
 //! quotes the expression. Character classes come from `unicode-classes.tsv`, generated from the
@@ -15,22 +22,44 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// Normalizes a transcript the way the leaderboard does before it computes the word error rate.
+/// Which version of the leaderboard's normalizer to follow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Version {
+    /// Commit 6a3e6d4e, behind the leaderboard's scores of 2025.
+    #[default]
+    V2025,
+    /// Commit 2aaa07a5 of 2026.
+    V2026,
+}
+
+/// Normalizes a transcript the way a version of the leaderboard's normalizer does before it
+/// computes the word error rate.
 ///
 /// The result can start or end with a space, as the Python code's does. Split it on whitespace
 /// to get the words.
-pub fn normalize(text: &str) -> String {
+pub fn normalize_version(text: &str, version: Version) -> String {
     let s = lowercase(text);
     let s = remove_bracketed(&s);
     let s = remove_parenthesized(&s);
-    let s = remove_fillers(&s);
+    let s = match version {
+        Version::V2025 => remove_fillers(&s),
+        Version::V2026 => remove_fillers_2026(&s),
+    };
     let s = join_apostrophes(&s);
-    let s = expand_contractions(s);
+    let s = expand_contractions(s, version);
     let s = remove_digit_commas(&s);
     let s = remove_periods(&s);
     let s = remove_symbols_and_diacritics(&s);
-    let s = standardize_numbers(&s);
-    let s = standardize_spellings(&s);
+    let s = match version {
+        Version::V2025 => s,
+        Version::V2026 => join_compounds(s),
+    };
+    let s = standardize_numbers(&s, version);
+    let s = standardize_spellings(&s, version);
+    let s = match version {
+        Version::V2025 => s,
+        Version::V2026 => collapse_acronyms(&standardize_names(&s)),
+    };
     let s = remove_lone_symbols(&s);
     collapse_spaces(&s).into_iter().collect()
 }
@@ -71,6 +100,10 @@ struct Tables {
     /// Runs of the characters that Python's `str.lower()` changes, first and last code point.
     lowered: Vec<(u32, u32)>,
     spellings: HashMap<&'static str, &'static str>,
+    /// The spelling map of 2026.
+    spellings_2026: HashMap<&'static str, &'static str>,
+    /// Name variants and the spelling they map to, from 2026.
+    names: HashMap<&'static str, &'static str>,
 }
 
 fn tables() -> &'static Tables {
@@ -126,17 +159,36 @@ fn load_tables() -> Tables {
     for (c, class) in ascii.iter_mut().enumerate() {
         *class = lookup_class(&classes, c as u32);
     }
-    let spellings = include_str!("english-spelling.tsv")
+    let spellings: HashMap<&'static str, &'static str> = include_str!("english-spelling.tsv")
         .lines()
         .filter(|line| !line.starts_with('#'))
         .filter_map(|line| line.split_once('\t'))
         .collect();
+    let mut spellings_2026 = spellings.clone();
+    let mut names = HashMap::new();
+    for line in include_str!("english-2026.tsv").lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        match fields.as_slice() {
+            ["s", word, spelling] => {
+                spellings_2026.insert(*word, *spelling);
+            }
+            ["x", word] => {
+                spellings_2026.remove(word);
+            }
+            ["n", name, canonical] => {
+                names.insert(*name, *canonical);
+            }
+            _ => {}
+        }
+    }
     Tables {
         ascii,
         classes,
         replacements,
         lowered,
         spellings,
+        spellings_2026,
+        names,
     }
 }
 
@@ -294,6 +346,85 @@ fn remove_fillers(s: &[char]) -> Vec<char> {
     out
 }
 
+/// The run of word characters that starts at `i`, as an end index.
+fn word_end(s: &[char], i: usize) -> usize {
+    s[i..]
+        .iter()
+        .position(|&c| !is_word(c))
+        .map_or(s.len(), |k| i + k)
+}
+
+/// The filler patterns of 2026 after "ah-ha", each a sequence of a character or a set in
+/// brackets with an optional `+` or `*`. Python writes the tenth as `m{2,}`.
+const FILLERS_2026: [&str; 25] = [
+    "a+h+m*", "a+h+a+", "e+h+m*", "e+m+", "e+r+m*", "h+a+h+", "h+e+h+", "h+m+", "h+u+h+", "mm+",
+    "m+h+m*", "t+s+k+", "u+g+h+", "u+h+m*", "u+h+u+[hm]*", "u+m+h*", "ahem", "eheh", "ehehe",
+    "ehr", "hmmph", "hum", "hunh", "mhum", "mmkay",
+];
+
+/// Whether a whole word matches a filler pattern. Each pattern's neighbouring parts take
+/// different characters, except `mm+`, whose first part takes exactly one, so matching each part
+/// greedily finds every match.
+fn matches_filler(word: &[char], pattern: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let (mut p, mut w) = (0, 0);
+    while p < pattern.len() {
+        let set: &[char] = if pattern[p] == '[' {
+            let close = pattern[p..].iter().position(|&c| c == ']').unwrap() + p;
+            let set = &pattern[p + 1..close];
+            p = close + 1;
+            set
+        } else {
+            p += 1;
+            &pattern[p - 1..p]
+        };
+        let (min, more) = match pattern.get(p) {
+            Some('+') => (1, true),
+            Some('*') => (0, true),
+            _ => (1, false),
+        };
+        if more {
+            p += 1;
+        }
+        let max = if more { usize::MAX } else { 1 };
+        let mut count = 0;
+        while w < word.len() && count < max && set.contains(&word[w]) {
+            w += 1;
+            count += 1;
+        }
+        if count < min {
+            return false;
+        }
+    }
+    w == word.len()
+}
+
+/// The 2026 fillers, `\b(ah-ha|a+h+m*|a+h+a+|...|mhum|mmkay)\b`, become nothing. Every
+/// alternative after "ah-ha" is all letters, so it matches a whole run of word characters. "ah-ha"
+/// comes first, so the run "ah" followed by "-" and the run "ha" goes as a whole.
+fn remove_fillers_2026(s: &[char]) -> Vec<char> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if !is_word(s[i]) {
+            out.push(s[i]);
+            i += 1;
+            continue;
+        }
+        let end = word_end(s, i);
+        let word = &s[i..end];
+        if word == ['a', 'h'] && starts_with(s, end, "-ha") && boundary(s, end + 3) {
+            i = end + 3;
+            continue;
+        }
+        if !FILLERS_2026.iter().any(|p| matches_filler(word, p)) {
+            out.extend_from_slice(word);
+        }
+        i = end;
+    }
+    out
+}
+
 /// `\s+'` becomes `'`.
 fn join_apostrophes(s: &[char]) -> Vec<char> {
     let mut out = Vec::with_capacity(s.len());
@@ -377,8 +508,65 @@ const REPLACERS: [(&str, bool, &str); 49] = [
     ("'m", false, " am"),
 ];
 
-fn expand_contractions(mut s: Vec<char>) -> Vec<char> {
+/// The words that "'s" expands after in 2026,
+/// `\b(it|he|she|what|that|who|here|there|how|when|where|why|this)'s\b`.
+const IS_WORDS: [&str; 13] = [
+    "it", "he", "she", "what", "that", "who", "here", "there", "how", "when", "where", "why", "this",
+];
+
+/// The 2026 replacer `\b(it|he|...|this)'s\b`, which becomes `\1 is`.
+fn expand_is_2026(s: &[char]) -> Vec<char> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    'scan: while i < s.len() {
+        if boundary(s, i) {
+            for word in IS_WORDS {
+                let length = word.chars().count() + 2;
+                if starts_with(s, i, word)
+                    && starts_with(s, i + length - 2, "'s")
+                    && boundary(s, i + length)
+                {
+                    out.extend(word.chars());
+                    out.extend(" is".chars());
+                    i += length;
+                    continue 'scan;
+                }
+            }
+        }
+        out.push(s[i]);
+        i += 1;
+    }
+    out
+}
+
+/// The first 2026 replacer, `\b(\d{1,2}):00\b`, which becomes `\1`.
+fn drop_whole_hours(s: &[char]) -> Vec<char> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if boundary(s, i) && is_decimal(s[i]) {
+            let digits = s[i..].iter().take_while(|&&c| is_decimal(c)).count();
+            if digits <= 2 && starts_with(s, i + digits, ":00") && boundary(s, i + digits + 3) {
+                out.extend_from_slice(&s[i..i + digits]);
+                i += digits + 3;
+                continue;
+            }
+        }
+        out.push(s[i]);
+        i += 1;
+    }
+    out
+}
+
+fn expand_contractions(mut s: Vec<char>, version: Version) -> Vec<char> {
+    if version == Version::V2026 {
+        s = drop_whole_hours(&s);
+    }
     for (literal, leading_boundary, replacement) in REPLACERS {
+        if version == Version::V2026 && literal == "'s" {
+            s = expand_is_2026(&s);
+            continue;
+        }
         let length = literal.chars().count();
         let mut out = Vec::with_capacity(s.len());
         let mut i = 0;
@@ -486,16 +674,132 @@ fn remove_symbols_and_diacritics(s: &[char]) -> Vec<char> {
     out
 }
 
-fn standardize_spellings(s: &[char]) -> Vec<char> {
-    let spellings = &tables().spellings;
+/// The compounds of 2026, each `\b<first>\s+<second>\b` becoming one word, in order.
+const COMPOUNDS: [(&str, &str, &str); 16] = [
+    ("et", "cetera", "etc"),
+    ("al", "right", "alright"),
+    ("all", "right", "alright"),
+    ("how", "ever", "however"),
+    ("wi", "fi", "wifi"),
+    ("hi", "fi", "hifi"),
+    ("lo", "fi", "lofi"),
+    ("sci", "fi", "scifi"),
+    ("e", "mail", "email"),
+    ("e", "book", "ebook"),
+    ("e", "commerce", "ecommerce"),
+    ("x", "ray", "xray"),
+    ("t", "shirt", "tshirt"),
+    ("a", "m", "am"),
+    ("p", "m", "pm"),
+    ("o", "k", "okay"),
+];
+
+/// The 2026 compound rules, applied one after another after symbol removal, then `\bo+h+\b` and
+/// `\booo+\b`, which both become "oh".
+fn join_compounds(mut s: Vec<char>) -> Vec<char> {
+    for (first, second, joined) in COMPOUNDS {
+        let mut out = Vec::with_capacity(s.len());
+        let mut i = 0;
+        while i < s.len() {
+            if boundary(&s, i) && starts_with(&s, i, first) {
+                let gap = i + first.chars().count();
+                let next = s[gap..]
+                    .iter()
+                    .position(|&c| !is_space(c))
+                    .map_or(s.len(), |k| gap + k);
+                let end = next + second.chars().count();
+                if next > gap && starts_with(&s, next, second) && boundary(&s, end) {
+                    out.extend(joined.chars());
+                    i = end;
+                    continue;
+                }
+            }
+            out.push(s[i]);
+            i += 1;
+        }
+        s = out;
+    }
+    for pattern in ["o+h+", "ooo+"] {
+        let mut out = Vec::with_capacity(s.len());
+        let mut i = 0;
+        while i < s.len() {
+            if is_word(s[i]) && boundary(&s, i) {
+                let end = word_end(&s, i);
+                if matches_filler(&s[i..end], pattern) {
+                    out.extend("oh".chars());
+                } else {
+                    out.extend_from_slice(&s[i..end]);
+                }
+                i = end;
+                continue;
+            }
+            out.push(s[i]);
+            i += 1;
+        }
+        s = out;
+    }
+    s
+}
+
+fn standardize_spellings(s: &[char], version: Version) -> Vec<char> {
+    let spellings = match version {
+        Version::V2025 => &tables().spellings,
+        Version::V2026 => &tables().spellings_2026,
+    };
+    map_words(s, spellings)
+}
+
+/// `" ".join(mapping.get(word, word) for word in s.split())`.
+fn map_words(s: &[char], mapping: &HashMap<&str, &str>) -> Vec<char> {
     let mut out = String::with_capacity(s.len());
     for (i, word) in split_words(s).iter().enumerate() {
         if i > 0 {
             out.push(' ');
         }
-        out.push_str(spellings.get(word.as_str()).copied().unwrap_or(word));
+        out.push_str(mapping.get(word.as_str()).copied().unwrap_or(word));
     }
     out.chars().collect()
+}
+
+/// `EnglishNameNormalizer` of 2026.
+fn standardize_names(s: &[char]) -> Vec<char> {
+    map_words(s, &tables().names)
+}
+
+/// `EnglishAcronymNormalizer` of 2026. A run of words that are one letter or digit each joins
+/// into one word when it has at least two, or three if one of them is "a" or "i".
+fn collapse_acronyms(s: &[char]) -> Vec<char> {
+    let words = split_words(s);
+    let single = |w: &str| {
+        let mut chars = w.chars();
+        matches!((chars.next(), chars.next()), (Some(c), None) if is_word(c) && c != '_')
+    };
+    let mut out: Vec<String> = Vec::with_capacity(words.len());
+    let mut i = 0;
+    while i < words.len() {
+        if !single(&words[i]) {
+            out.push(words[i].clone());
+            i += 1;
+            continue;
+        }
+        let end = words[i..]
+            .iter()
+            .position(|w| !single(w))
+            .map_or(words.len(), |k| i + k);
+        let run = &words[i..end];
+        let min = if run.iter().any(|w| w == "a" || w == "i") {
+            3
+        } else {
+            2
+        };
+        if run.len() >= min {
+            out.push(run.concat());
+        } else {
+            out.extend(run.iter().cloned());
+        }
+        i = end;
+    }
+    out.join(" ").chars().collect()
 }
 
 /// `[.$¢€£]([^0-9])` becomes ` \1`, then `([^0-9])%` becomes `\1 `. These remove the symbols
@@ -549,10 +853,10 @@ pub(crate) fn collapse_spaces(s: &[char]) -> Vec<char> {
 
 // `EnglishNumberNormalizer`, which writes spelled-out numbers as digits.
 
-fn standardize_numbers(s: &[char]) -> Vec<char> {
+fn standardize_numbers(s: &[char], version: Version) -> Vec<char> {
     let s = preprocess_numbers(s);
     let words = split_words(&s);
-    let joined: Vec<char> = process_words(&words).join(" ").chars().collect();
+    let joined: Vec<char> = process_words(&words, version).join(" ").chars().collect();
     postprocess_numbers(&joined)
 }
 
@@ -881,8 +1185,18 @@ impl Reader {
     }
 }
 
+/// `is_digit_token` of 2026, words that continue a run of digits ("four", "oh", "20").
+fn is_digit_token(word: Option<&str>) -> bool {
+    word.is_some_and(|w| {
+        (!w.is_empty() && w.chars().all(is_decimal))
+            || zero(w)
+            || ones(w).is_some()
+            || tens(w).is_some()
+    })
+}
+
 /// `EnglishNumberNormalizer.process_words`.
-fn process_words(words: &[String]) -> Vec<String> {
+fn process_words(words: &[String], version: Version) -> Vec<String> {
     let mut r = Reader::default();
     let mut skip = false;
     for (i, current) in words.iter().enumerate() {
@@ -933,7 +1247,16 @@ fn process_words(words: &[String]) -> Vec<String> {
             r.emit_value();
             r.emit(current);
         } else if zero(current) {
-            r.value = Some(Value::Str(format!("{}0", Value::text_or_empty(&r.value))));
+            // In 2026 "oh" is a zero only inside a run of digits: one must follow, and with no
+            // number pending a second must follow too ("oh seven nine").
+            let in_number = is_digit_token(next)
+                && (r.value.is_some() || is_digit_token(words.get(i + 2).map(String::as_str)));
+            if version == Version::V2026 && current == "oh" && !in_number {
+                r.emit_value();
+                r.emit(current);
+            } else {
+                r.value = Some(Value::Str(format!("{}0", Value::text_or_empty(&r.value))));
+            }
         } else if let Some(ones) = ones(current) {
             r.value = Some(match &r.value {
                 None => Value::Int(ones.to_string()),

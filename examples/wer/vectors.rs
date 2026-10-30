@@ -1,7 +1,7 @@
 //! Checks the normalizers and the scorer against the output of the Python code they port
 //! (`scripts/gen_vectors.py` and `scripts/gen_basic.py` write the vector files).
 
-use crate::normalize::normalize;
+use crate::normalize::{Version, normalize_version};
 use crate::score::{Errors, corpus_errors, count_errors, is_scored};
 
 /// Undoes the backslash escapes of the vector files.
@@ -32,7 +32,16 @@ fn unescape(field: &str) -> String {
 
 #[test]
 fn normalize_matches_python() {
-    check_vectors(include_str!("normalize-vectors.tsv"), normalize);
+    check_vectors(include_str!("normalize-vectors.tsv"), |text| {
+        normalize_version(text, Version::V2025)
+    });
+}
+
+#[test]
+fn normalize_2026_matches_python() {
+    check_vectors(include_str!("normalize-2026-vectors.tsv"), |text| {
+        normalize_version(text, Version::V2026)
+    });
 }
 
 #[test]

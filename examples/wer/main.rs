@@ -3,8 +3,8 @@
 //! divided by the reference words.
 //!
 //! ```text
-//! cargo run --release --example wer -- MODEL LIST.tsv... [--threads N] [--precision P] [--limit N] [--seed S] [--out DIR] [--compare DIR] [--basic] [--cer]
-//! cargo run --release --example wer -- --hyp HYP.tsv LIST.tsv [--compare DIR] [--basic] [--cer]
+//! cargo run --release --example wer -- MODEL LIST.tsv... [--threads N] [--precision P] [--limit N] [--seed S] [--out DIR] [--compare DIR] [--normalizer 2025|2026] [--basic] [--cer]
+//! cargo run --release --example wer -- --hyp HYP.tsv LIST.tsv [--compare DIR] [--normalizer 2025|2026] [--basic] [--cer]
 //! ```
 //!
 //! MODEL is what `Model::load` takes: a pack, a checkpoint directory or a GGUF file, the
@@ -18,8 +18,9 @@
 //! `DIR/<list name>.tsv`, and a paired bootstrap of the difference in WER (10,000 resamples of
 //! the utterances both have).
 //!
-//! `--basic` normalizes with Whisper's multilingual normalizer instead, for languages other than
-//! English. `--cer` counts character errors over reference characters, with whitespace left out,
+//! `--normalizer 2026` follows the leaderboard's normalizer as it is in 2026 rather than in 2025,
+//! the default. `--basic` normalizes with Whisper's multilingual normalizer instead, for languages
+//! other than English. `--cer` counts character errors over reference characters, with whitespace left out,
 //! for languages written without spaces such as Japanese.
 
 mod basic;
@@ -41,6 +42,8 @@ use score::Errors;
 /// How texts are normalized and split before they're compared.
 #[derive(Clone, Copy, Default)]
 struct Scoring {
+    /// The version of the leaderboard's English normalizer.
+    version: normalize::Version,
     /// Whisper's multilingual normalizer instead of the English one.
     basic: bool,
     /// Characters instead of words.
@@ -52,7 +55,7 @@ impl Scoring {
         if self.basic {
             basic::normalize(text)
         } else {
-            normalize::normalize(text)
+            normalize::normalize_version(text, self.version)
         }
     }
 
@@ -125,6 +128,13 @@ fn run() -> Result<(), String> {
             "--out" => out = Some(PathBuf::from(value("--out")?)),
             "--hyp" => hyp = Some(PathBuf::from(value("--hyp")?)),
             "--compare" => compare = Some(PathBuf::from(value("--compare")?)),
+            "--normalizer" => {
+                scoring.version = match value("--normalizer")?.as_str() {
+                    "2025" => normalize::Version::V2025,
+                    "2026" => normalize::Version::V2026,
+                    _ => return Err("--normalizer takes 2025 or 2026".into()),
+                }
+            }
             "--basic" => scoring.basic = true,
             "--cer" => scoring.characters = true,
             _ => positional.push(arg.into()),
@@ -399,13 +409,14 @@ mod tests {
         let cer = Scoring {
             basic: true,
             characters: true,
+            ..Scoring::default()
         };
         assert_eq!(cer.units("日本語、テスト。"), "日 本 語 テ ス ト");
         assert_eq!(cer.units("Ab c"), "a b c");
         assert_eq!(cer.units("。"), "");
         let words = Scoring {
             basic: true,
-            characters: false,
+            ..Scoring::default()
         };
         assert_eq!(words.units("Ça va?"), "ça va ");
     }
