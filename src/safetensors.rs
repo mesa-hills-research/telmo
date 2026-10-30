@@ -311,6 +311,30 @@ impl SafeTensors {
         Ok(out)
     }
 
+    /// Reads an F32, BF16 or F16 tensor as f32, checking its shape when `shape` is given. Every
+    /// BF16 and F16 value has an exact f32 equal.
+    pub fn read_f32_widened(&mut self, name: &str, shape: Option<&[usize]>) -> Result<Vec<f32>> {
+        let info = self.require(name)?.clone();
+        let widen: fn(u16) -> f32 = match info.dtype {
+            Dtype::F32 => return self.read_f32(name, shape),
+            Dtype::BF16 => bf16_to_f32,
+            Dtype::F16 => f16_to_f32,
+            _ => {
+                return Err(Error::SafeTensors(format!(
+                    "Tensor {name} is {:?}, expected a floating-point type.",
+                    info.dtype
+                )));
+            }
+        };
+        check(&info, info.dtype, shape)?;
+        let mut bytes = vec![0u8; (info.end - info.start) as usize];
+        self.read_into(&info, &mut bytes)?;
+        Ok(bytes
+            .chunks_exact(2)
+            .map(|b| widen(u16::from_le_bytes([b[0], b[1]])))
+            .collect())
+    }
+
     /// Reads an I64 tensor, checking its shape when `shape` is given.
     pub fn read_i64(&mut self, name: &str, shape: Option<&[usize]>) -> Result<Vec<i64>> {
         let (info, bytes) = self.read_bytes(name)?;
@@ -319,6 +343,27 @@ impl SafeTensors {
             .chunks_exact(8)
             .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
             .collect())
+    }
+}
+
+/// The f32 with the same sign, exponent and leading mantissa bits.
+fn bf16_to_f32(bits: u16) -> f32 {
+    f32::from_bits((bits as u32) << 16)
+}
+
+/// Widens an IEEE half-precision value, subnormals, infinities and NaN payloads included.
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = ((bits as u32) & 0x8000) << 16;
+    let exp = ((bits >> 10) & 0x1f) as u32;
+    let mant = (bits & 0x3ff) as u32;
+    match exp {
+        0 => {
+            // Zero or a subnormal, mant * 2^-24, which f32 holds exactly.
+            let magnitude = mant as f32 * (1.0 / (1u32 << 24) as f32);
+            f32::from_bits(sign | magnitude.to_bits())
+        }
+        0x1f => f32::from_bits(sign | 0x7f80_0000 | (mant << 13)),
+        _ => f32::from_bits(sign | ((exp + 127 - 15) << 23) | (mant << 13)),
     }
 }
 
@@ -385,6 +430,51 @@ mod tests {
         assert!(st.read_f32("w", Some(&[4])).is_err());
         assert!(st.read_f32("n", None).is_err());
         assert!(st.read_f32("missing", None).is_err());
+    }
+
+    #[test]
+    fn half_precision_tensors_widen_exactly() {
+        let header = r#"{"b":{"dtype":"BF16","shape":[4],"data_offsets":[0,8]},"h":{"dtype":"F16","shape":[11],"data_offsets":[8,30]},"i":{"dtype":"I64","shape":[1],"data_offsets":[32,40]}}"#;
+        let pad = (8 - (8 + header.len()) % 8) % 8;
+        let header = format!("{header}{}", " ".repeat(pad));
+        let mut data = Vec::new();
+        for bits in [0x3f80u16, 0xc040, 0x0001, 0x7f80] {
+            data.extend_from_slice(&bits.to_le_bytes());
+        }
+        for bits in [
+            0x3c00u16, 0xc000, 0x7bff, 0x0001, 0x0400, 0x8000, 0x7c00, 0xfc00, 0x3555, 0x03ff,
+            0x7e00,
+        ] {
+            data.extend_from_slice(&bits.to_le_bytes());
+        }
+        data.extend_from_slice(&[0; 2]);
+        data.extend_from_slice(&7i64.to_le_bytes());
+        let mut st = SafeTensors::from_bytes(file(&header, &data)).unwrap();
+        let b = st.read_f32_widened("b", Some(&[4])).unwrap();
+        assert_eq!(
+            b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            vec![0x3f80_0000, 0xc040_0000, 0x0001_0000, 0x7f80_0000]
+        );
+        let h = st.read_f32_widened("h", Some(&[11])).unwrap();
+        let want = [
+            1.0,
+            -2.0,
+            65504.0,
+            2f32.powi(-24),
+            2f32.powi(-14),
+            -0.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.333_251_95,
+            1023.0 * 2f32.powi(-24),
+        ];
+        for (got, want) in h.iter().zip(want) {
+            assert_eq!(got.to_bits(), want.to_bits(), "{got} vs {want}");
+        }
+        assert!(h[10].is_nan());
+        assert!(st.read_f32_widened("h", Some(&[10])).is_err());
+        assert!(st.read_f32_widened("i", None).is_err());
+        assert!(st.read_f32("b", None).is_err());
     }
 
     #[test]
