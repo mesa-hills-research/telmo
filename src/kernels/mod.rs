@@ -282,8 +282,6 @@ pub struct Kernels {
     pub glu: fn(a: &[f32], b: &[f32], out: &mut [f32]),
     /// SiLU in place.
     pub silu: fn(x: &mut [f32]),
-    /// `x += alpha * y`.
-    pub axpy: fn(alpha: f32, y: &[f32], x: &mut [f32]),
     /// One output frame of a depthwise 1-D convolution over channels-last input.
     pub dwconv1d_frame: fn(
         input: &[f32],

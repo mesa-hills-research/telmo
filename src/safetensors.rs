@@ -273,29 +273,42 @@ impl SafeTensors {
     /// Reads a tensor's raw little-endian bytes.
     pub fn read_bytes(&mut self, name: &str) -> Result<(TensorInfo, Vec<u8>)> {
         let info = self.require(name)?.clone();
+        let mut bytes = vec![0u8; (info.end - info.start) as usize];
+        self.read_into(&info, &mut bytes)?;
+        Ok((info, bytes))
+    }
+
+    fn read_into(&mut self, info: &TensorInfo, dst: &mut [u8]) -> Result<()> {
         let start = self.header.data_offset + info.start;
-        let len = (info.end - info.start) as usize;
-        let bytes = match &mut self.source {
-            Source::Bytes(bytes) => bytes[start as usize..start as usize + len].to_vec(),
+        debug_assert_eq!(dst.len() as u64, info.end - info.start);
+        match &mut self.source {
+            Source::Bytes(bytes) => {
+                dst.copy_from_slice(&bytes[start as usize..start as usize + dst.len()])
+            }
             Source::File { file, path } => {
-                let mut buf = vec![0u8; len];
                 file.seek(SeekFrom::Start(start))
                     .map_err(|e| Error::io(path, e))?;
-                file.read_exact(&mut buf).map_err(|e| Error::io(path, e))?;
-                buf
+                file.read_exact(dst).map_err(|e| Error::io(path, e))?;
             }
-        };
-        Ok((info, bytes))
+        }
+        Ok(())
     }
 
     /// Reads an F32 tensor, checking its shape when `shape` is given.
     pub fn read_f32(&mut self, name: &str, shape: Option<&[usize]>) -> Result<Vec<f32>> {
-        let (info, bytes) = self.read_bytes(name)?;
+        let info = self.require(name)?.clone();
         check(&info, Dtype::F32, shape)?;
-        Ok(bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-            .collect())
+        let mut out = vec![0f32; info.elements()];
+        // SAFETY: the bytes of an f32 slice may hold any value, and u8 needs no alignment.
+        let bytes =
+            unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, out.len() * 4) };
+        self.read_into(&info, bytes)?;
+        if cfg!(target_endian = "big") {
+            for v in &mut out {
+                *v = f32::from_bits(v.to_bits().swap_bytes());
+            }
+        }
+        Ok(out)
     }
 
     /// Reads an I64 tensor, checking its shape when `shape` is given.

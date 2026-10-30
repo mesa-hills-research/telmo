@@ -1,0 +1,107 @@
+//! The readers must return an error, never panic, on damaged input. Each test mutates a valid
+//! file in many random ways (flipped bits, overwritten bytes, truncation, inserted junk).
+
+use notate::safetensors::SafeTensors;
+use notate::tokenizer::Tokenizer;
+use notate::{json, wav};
+
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n.max(1) as u64) as usize
+    }
+}
+
+fn mutate(input: &[u8], rng: &mut Rng) -> Vec<u8> {
+    let mut out = input.to_vec();
+    for _ in 0..1 + rng.below(4) {
+        match rng.below(5) {
+            0 if !out.is_empty() => {
+                let i = rng.below(out.len());
+                out[i] ^= 1 << rng.below(8);
+            }
+            1 if !out.is_empty() => {
+                let i = rng.below(out.len());
+                out[i] = rng.next() as u8;
+            }
+            2 => out.truncate(rng.below(out.len() + 1)),
+            3 => {
+                let i = rng.below(out.len() + 1);
+                let junk = [b'"', b'{', b'[', b'\\', b'-', b'9', 0xff, 0x00, b'e', b':'];
+                out.insert(i, junk[rng.below(junk.len())]);
+            }
+            _ if out.len() > 2 => {
+                let i = rng.below(out.len() - 1);
+                out.remove(i);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn safetensors_file() -> Vec<u8> {
+    let header = r#"{"__metadata__":{"format":"pt"},"a":{"dtype":"F32","shape":[2,3],"data_offsets":[0,24]},"b":{"dtype":"I64","shape":[2],"data_offsets":[24,40]},"c":{"dtype":"BF16","shape":[4],"data_offsets":[40,48]}}"#;
+    let header = format!("{header}{}", " ".repeat((8 - (8 + header.len()) % 8) % 8));
+    let mut out = (header.len() as u64).to_le_bytes().to_vec();
+    out.extend_from_slice(header.as_bytes());
+    out.extend((0..48u8).map(|b| b.wrapping_mul(37)));
+    out
+}
+
+#[test]
+fn damaged_json_is_refused_without_panicking() {
+    let valid = br#"{"model":{"type":"BPE","vocab":{"a":0,"_b":1,"<0x0A>":2}},"added_tokens":[{"id":3,"content":"<unk>","special":true}],"n":[1.5e-3,-0,true,null,"x\ny"]}"#;
+    assert!(json::parse(valid).is_ok());
+    let mut rng = Rng(0x1234_5678_9abc_def1);
+    for _ in 0..20_000 {
+        let input = mutate(valid, &mut rng);
+        let _ = json::parse(&input);
+        let _ = Tokenizer::from_json(&input);
+    }
+}
+
+#[test]
+fn damaged_safetensors_are_refused_without_panicking() {
+    let valid = safetensors_file();
+    let mut st = SafeTensors::from_bytes(valid.clone()).unwrap();
+    assert_eq!(st.read_f32("a", Some(&[2, 3])).unwrap().len(), 6);
+    let mut rng = Rng(0x0fed_cba9_8765_4321);
+    let mut accepted = 0;
+    for _ in 0..20_000 {
+        let input = mutate(&valid, &mut rng);
+        if let Ok(mut st) = SafeTensors::from_bytes(input) {
+            accepted += 1;
+            for name in ["a", "b", "c", "missing"] {
+                let _ = st.read_f32(name, None);
+                let _ = st.read_i64(name, None);
+                let _ = st.read_bytes(name);
+            }
+        }
+    }
+    // Mutations that only touch tensor data leave a valid file.
+    assert!(accepted > 0);
+}
+
+#[test]
+fn damaged_wav_files_are_refused_without_panicking() {
+    let samples: Vec<f32> = (0..64).map(|i| (i as f32 * 0.3).sin() * 0.5).collect();
+    let valid = wav::encode_pcm16(&samples, 16000);
+    assert_eq!(wav::parse(&valid).unwrap().samples.len(), 64);
+    let mut rng = Rng(0xdead_beef_cafe_f00d);
+    for _ in 0..20_000 {
+        let input = mutate(&valid[..60], &mut rng);
+        let _ = wav::parse(&input);
+        let mut whole = mutate(&valid, &mut rng);
+        whole.truncate(rng.below(whole.len() + 1));
+        let _ = wav::parse(&whole);
+    }
+}

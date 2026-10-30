@@ -11,7 +11,6 @@ pub(crate) fn kernels() -> Kernels {
         softmax,
         glu,
         silu,
-        axpy,
         dwconv1d_frame,
         conv3x3s2_row,
     }
@@ -94,13 +93,6 @@ fn glu(a: &[f32], b: &[f32], out: &mut [f32]) {
 fn silu(x: &mut [f32]) {
     for v in x.iter_mut() {
         *v = activate(*v, Act::Silu);
-    }
-}
-
-#[inline(always)]
-pub(crate) fn axpy(alpha: f32, y: &[f32], x: &mut [f32]) {
-    for (xi, &yi) in x.iter_mut().zip(y) {
-        *xi += alpha * yi;
     }
 }
 

@@ -19,7 +19,6 @@ pub(crate) fn kernels() -> Kernels {
         softmax: |x| unsafe { softmax(x) },
         glu: |a, b, out| unsafe { glu(a, b, out) },
         silu: |x| unsafe { silu(x) },
-        axpy: |alpha, y, x| unsafe { axpy(alpha, y, x) },
         dwconv1d_frame: |input, channels, frames, t, w, kernel, bias, out| unsafe {
             dwconv1d_frame(input, channels, frames, t, w, kernel, bias, out)
         },
@@ -336,13 +335,6 @@ unsafe fn silu(x: &mut [f32]) {
         unsafe { _mm256_storeu_ps(lane.as_mut_ptr(), silu256(_mm256_set1_ps(*v))) };
         *v = lane[0];
     }
-}
-
-/// The scalar loop, compiled with AVX2 so it vectorizes. Element-wise, so the results equal
-/// the scalar kernel's.
-#[target_feature(enable = "avx2,fma")]
-unsafe fn axpy(alpha: f32, y: &[f32], x: &mut [f32]) {
-    scalar::axpy(alpha, y, x)
 }
 
 /// The scalar loop, compiled with AVX2 so it vectorizes over channels. Each output sums its
