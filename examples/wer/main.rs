@@ -3,8 +3,8 @@
 //! divided by the reference words.
 //!
 //! ```text
-//! cargo run --release --example wer -- MODEL_DIR LIST.tsv... [--threads N] [--limit N] [--seed S] [--out DIR] [--compare DIR]
-//! cargo run --release --example wer -- --hyp HYP.tsv LIST.tsv [--compare DIR]
+//! cargo run --release --example wer -- MODEL_DIR LIST.tsv... [--threads N] [--limit N] [--seed S] [--out DIR] [--compare DIR] [--basic] [--cer]
+//! cargo run --release --example wer -- --hyp HYP.tsv LIST.tsv [--compare DIR] [--basic] [--cer]
 //! ```
 //!
 //! A list has one utterance per line, `id<TAB>path to a 16 kHz WAV<TAB>reference text`.
@@ -13,7 +13,12 @@
 //! exists. `--hyp` scores a hypothesis file of that format without running a model. With
 //! `--compare DIR`, either form also reports how often the transcripts equal those in
 //! `DIR/<list name>.tsv`.
+//!
+//! `--basic` normalizes with Whisper's multilingual normalizer instead, for languages other than
+//! English. `--cer` counts character errors over reference characters, with whitespace left out,
+//! for languages written without spaces such as Japanese.
 
+mod basic;
 mod normalize;
 mod score;
 #[cfg(test)]
@@ -27,6 +32,40 @@ use std::time::{Duration, Instant};
 
 use notate::{Model, Options};
 use score::Errors;
+
+/// How texts are normalized and split before they're compared.
+#[derive(Clone, Copy, Default)]
+struct Scoring {
+    /// Whisper's multilingual normalizer instead of the English one.
+    basic: bool,
+    /// Characters instead of words.
+    characters: bool,
+}
+
+impl Scoring {
+    fn normalize(self, text: &str) -> String {
+        if self.basic {
+            basic::normalize(text)
+        } else {
+            normalize::normalize(text)
+        }
+    }
+
+    /// The normalized text as the scorer's units separated by spaces, which are its words or
+    /// each of its characters other than whitespace.
+    fn units(self, text: &str) -> String {
+        let normalized = self.normalize(text);
+        if !self.characters {
+            return normalized;
+        }
+        let chars: Vec<String> = normalized
+            .split(' ')
+            .flat_map(str::chars)
+            .map(String::from)
+            .collect();
+        chars.join(" ")
+    }
+}
 
 struct Utterance {
     id: String,
@@ -52,6 +91,7 @@ fn run() -> Result<(), String> {
     let mut out = None;
     let mut hyp = None;
     let mut compare = None;
+    let mut scoring = Scoring::default();
     let mut positional: Vec<PathBuf> = Vec::new();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
@@ -76,6 +116,8 @@ fn run() -> Result<(), String> {
             "--out" => out = Some(PathBuf::from(value("--out")?)),
             "--hyp" => hyp = Some(PathBuf::from(value("--hyp")?)),
             "--compare" => compare = Some(PathBuf::from(value("--compare")?)),
+            "--basic" => scoring.basic = true,
+            "--cer" => scoring.characters = true,
             _ => positional.push(arg.into()),
         }
     }
@@ -97,10 +139,10 @@ fn run() -> Result<(), String> {
                 utterances.len()
             );
         }
-        report(&name_of(list), &pairs, None);
+        report(&name_of(list), &pairs, None, scoring);
         if let Some(dir) = &compare {
             let other = read_hyps(&dir.join(format!("{}.tsv", name_of(list))))?;
-            agreement(&pairs, &other);
+            agreement(&pairs, &other, scoring);
         }
         return Ok(());
     }
@@ -181,10 +223,10 @@ fn run() -> Result<(), String> {
             .map(|u| (u, hyps[&u.id].as_str()))
             .collect();
         let speed = (audio_seconds > 0.0).then(|| (compute, audio_seconds, model.threads()));
-        report(&name, &pairs, speed);
+        report(&name, &pairs, speed, scoring);
         if let Some(dir) = &compare {
             let other = read_hyps(&dir.join(format!("{name}.tsv")))?;
-            agreement(&pairs, &other);
+            agreement(&pairs, &other, scoring);
         }
     }
     Ok(())
@@ -249,13 +291,18 @@ fn select(mut utterances: Vec<Utterance>, limit: Option<usize>, seed: u64) -> Ve
     utterances
 }
 
-fn report(name: &str, pairs: &[(&Utterance, &str)], speed: Option<(Duration, f64, usize)>) {
+fn report(
+    name: &str,
+    pairs: &[(&Utterance, &str)],
+    speed: Option<(Duration, f64, usize)>,
+    scoring: Scoring,
+) {
     let normalized: Vec<(String, String)> = pairs
         .iter()
         .map(|(u, hyp)| {
             (
-                normalize::normalize(&u.reference),
-                normalize::normalize(hyp),
+                scoring.units(&u.reference),
+                scoring.units(hyp),
             )
         })
         .collect();
@@ -265,8 +312,13 @@ fn report(name: &str, pairs: &[(&Utterance, &str)], speed: Option<(Duration, f64
         .count();
     let total: Errors =
         score::corpus_errors(normalized.iter().map(|(r, h)| (r.as_str(), h.as_str())));
+    let (rate, units) = if scoring.characters {
+        ("CER", "characters")
+    } else {
+        ("WER", "words")
+    };
     println!(
-        "{name}: WER {:.2}% over {scored} utterances and {} words (substitutions {}, deletions {}, insertions {})",
+        "{name}: {rate} {:.2}% over {scored} utterances and {} {units} (substitutions {}, deletions {}, insertions {})",
         100.0 * total.wer(),
         total.reference_words,
         total.substitutions,
@@ -283,7 +335,7 @@ fn report(name: &str, pairs: &[(&Utterance, &str)], speed: Option<(Duration, f64
     }
 }
 
-fn agreement(pairs: &[(&Utterance, &str)], other: &HashMap<String, String>) {
+fn agreement(pairs: &[(&Utterance, &str)], other: &HashMap<String, String>, scoring: Scoring) {
     let (mut both, mut same, mut same_normalized) = (0, 0, 0);
     for (u, hyp) in pairs {
         let Some(theirs) = other.get(&u.id) else {
@@ -291,9 +343,30 @@ fn agreement(pairs: &[(&Utterance, &str)], other: &HashMap<String, String>) {
         };
         both += 1;
         same += (theirs.trim() == hyp.trim()) as usize;
-        same_normalized += (normalize::normalize(theirs) == normalize::normalize(hyp)) as usize;
+        same_normalized += (scoring.normalize(theirs) == scoring.normalize(hyp)) as usize;
     }
     println!(
         "Compared with {both} transcripts of the other system, {same} are identical and {same_normalized} identical after normalization."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Scoring;
+
+    #[test]
+    fn character_scoring_splits_every_character_and_drops_whitespace() {
+        let cer = Scoring {
+            basic: true,
+            characters: true,
+        };
+        assert_eq!(cer.units("日本語、テスト。"), "日 本 語 テ ス ト");
+        assert_eq!(cer.units("Ab c"), "a b c");
+        assert_eq!(cer.units("。"), "");
+        let words = Scoring {
+            basic: true,
+            characters: false,
+        };
+        assert_eq!(words.units("Ça va?"), "ça va ");
+    }
 }

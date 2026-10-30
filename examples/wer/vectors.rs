@@ -1,5 +1,5 @@
-//! Checks the normalizer and the scorer against the output of the leaderboard's Python code
-//! (`scripts/gen_vectors.py` writes the vector files).
+//! Checks the normalizers and the scorer against the output of the Python code they port
+//! (`scripts/gen_vectors.py` and `scripts/gen_basic.py` write the vector files).
 
 use crate::normalize::normalize;
 use crate::score::{Errors, corpus_errors, count_errors, is_scored};
@@ -32,9 +32,19 @@ fn unescape(field: &str) -> String {
 
 #[test]
 fn normalize_matches_python() {
+    check_vectors(include_str!("normalize-vectors.tsv"), normalize);
+}
+
+#[test]
+fn basic_normalize_matches_python() {
+    check_vectors(include_str!("basic-vectors.tsv"), crate::basic::normalize);
+}
+
+/// Runs a normalizer over a vector file's inputs and compares with its outputs.
+fn check_vectors(vectors: &str, normalize: fn(&str) -> String) {
     let mut failures = Vec::new();
     let mut count = 0;
-    for (index, line) in include_str!("normalize-vectors.tsv").lines().enumerate() {
+    for (index, line) in vectors.lines().enumerate() {
         if line.starts_with('#') {
             continue;
         }

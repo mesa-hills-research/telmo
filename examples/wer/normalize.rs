@@ -38,7 +38,7 @@ pub fn normalize(text: &str) -> String {
 // Character data.
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Class {
+pub(crate) enum Class {
     /// `str.isspace()`, so `\s` and `str.split()`.
     Space,
     /// `str.isdecimal()`, so `\d`.
@@ -143,7 +143,7 @@ fn load_tables() -> Tables {
 /// Python's `str.lower()`. Rust's `str::to_lowercase` follows the same rules, the final sigma
 /// included, but its Unicode version can be newer than Python's. So only the characters that
 /// Python changes take Rust's lowercase, and the others stay.
-fn lowercase(text: &str) -> Vec<char> {
+pub(crate) fn lowercase(text: &str) -> Vec<char> {
     let lowered = text.to_lowercase();
     let runs = &tables().lowered;
     let mut out = Vec::with_capacity(text.len());
@@ -171,7 +171,7 @@ fn lookup_class(classes: &[(u32, Class)], c: u32) -> Class {
     classes[index - 1].1
 }
 
-fn class(c: char) -> Class {
+pub(crate) fn class(c: char) -> Class {
     let tables = tables();
     match tables.ascii.get(c as usize) {
         Some(&class) => class,
@@ -223,7 +223,7 @@ fn split_words(s: &[char]) -> Vec<String> {
 // The steps of `EnglishTextNormalizer.__call__`, in order.
 
 /// `[<\[][^>\]]*[>\]]` becomes nothing.
-fn remove_bracketed(s: &[char]) -> Vec<char> {
+pub(crate) fn remove_bracketed(s: &[char]) -> Vec<char> {
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < s.len() {
@@ -247,7 +247,7 @@ fn remove_bracketed(s: &[char]) -> Vec<char> {
 }
 
 /// `\(([^)]+?)\)` becomes nothing. An empty pair "()" stays.
-fn remove_parenthesized(s: &[char]) -> Vec<char> {
+pub(crate) fn remove_parenthesized(s: &[char]) -> Vec<char> {
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < s.len() {
@@ -533,7 +533,7 @@ fn remove_lone_symbols(s: &[char]) -> Vec<char> {
 }
 
 /// `\s+` becomes a single space.
-fn collapse_spaces(s: &[char]) -> Vec<char> {
+pub(crate) fn collapse_spaces(s: &[char]) -> Vec<char> {
     let mut out = Vec::with_capacity(s.len());
     let mut in_run = false;
     for &c in s {
