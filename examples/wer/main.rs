@@ -4,14 +4,15 @@
 //!
 //! ```text
 //! cargo run --release --example wer -- MODEL_DIR LIST.tsv... [--threads N] [--limit N] [--seed S] [--out DIR] [--compare DIR]
-//! cargo run --release --example wer -- --hyp HYP.tsv LIST.tsv
+//! cargo run --release --example wer -- --hyp HYP.tsv LIST.tsv [--compare DIR]
 //! ```
 //!
 //! A list has one utterance per line, `id<TAB>path to a 16 kHz WAV<TAB>reference text`.
 //! `--limit` scores a fixed random subset of each list (`--seed` picks it). `--out` writes the
 //! raw hypotheses to `DIR/<list name>.tsv` as `id<TAB>text` and resumes from that file if it
-//! exists. `--hyp` scores a hypothesis file of that format without running a model, and
-//! `--compare DIR` also reports how often the transcripts equal those in `DIR/<list name>.tsv`.
+//! exists. `--hyp` scores a hypothesis file of that format without running a model. With
+//! `--compare DIR`, either form also reports how often the transcripts equal those in
+//! `DIR/<list name>.tsv`.
 
 mod normalize;
 mod score;
@@ -97,6 +98,10 @@ fn run() -> Result<(), String> {
             );
         }
         report(&name_of(list), &pairs, None);
+        if let Some(dir) = &compare {
+            let other = read_hyps(&dir.join(format!("{}.tsv", name_of(list))))?;
+            agreement(&pairs, &other);
+        }
         return Ok(());
     }
 
