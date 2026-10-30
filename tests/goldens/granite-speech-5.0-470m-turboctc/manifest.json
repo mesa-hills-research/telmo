@@ -1,0 +1,375 @@
+{
+ "about": "Golden tensors for Granite Speech 5.0 470M TurboCTC, saved from transformers' GraniteSpeech5ForCTC (the reference). See README.md.",
+ "model": {
+  "repo": "ibm-granite/granite-speech-5.0-470m-turboctc",
+  "url": "https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc",
+  "revision": "1dd23f46f6d4e6eae2531982ba2e33220086dd97",
+  "license": "Apache-2.0",
+  "files": {
+   "model.safetensors": {
+    "sha256": "5b569c3744c42a9172ac976881539926b66176d03fbaaa3c51b5d2960067f6fc",
+    "bytes": 946311576
+   },
+   "tokenizer.json": {
+    "sha256": "a1c3ca763ce0690faf0df3456365358547acfdf766122c9e4a69be8e8708042e",
+    "bytes": 1699784
+   },
+   "config.json": {
+    "sha256": "aabd64a2da736a1a1c21237c896b71628f6dd7364f1f5ec8a77f5e04b3ef1011",
+    "bytes": 921
+   },
+   "generation_config.json": {
+    "sha256": "ad32e8b87734e621ede4a52e64072a90b42b1599973a7c008efc1268541ea034",
+    "bytes": 153
+   },
+   "processor_config.json": {
+    "sha256": "3d7c14d3ed7a5218b2fd6797eaa5b3aa615c681938bd1734a510d7a6f8c1b9fb",
+    "bytes": 430
+   },
+   "tokenizer_config.json": {
+    "sha256": "2f61ece3468bf7ca7a1b6dd3fd5b809814315bea9c298feea035fda4931b9f02",
+    "bytes": 223
+   }
+  },
+  "loaded_from": "config.json, model.safetensors, tokenizer and processor files (GraniteSpeech5ForCTC.from_pretrained, AutoProcessor.from_pretrained)"
+ },
+ "audio": {
+  "librispeech": {
+   "source": "LibriSpeech ASR corpus (test-clean, test-other), Vassil Panayotov et al.",
+   "url": "https://www.openslr.org/12",
+   "license": "CC-BY-4.0",
+   "files": "The WAVs of the Parakeet TDT goldens in ../parakeet-tdt-0.6b-v3/, which list the archives' md5."
+  },
+  "fleurs": {
+   "source": "FLEURS (google/fleurs), test split",
+   "url": "https://huggingface.co/datasets/google/fleurs",
+   "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+   "license": "CC-BY-4.0",
+   "conversion": "The dataset's 16 kHz float WAV written as 16-bit PCM, round(x * 32768) clipped to the int16 range."
+  },
+  "format": "16 kHz mono 16-bit PCM WAV. The model input is int16/32768 as float32."
+ },
+ "environment": {
+  "python": "3.12.16",
+  "python_build": "python-build-standalone cpython-3.12.16+20261026-x86_64-unknown-linux-gnu-install_only",
+  "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+  "cpu": "6 vCPUs of an Intel Core i9-13980HX (AVX2, FMA, no AVX-512)",
+  "packages": {
+   "torch": "2.11.0+cpu",
+   "torchaudio": "2.11.0+cpu",
+   "transformers": "5.22.0",
+   "numpy": "2.5.4",
+   "soundfile": "0.14.0",
+   "safetensors": "0.8.0",
+   "tokenizers": "0.23.3",
+   "huggingface_hub": "2.4.0",
+   "pip": "25.3",
+   "libsndfile": "1.2.2"
+  },
+  "torch_index": "https://download.pytorch.org/whl/cpu",
+  "pip_freeze": [
+   "Jinja2==3.1.6",
+   "MarkupSafe==3.0.3",
+   "PyYAML==6.0.3",
+   "Pygments==2.21.0",
+   "annotated-doc==0.0.5",
+   "anyio==4.15.1",
+   "cffi==2.1.1",
+   "click==8.5.0",
+   "filelock==4.2.4",
+   "fsspec==2026.9.0",
+   "h11==0.16.0",
+   "hf-xet==1.7.1",
+   "httpcore2==2.16.0",
+   "httpx2==2.16.0",
+   "huggingface_hub==2.4.0",
+   "idna==3.20",
+   "markdown-it-py==4.2.0",
+   "mdurl==0.1.2",
+   "mpmath==1.3.0",
+   "networkx==3.7",
+   "numpy==2.5.4",
+   "packaging==26.3",
+   "pip==25.3",
+   "pycparser==3.12",
+   "regex==2026.9.29",
+   "rich==15.0.0",
+   "safetensors==0.8.0",
+   "setuptools==78.1.0",
+   "shellingham==1.5.4",
+   "soundfile==0.14.0",
+   "sympy==1.14.0",
+   "tokenizers==0.23.3",
+   "torch==2.11.0+cpu",
+   "torchaudio==2.11.0+cpu",
+   "tqdm==4.70.1",
+   "transformers==5.22.0",
+   "truststore==0.10.5",
+   "typer==0.27.3",
+   "typing_extensions==4.16.0"
+  ]
+ },
+ "settings": {
+  "device": "cpu",
+  "dtype": "float32 (the bf16 weights widened, BatchNorm statistics stored as float32)",
+  "attention": "eager",
+  "mode": "eval",
+  "torch_threads": 6,
+  "batch_size": 1,
+  "runs": "Each clip ran twice in one process, and every tensor was bit-identical."
+ },
+ "tensors": {
+  "features": "F32 [T0, 320]. The processor's input_features: 80 log-mel bins and their deltas per 10 ms frame, two frames stacked. The 40 s clip leaves them out.",
+  "saved": "Each clip lists the tensors it keeps in `saved`. The 40 s clip keeps layer.1 and layer.15, and the FLEURS clip features and layer.15.",
+  "layer.N": "F32 [T, 1024]. Output of encoder block N (forward hook). Blocks 0 and 1 halve the frame rate, so layer.0 has T0 // 2 frames and the rest T0 // 4. layer.7 is block 7's output before self-conditioning. layer.15 is the encoder output.",
+  "selfcond_injection": "F32 [T, 1024]. encoder.out_mid(softmax(encoder.out(layer.7))), added to layer.7 before block 8.",
+  "ctc_ids": "I64 [T]. Argmax of the CTC logits per frame (generate's sequences).",
+  "logit_max": "F32 [T]. The largest CTC logit per frame.",
+  "logit_margin": "F32 [T]. The largest CTC logit minus the second largest, per frame.",
+  "logit_frames": "I64 [K]. Frames whose full logits are saved: the first frame whose argmax isn't blank, the last frame.",
+  "logits": "F32 [K, 16384]. Raw CTC logits (ctc_head, tied to encoder.out) at logit_frames.",
+  "tokens": "I64 [N]. ctc_ids with repeats collapsed and blanks (id 0) dropped, before special tokens are left out."
+ },
+ "tokenizer_vectors": "tokenizer-vectors.json holds tokenizer.decode(ids, skip_special_tokens=True, group_tokens=False) for every single id (`single`) and for 400 random id sequences mixing byte pieces, special tokens and other pieces plus a few encoded texts (`sequences`).",
+ "decoding": "Greedy CTC. Argmax per frame, repeats collapsed, blank (id 0, pad_token_id) dropped, then processor.batch_decode(sequences, skip_special_tokens=True), which leaves out the 255 special tokens.",
+ "commands": [
+  "# Granite Speech 5.0 470M TurboCTC. Run from the repository root. DATA is the data folder (models, LibriSpeech, FLEURS, venv, work files), outside the repository.",
+  "# G=tests/goldens/granite-speech-5.0-470m-turboctc, P=tests/goldens/parakeet-tdt-0.6b-v3 and S=tests/goldens/scripts. RL is an optional wrapper that limits concurrent heavy jobs (empty runs directly).",
+  "sh $S/fetch_granite.sh   # model files at revision 1dd23f46f6d4e6eae2531982ba2e33220086dd97, sha256 checked",
+  "curl -fsSL -o $DATA/dl/python-build-standalone/cpython-3.12.16+20261026-x86_64-unknown-linux-gnu-install_only.tar.gz https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-x86_64-unknown-linux-gnu-install_only.tar.gz   # sha256 6a79e922e50006b601f29e688407659da1c2b86ebcd4e9c7254cf234be8b89de",
+  "tar xzf $DATA/dl/python-build-standalone/cpython-*.tar.gz -C $DATA/python3.12",
+  "$DATA/python3.12/python/bin/python3.12 -I -m venv $DATA/venv-granite",
+  "$DATA/venv-granite/bin/python -I -m pip install --upgrade pip==25.3",
+  "$DATA/venv-granite/bin/python -I -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.11.0+cpu torchaudio==2.11.0+cpu   # torchaudio stops at 2.11, which needs torch 2.11",
+  "$DATA/venv-granite/bin/python -I -m pip install -c $S/constraints-granite.txt --extra-index-url https://download.pytorch.org/whl/cpu \"transformers==5.22.0\" soundfile numpy",
+  "$DATA/venv-granite/bin/python -I $S/fetch_fleurs.py $DATA/fleurs --count 100   # google/fleurs at 70bb2e84, the first 100 test utterances of en_us, de_de, fr_fr, es_419, it_it, pt_br and ja_jp",
+  ". $S/env.sh   # TMPDIR and caches inside DATA, offline, OMP_NUM_THREADS=6",
+  "$DATA/venv-granite/bin/python -I $S/granite_clips.py $P $G $DATA/work-granite/clips.json --ids clean-1995-1826-0007,clean-260-123286-0018,other-367-130732-0011,other-4350-9170-0030,clean-joined-40s --fleurs ja_jp:$DATA/fleurs/ja_jp.tsv:11258446014622421491",
+  "$RL $DATA/venv-granite/bin/python -I $S/ref_granite.py $DATA/models/granite-speech-5.0-470m-turboctc $DATA/work-granite/clips.json $DATA/work-granite/ref --threads 6 --runs 2",
+  "$DATA/venv-granite/bin/python -I $S/make_granite_goldens.py $DATA/work-granite/clips.json $DATA/work-granite/ref $G $S/COMMANDS-granite.txt",
+  "$RL $DATA/venv-granite/bin/python -I $S/granite_hyps.py $DATA/models/granite-speech-5.0-470m-turboctc $DATA/librispeech/test-clean.tsv $DATA/reference/granite-test-clean.tsv --subset 500 --seed 0 --threads 6",
+  "$RL $DATA/venv-granite/bin/python -I $S/granite_hyps.py $DATA/models/granite-speech-5.0-470m-turboctc $DATA/librispeech/test-other.tsv $DATA/reference/granite-test-other.tsv --subset 500 --seed 0 --threads 6",
+  "$RL $DATA/venv-granite/bin/python -I $S/granite_hyps.py $DATA/models/granite-speech-5.0-470m-turboctc $DATA/fleurs/<lang>.tsv $DATA/reference/granite-fleurs-<lang>.tsv --threads 6   # for each FLEURS language"
+ ],
+ "clips": [
+  {
+   "id": "clean-1995-1826-0007",
+   "wav": "../parakeet-tdt-0.6b-v3/clean-1995-1826-0007.wav",
+   "tensors": "clean-1995-1826-0007.safetensors",
+   "source": "LibriSpeech test-clean",
+   "source_utterances": [
+    "1995-1826-0007"
+   ],
+   "seconds": 7.06,
+   "samples": 112960,
+   "reference_text": "FIND SOME CRESSWELLS THERE BIG PLANTATIONS RATED AT TWO HUNDRED AND FIFTY THOUSAND DOLLARS",
+   "text": "Find some cresswells there, big plantations, rated at two hundred and fifty thousand dollars",
+   "features_frames": 353,
+   "frames": {
+    "layer.0": 176,
+    "layer.1": 88,
+    "layer.15": 88
+   },
+   "ctc_frames": 88,
+   "tokens": 23,
+   "byte_tokens": 0,
+   "min_logit_margin": 0.01592731475830078,
+   "saved": [
+    "features",
+    "layer.0",
+    "layer.1",
+    "layer.7",
+    "selfcond_injection",
+    "layer.15"
+   ],
+   "logit_frames": [
+    6,
+    87
+   ],
+   "wav_sha256": "98ef00abd765ded5af9f69f343d48c98e126f66f65df571849c8a7ddb395fd7a",
+   "tensors_sha256": "4f7b5d42fb821eb3d3b6c72a4cf89d35fc8fddc3a5fb16e1ece25193d046ab86"
+  },
+  {
+   "id": "clean-260-123286-0018",
+   "wav": "../parakeet-tdt-0.6b-v3/clean-260-123286-0018.wav",
+   "tensors": "clean-260-123286-0018.safetensors",
+   "source": "LibriSpeech test-clean",
+   "source_utterances": [
+    "260-123286-0018"
+   ],
+   "seconds": 5.67,
+   "samples": 90720,
+   "reference_text": "I SAW AT THE HAMBURG MUSEUM THE SKELETON OF ONE OF THESE CREATURES THIRTY FEET IN LENGTH",
+   "text": "I saw at the Hamburg Museum the skeleton of one of these creatures, thirty feet in length.",
+   "features_frames": 284,
+   "frames": {
+    "layer.0": 142,
+    "layer.1": 71,
+    "layer.15": 71
+   },
+   "ctc_frames": 71,
+   "tokens": 28,
+   "byte_tokens": 0,
+   "min_logit_margin": 1.2994251251220703,
+   "saved": [
+    "features",
+    "layer.0",
+    "layer.1",
+    "layer.7",
+    "selfcond_injection",
+    "layer.15"
+   ],
+   "logit_frames": [
+    8,
+    70
+   ],
+   "wav_sha256": "85bea15eb40f06b823cc95066e3e23a53fe9f87763a9ce3713af4767c80b651d",
+   "tensors_sha256": "5c6dea698f64886a7015f2a87572f85b68ce78f107756f3b327672c984584ecd"
+  },
+  {
+   "id": "other-367-130732-0011",
+   "wav": "../parakeet-tdt-0.6b-v3/other-367-130732-0011.wav",
+   "tensors": "other-367-130732-0011.safetensors",
+   "source": "LibriSpeech test-other",
+   "source_utterances": [
+    "367-130732-0011"
+   ],
+   "seconds": 5.71,
+   "samples": 91360,
+   "reference_text": "ONE HAS TO COME TO SAN FRANCISCO TO PARTAKE OF THE KING OF SHELL FISH THE MAMMOTH PACIFIC CRAB",
+   "text": "One has to come to San Francisco to partake of the king of shellfish, the mammoth Pacific crab",
+   "features_frames": 286,
+   "frames": {
+    "layer.0": 143,
+    "layer.1": 71,
+    "layer.15": 71
+   },
+   "ctc_frames": 71,
+   "tokens": 29,
+   "byte_tokens": 0,
+   "min_logit_margin": 0.434967041015625,
+   "saved": [
+    "features",
+    "layer.0",
+    "layer.1",
+    "layer.7",
+    "selfcond_injection",
+    "layer.15"
+   ],
+   "logit_frames": [
+    4,
+    70
+   ],
+   "wav_sha256": "7627eecaf726257d1a766a6428aa469f904c3d8f02436f591ea97406c0ef5647",
+   "tensors_sha256": "df85e964f73758b1703b8f361dcd034274bb9a4af4471e437783ca8bb99d6346"
+  },
+  {
+   "id": "other-4350-9170-0030",
+   "wav": "../parakeet-tdt-0.6b-v3/other-4350-9170-0030.wav",
+   "tensors": "other-4350-9170-0030.safetensors",
+   "source": "LibriSpeech test-other",
+   "source_utterances": [
+    "4350-9170-0030"
+   ],
+   "seconds": 4.245,
+   "samples": 67920,
+   "reference_text": "THIS INCREASE IS CONTAGIOUS AS MONTESQUIEU POINTED OUT ONE HUNDRED FIFTY YEARS AGO",
+   "text": "This increase is contagious, as Montesquieu pointed out a hundred and fifty years ago.",
+   "features_frames": 212,
+   "frames": {
+    "layer.0": 106,
+    "layer.1": 53,
+    "layer.15": 53
+   },
+   "ctc_frames": 53,
+   "tokens": 24,
+   "byte_tokens": 0,
+   "min_logit_margin": 0.06294441223144531,
+   "saved": [
+    "features",
+    "layer.0",
+    "layer.1",
+    "layer.7",
+    "selfcond_injection",
+    "layer.15"
+   ],
+   "logit_frames": [
+    4,
+    52
+   ],
+   "wav_sha256": "6c20d597ec5c9b351b1eccdb036900a4d6ff3ba995183747c6e17c532f7bd89b",
+   "tensors_sha256": "94165bb230774d83934d6af6b0c7d20cc7d71bfe87b4c66e8ebeef8b93e83eae"
+  },
+  {
+   "id": "clean-joined-40s",
+   "wav": "../parakeet-tdt-0.6b-v3/clean-joined-40s.wav",
+   "tensors": "clean-joined-40s.safetensors",
+   "source": "LibriSpeech test-clean",
+   "source_utterances": [
+    "1089-134686-0003",
+    "1089-134686-0004",
+    "1089-134686-0005",
+    "1089-134686-0006",
+    "1089-134686-0007",
+    "1089-134686-0008"
+   ],
+   "seconds": 39.0900625,
+   "samples": 625441,
+   "reference_text": "HELLO BERTIE ANY GOOD IN YOUR MIND NUMBER TEN FRESH NELLY IS WAITING ON YOU GOOD NIGHT HUSBAND THE MUSIC CAME NEARER AND HE RECALLED THE WORDS THE WORDS OF SHELLEY'S FRAGMENT UPON THE MOON WANDERING COMPANIONLESS PALE FOR WEARINESS THE DULL LIGHT FELL MORE FAINTLY UPON THE PAGE WHEREON ANOTHER EQUATION BEGAN TO UNFOLD ITSELF SLOWLY AND TO SPREAD ABROAD ITS WIDENING TAIL A COLD LUCID INDIFFERENCE REIGNED IN HIS SOUL THE CHAOS IN WHICH HIS ARDOUR EXTINGUISHED ITSELF WAS A COLD INDIFFERENT KNOWLEDGE OF HIMSELF",
+   "text": "Hello, Bertie Any good in your mind? Number ten. Fresh Nelly is waiting on you. Good night, husband. The music came nearer, and he recalled the words, the words of Shelley's fragment upon the moon wandering companionless, pale for weariness. The dull light fell more faintly upon the page whereon another equation began to unfold itself slowly and to spread abroad its widening tale. A cold, lucid indifference reigned in his soul. The chaos in which his ardour extinguished itself was a cold, indifferent knowledge of himself.",
+   "features_frames": 1955,
+   "frames": {
+    "layer.0": 977,
+    "layer.1": 488,
+    "layer.15": 488
+   },
+   "ctc_frames": 488,
+   "tokens": 147,
+   "byte_tokens": 0,
+   "min_logit_margin": 0.0909280776977539,
+   "saved": [
+    "layer.1",
+    "layer.15"
+   ],
+   "logit_frames": [
+    4,
+    487
+   ],
+   "wav_sha256": "e32500a2a62a6786d2aac30eb4c76bb845a8bb7ba63b0cb411ebeacbbd418f88",
+   "tensors_sha256": "35a5f52a8c1caf70a24c069485293b79b4f7838d5e21e1b5d162e584fc4ea42a"
+  },
+  {
+   "id": "fleurs-ja_jp-11258446014622421491",
+   "wav": "fleurs-ja_jp-11258446014622421491.wav",
+   "tensors": "fleurs-ja_jp-11258446014622421491.safetensors",
+   "source": "FLEURS ja_jp test",
+   "source_utterances": [
+    "11258446014622421491"
+   ],
+   "seconds": 9.72,
+   "samples": 155520,
+   "reference_text": "MSは、脳、脊髄、視神経からなる中枢神経系に影響を与える病気です。",
+   "text": "msは脳脊髄視神経からなる中枢神経系に影響を与える病気です",
+   "features_frames": 486,
+   "frames": {
+    "layer.0": 243,
+    "layer.1": 121,
+    "layer.15": 121
+   },
+   "ctc_frames": 121,
+   "tokens": 26,
+   "byte_tokens": 3,
+   "min_logit_margin": 0.3257179260253906,
+   "saved": [
+    "features",
+    "layer.15"
+   ],
+   "logit_frames": [
+    26,
+    120
+   ],
+   "wav_sha256": "820c4902fa2c412863d382b82e70dbcd451c2519d6db7e48e2cb84ecb89d6ce5",
+   "tensors_sha256": "22fe83e021b41c18cbb86f4f1eead0d842b29ed163a356d5054c0569d489c805"
+  }
+ ]
+}

@@ -1,0 +1,17 @@
+# Granite Speech 5.0 470M TurboCTC. Run from the repository root. DATA is the data folder (models, LibriSpeech, FLEURS, venv, work files), outside the repository.
+# G=tests/goldens/granite-speech-5.0-470m-turboctc, P=tests/goldens/parakeet-tdt-0.6b-v3 and S=tests/goldens/scripts. RL is an optional wrapper that limits concurrent heavy jobs (empty runs directly).
+sh $S/fetch_granite.sh   # model files at revision 1dd23f46f6d4e6eae2531982ba2e33220086dd97, sha256 checked
+curl -fsSL -o $DATA/dl/python-build-standalone/cpython-3.12.16+20261026-x86_64-unknown-linux-gnu-install_only.tar.gz https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-x86_64-unknown-linux-gnu-install_only.tar.gz   # sha256 6a79e922e50006b601f29e688407659da1c2b86ebcd4e9c7254cf234be8b89de
+tar xzf $DATA/dl/python-build-standalone/cpython-*.tar.gz -C $DATA/python3.12
+$DATA/python3.12/python/bin/python3.12 -I -m venv $DATA/venv-granite
+$DATA/venv-granite/bin/python -I -m pip install --upgrade pip==25.3
+$DATA/venv-granite/bin/python -I -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.11.0+cpu torchaudio==2.11.0+cpu   # torchaudio stops at 2.11, which needs torch 2.11
+$DATA/venv-granite/bin/python -I -m pip install -c $S/constraints-granite.txt --extra-index-url https://download.pytorch.org/whl/cpu "transformers==5.22.0" soundfile numpy
+$DATA/venv-granite/bin/python -I $S/fetch_fleurs.py $DATA/fleurs --count 100   # google/fleurs at 70bb2e84, the first 100 test utterances of en_us, de_de, fr_fr, es_419, it_it, pt_br and ja_jp
+. $S/env.sh   # TMPDIR and caches inside DATA, offline, OMP_NUM_THREADS=6
+$DATA/venv-granite/bin/python -I $S/granite_clips.py $P $G $DATA/work-granite/clips.json --ids clean-1995-1826-0007,clean-260-123286-0018,other-367-130732-0011,other-4350-9170-0030,clean-joined-40s --fleurs ja_jp:$DATA/fleurs/ja_jp.tsv:11258446014622421491
+$RL $DATA/venv-granite/bin/python -I $S/ref_granite.py $DATA/models/granite-speech-5.0-470m-turboctc $DATA/work-granite/clips.json $DATA/work-granite/ref --threads 6 --runs 2
+$DATA/venv-granite/bin/python -I $S/make_granite_goldens.py $DATA/work-granite/clips.json $DATA/work-granite/ref $G $S/COMMANDS-granite.txt
+$RL $DATA/venv-granite/bin/python -I $S/granite_hyps.py $DATA/models/granite-speech-5.0-470m-turboctc $DATA/librispeech/test-clean.tsv $DATA/reference/granite-test-clean.tsv --subset 500 --seed 0 --threads 6
+$RL $DATA/venv-granite/bin/python -I $S/granite_hyps.py $DATA/models/granite-speech-5.0-470m-turboctc $DATA/librispeech/test-other.tsv $DATA/reference/granite-test-other.tsv --subset 500 --seed 0 --threads 6
+$RL $DATA/venv-granite/bin/python -I $S/granite_hyps.py $DATA/models/granite-speech-5.0-470m-turboctc $DATA/fleurs/<lang>.tsv $DATA/reference/granite-fleurs-<lang>.tsv --threads 6   # for each FLEURS language
