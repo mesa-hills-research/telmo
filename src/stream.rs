@@ -3,11 +3,10 @@
 //! Streaming is experimental. Its API and behaviour may change in any release, and its
 //! accuracy is a little below offline transcription of the same audio.
 //!
-//! Neither model is built for streaming, so each pass recomputes part of the utterance and
-//! decodes from where the settled text ends. Parakeet re-encodes a window made of the unsettled
-//! audio and up to a few seconds of settled audio before it, and continues greedy decoding from
-//! the decoder state saved after the last settled token. Granite recomputes only its current
-//! attention block and decodes CTC frames from the last settled one.
+//! Neither model is built for streaming, so each pass recomputes part of the utterance and keeps
+//! the text after the settled words. Parakeet re-encodes the utterance so far and decodes it
+//! afresh. Granite recomputes only its current attention block and decodes CTC frames from the
+//! last settled one.
 //!
 //! A word settles once two passes in a row agree on it, together with every word before it, it
 //! ends at least a second before the audio does, and the model has heard a word after it.
@@ -43,7 +42,9 @@ const HOP: usize = 160;
 /// How passes over an utterance are made and when words settle.
 #[derive(Debug, Clone)]
 pub struct PassConfig {
-    /// Settled audio Parakeet re-encodes before the unsettled part, as context.
+    /// Settled audio Parakeet re-encodes before the unsettled part, as context. The default of
+    /// 30 s is the longest utterance, so each pass encodes the whole utterance. On a window that
+    /// starts in the middle of a sentence, Parakeet sometimes emits nothing at all.
     pub context: Duration,
     /// How long before the end of the audio a word must end to settle.
     pub settle_margin: Duration,
@@ -55,7 +56,7 @@ pub struct PassConfig {
 impl Default for PassConfig {
     fn default() -> Self {
         PassConfig {
-            context: Duration::from_secs(6),
+            context: Duration::from_secs(30),
             settle_margin: Duration::from_secs(1),
             repeat_window: Duration::from_millis(500),
         }
@@ -317,8 +318,8 @@ impl UtteranceStream {
     /// does.
     ///
     /// Decoding the window afresh costs a little more than continuing from the decoder state
-    /// saved after the settled text, but the state can disagree with a window that hears more:
-    /// a word placed a frame or two early near the end of one window is heard again by the next,
+    /// saved after the settled text, but the state can disagree with a window that hears more.
+    /// A word placed a frame or two early near the end of one window is heard again by the next,
     /// and a transducer that already closed the sentence there may then emit nothing at all.
     fn parakeet_hypothesis(
         &mut self,
