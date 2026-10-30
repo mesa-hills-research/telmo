@@ -956,7 +956,8 @@ impl Parakeet {
 
         let mut state = vec![0f32; c.pred_layers * 2 * h];
         let mut pred = vec![0f32; h];
-        timings.time("predict", || self.predict(None, &mut state, &mut pred));
+        // The start state is the blank token's input, as in NeMo.
+        timings.time("predict", || self.predict(c.blank, &mut state, &mut pred));
         if let Some(trace) = trace.as_deref_mut() {
             trace.enc_proj = enc_proj.clone();
             trace.preds.push(pred.clone());
@@ -999,9 +1000,7 @@ impl Parakeet {
                 frame: t as u32,
                 duration: duration as u32,
             });
-            timings.time("predict", || {
-                self.predict(Some(token), &mut state, &mut pred)
-            });
+            timings.time("predict", || self.predict(token, &mut state, &mut pred));
             if let Some(trace) = trace.as_deref_mut() {
                 trace.preds.push(pred.clone());
             }
@@ -1019,17 +1018,15 @@ impl Parakeet {
         tokens
     }
 
-    /// Runs the prediction network on one token (or the start state with `None`), updating the
-    /// LSTM state and writing the projected output to `pred`.
-    fn predict(&self, token: Option<usize>, state: &mut [f32], pred: &mut [f32]) {
+    /// Runs the prediction network on one token, updating the LSTM state and writing the
+    /// projected output to `pred`.
+    fn predict(&self, token: usize, state: &mut [f32], pred: &mut [f32]) {
         let c = &self.config;
         let dec = &self.decoder;
         let k = &self.kernels;
         let h = c.pred_hidden;
         let mut input = vec![0f32; 2 * h];
-        if let Some(token) = token {
-            input[..h].copy_from_slice(&dec.embedding[token * h..(token + 1) * h]);
-        }
+        input[..h].copy_from_slice(&dec.embedding[token * h..(token + 1) * h]);
         let mut gates = vec![0f32; 4 * h];
         for (l, layer) in dec.lstm.iter().enumerate() {
             let (hs, cs) = state[l * 2 * h..(l + 1) * 2 * h].split_at_mut(h);

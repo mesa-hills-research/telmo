@@ -1,0 +1,20 @@
+# Run from the repository root. DATA is the data folder (models, LibriSpeech, venv, work files), outside the repository.
+# G=tests/goldens/parakeet-tdt-0.6b-v3 and S=tests/goldens/scripts. RL is an optional wrapper that limits concurrent heavy jobs (empty runs directly).
+sh $S/fetch_model.sh   # model files at revision 541d1f99c6b0c3cd0b11a95167540bb8edefd82b, sha256 checked
+sh $S/fetch_nemo.sh    # parakeet-tdt-0.6b-v3.nemo, sha256 checked
+sh $S/fetch_librispeech.sh   # OpenSLR 12 test-clean and test-other, md5 checked, extracted in place
+curl -fsSL -o $DATA/dl/python-build-standalone/cpython-3.12.16+20261026-x86_64-unknown-linux-gnu-install_only.tar.gz https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-x86_64-unknown-linux-gnu-install_only.tar.gz   # sha256 6a79e922e50006b601f29e688407659da1c2b86ebcd4e9c7254cf234be8b89de
+tar xzf $DATA/dl/python-build-standalone/cpython-*.tar.gz -C $DATA/python3.12
+$DATA/python3.12/python/bin/python3.12 -I -m venv $DATA/venv
+$DATA/venv/bin/python -I -m pip install --upgrade pip==25.3
+$DATA/venv/bin/python -I -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0+cpu
+$DATA/venv/bin/python -I -m pip install -c $S/constraints.txt --extra-index-url https://download.pytorch.org/whl/cpu "nemo_toolkit[asr]==3.0.0"   # constraints.txt pins torch==2.13.0+cpu
+$DATA/venv/bin/python -I -m pip install -c $S/constraints.txt "transformers==5.9.0"
+$RL $DATA/venv/bin/python -I $S/convert_librispeech.py $DATA/dl/librispeech-test-clean/LibriSpeech/test-clean $DATA/librispeech/test-clean $DATA/librispeech/test-clean.tsv
+$RL $DATA/venv/bin/python -I $S/convert_librispeech.py $DATA/dl/librispeech-test-other/LibriSpeech/test-other $DATA/librispeech/test-other $DATA/librispeech/test-other.tsv
+$DATA/venv/bin/python -I $S/make_clips.py $DATA/librispeech $G $DATA/work/clips.json
+. $S/env.sh   # TMPDIR and caches inside DATA, offline, OMP_NUM_THREADS=6
+$RL $DATA/venv/bin/python -I $S/ref_nemo.py $DATA/models/parakeet-tdt-0.6b-v3-nemo/parakeet-tdt-0.6b-v3.nemo $DATA/work/clips.json $DATA/work/nemo --threads 6
+$RL $DATA/venv/bin/python -I $S/ref_nemo.py $DATA/models/parakeet-tdt-0.6b-v3-nemo/parakeet-tdt-0.6b-v3.nemo $DATA/work/clips.json $DATA/work/nemo-no-subsampling-mask --threads 6 --no-subsampling-mask
+$RL $DATA/venv/bin/python -I $S/ref_hf.py $DATA/models/parakeet-tdt-0.6b-v3 $DATA/work/clips.json $DATA/work/hf --nemo-dir $DATA/work/nemo --threads 6
+$DATA/venv/bin/python -I $S/make_goldens.py $DATA/work/clips.json $DATA/work/nemo $DATA/work/hf $DATA/work/nemo-no-subsampling-mask $G $S/COMMANDS.txt
