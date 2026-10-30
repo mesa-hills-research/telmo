@@ -167,7 +167,7 @@ fn settled(events: &[Event]) -> (String, usize) {
     let mut ends = 0;
     for e in events {
         match e {
-            Event::Settled { text: t } => text.push_str(t),
+            Event::Settled { text: t, .. } => text.push_str(t),
             Event::UtteranceEnd { .. } => ends += 1,
             _ => {}
         }

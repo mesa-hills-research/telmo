@@ -6,9 +6,9 @@
 //! the decoder state saved after the last settled token. Granite recomputes only its current
 //! attention block and decodes CTC frames from the last settled one.
 //!
-//! A word settles once two passes in a row agree on it, together with every word before it, and
-//! it ends at least half a second before the audio does. Settled words never change. When the
-//! utterance ends, one last pass settles everything.
+//! A word settles once two passes in a row agree on it, together with every word before it, it
+//! ends at least a second before the audio does, and the model has heard a word after it.
+//! Settled words never change. When the utterance ends, one last pass settles everything.
 //!
 //! [`Stream`] runs it all on a thread of its own. Audio of any sample rate goes in as it comes,
 //! voice activity splits it into utterances, passes run as often as the computer keeps up with,
@@ -25,7 +25,7 @@ use crate::features::LogMelStream;
 use crate::granite::Granite;
 use crate::granite_stream::GraniteStream;
 use crate::model::Model;
-use crate::parakeet::{DecoderState, Parakeet, Timings};
+use crate::parakeet::{Parakeet, Timings};
 use crate::resample::Resampler;
 use crate::tokenizer::Tokenizer;
 use crate::vad::{Vad, VadConfig, VadEvent};
@@ -53,7 +53,7 @@ impl Default for PassConfig {
     fn default() -> Self {
         PassConfig {
             context: Duration::from_secs(6),
-            settle_margin: Duration::from_millis(500),
+            settle_margin: Duration::from_secs(1),
             repeat_window: Duration::from_millis(500),
         }
     }
@@ -85,17 +85,19 @@ pub enum PassMode {
     FinalIfQuiet(Duration),
 }
 
-/// Where decoding continues after a settled token.
+/// Where the text after a settled token starts.
 #[derive(Debug, Clone)]
 enum Resume {
-    Tdt(DecoderState),
+    /// The encoder frame after the token.
+    Frame(usize),
+    /// The CTC frame after the token, and the argmax of the frame before it.
     Ctc { frame: usize, prev: u32 },
 }
 
 impl Resume {
     fn frame(&self) -> usize {
         match self {
-            Resume::Tdt(s) => s.frame,
+            Resume::Frame(frame) => *frame,
             Resume::Ctc { frame, .. } => *frame,
         }
     }
@@ -134,13 +136,9 @@ pub struct UtteranceStream {
 
 impl UtteranceStream {
     pub fn new(model: &Model) -> UtteranceStream {
-        let mut timings = Timings::default();
+        let timings = Timings::default();
         let (resume, granite, log_mel) = match model {
-            Model::Parakeet(m) => (
-                Resume::Tdt(m.initial_decoder_state(&mut timings)),
-                None,
-                Some(m.front_end().stream()),
-            ),
+            Model::Parakeet(m) => (Resume::Frame(0), None, Some(m.front_end().stream())),
             Model::Granite(m) => (
                 Resume::Ctc {
                     frame: 0,
@@ -232,7 +230,9 @@ impl UtteranceStream {
         if last {
             settle = words.len();
         } else {
-            while settle < words.len()
+            // The last word of a pass never settles. It may still grow, and near the end of the
+            // audio a model may close it with punctuation that the next audio contradicts.
+            while settle + 1 < words.len()
                 && settle < self.previous.len()
                 && word_ids(&hyp, &words[settle]) == self.previous[settle]
                 && hyp[words[settle].end - 1].end_frame * FRAME <= limit
@@ -267,9 +267,8 @@ impl UtteranceStream {
     /// Drops what a pass hears again of the settled text. A model can place a word slightly
     /// earlier near the end of its audio than it does once more audio follows, so a settled
     /// word, or its end, may show up again just after the settled text. Leading tokens that
-    /// can't start a word and spell the end of the last settled word are such ends, and leading
-    /// words equal to the last settled ones that end within `config.repeat_window` of them are
-    /// such words.
+    /// can't start a word are such ends, and so are leading words equal to the last settled ones
+    /// (or, for one word, ending like it) that end within `config.repeat_window` of them.
     fn drop_repeats(
         &self,
         tokenizer: &Tokenizer,
@@ -279,21 +278,13 @@ impl UtteranceStream {
         if self.last_settled.is_none() {
             return hyp;
         }
-        // Tokens that continue the last settled word either repeat its end or complete it.
+        // A settled word was followed by another before it settled, so it's complete, and
+        // leading tokens that can't start a word are left over from it or from words before it.
         let mut skip = 0;
         let mut prev = self.last_settled;
         while skip < hyp.len() && !tokenizer.may_split_before(prev, hyp[skip].id) {
             prev = Some(hyp[skip].id);
             skip += 1;
-        }
-        let ids: Vec<u32> = hyp[..skip].iter().map(|h| h.id).collect();
-        let repeats_end = self
-            .recent
-            .last()
-            .is_some_and(|w| w.ends_with(&normalized(tokenizer, &ids)));
-        if !repeats_end {
-            skip = 0;
-            prev = self.last_settled;
         }
         let words = split_words(tokenizer, prev, &hyp[skip..]);
         let window = (config.repeat_window.as_secs_f64() * SAMPLE_RATE as f64 / FRAME as f64).ceil()
@@ -301,10 +292,12 @@ impl UtteranceStream {
         let limit = self.resume.frame() + window;
         for n in (1..=MAX_REPEAT.min(words.len()).min(self.recent.len())).rev() {
             let tail = &self.recent[self.recent.len() - n..];
-            let same = words[..n]
-                .iter()
-                .zip(tail)
-                .all(|(w, t)| normalized(tokenizer, &word_ids(&hyp[skip..], w)) == *t);
+            let same = words[..n].iter().zip(tail).enumerate().all(|(i, (w, t))| {
+                let w = normalized(tokenizer, &word_ids(&hyp[skip..], w));
+                // The last settled word may come back split differently, with only its end
+                // the same ("themselves" heard again as "inselves").
+                w == *t || (i == n - 1 && n == 1 && shares_end(&w, t))
+            });
             if same && hyp[skip + words[n - 1].end - 1].end_frame <= limit {
                 skip += words[n - 1].end;
                 break;
@@ -315,17 +308,21 @@ impl UtteranceStream {
     }
 
     /// Re-encodes the unsettled audio with up to `config.context` of settled audio before it,
-    /// and decodes from the state saved after the last settled token. The window's features
-    /// are normalized over the window, as NVIDIA's buffered streaming does.
+    /// decodes the window from its start, and keeps the tokens from the end of the settled text
+    /// on. The window's features are normalized over the window, as NVIDIA's buffered streaming
+    /// does.
+    ///
+    /// Decoding the window afresh costs a little more than continuing from the decoder state
+    /// saved after the settled text, but the state can disagree with a window that hears more:
+    /// a word placed a frame or two early near the end of one window is heard again by the next,
+    /// and a transducer that already closed the sentence there may then emit nothing at all.
     fn parakeet_hypothesis(
         &mut self,
         model: &Parakeet,
         config: &PassConfig,
         finished: bool,
     ) -> Result<Vec<Hyp>> {
-        let Resume::Tdt(state) = &self.resume else {
-            unreachable!("Parakeet resumes from a decoder state")
-        };
+        let boundary = self.resume.frame();
         let log_mel = self
             .log_mel
             .as_mut()
@@ -340,7 +337,7 @@ impl UtteranceStream {
             }
         });
         let context = (config.context.as_secs_f64() * SAMPLE_RATE as f64) as usize;
-        let start = (state.frame * FRAME).saturating_sub(context) / FRAME * FRAME;
+        let start = (boundary * FRAME).saturating_sub(context) / FRAME * FRAME;
         let (first, ready) = (start / HOP, log_mel.frames());
         // The encoder needs a frame of 80 ms.
         if ready < first + FRAME / HOP {
@@ -348,14 +345,23 @@ impl UtteranceStream {
         }
         let features = timings.time("features", || log_mel.normalize(first..ready));
         let encoded = model.encode(&features.data, features.frames, timings, &mut |_, _, _| {});
-        let tokens = model.decode_from(&encoded, start / FRAME, state, timings);
+        let mut state = model.initial_decoder_state(timings);
+        state.frame = start / FRAME;
+        let tokens = model.decode_from(&encoded, start / FRAME, &state, timings);
+        // A token placed a frame earlier than the settled text's end in an earlier window still
+        // counts as new. What it repeats of the settled text is dropped later.
+        let from = boundary.saturating_sub(1);
         Ok(tokens
             .into_iter()
-            .map(|(t, after)| Hyp {
-                id: t.id,
-                frame: t.frame as usize,
-                end_frame: t.frame as usize + (t.duration as usize).max(1),
-                resume: Resume::Tdt(after),
+            .filter(|(t, _)| boundary == 0 || t.frame as usize >= from)
+            .map(|(t, _)| {
+                let end_frame = t.frame as usize + (t.duration as usize).max(1);
+                Hyp {
+                    id: t.id,
+                    frame: t.frame as usize,
+                    end_frame,
+                    resume: Resume::Frame(end_frame),
+                }
             })
             .collect())
     }
@@ -416,21 +422,28 @@ impl Default for StreamConfig {
 }
 
 /// What a stream reports. The settled texts join in order, and the current tentative text
-/// follows them. Times count seconds of audio from the stream's start.
+/// follows them. Times count seconds of audio from the stream's start, and `utterance` numbers
+/// the utterances from 0. An utterance's last text can come after the next one has started.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// Speech started at `at`.
-    SpeechStart { at: f64 },
+    SpeechStart { utterance: u64, at: f64 },
     /// The words after the settled text that may still change, replacing the earlier ones.
-    Tentative { text: String },
+    Tentative { utterance: u64, text: String },
     /// Words that won't change, to append after the earlier settled text.
-    Settled { text: String },
+    Settled { utterance: u64, text: String },
     /// The utterance ended. Its speech ended at `speech_end`, and all its text has settled.
-    UtteranceEnd { at: f64, speech_end: f64 },
+    UtteranceEnd {
+        utterance: u64,
+        at: f64,
+        speech_end: f64,
+    },
 }
 
 /// An utterance being transcribed.
 struct Active {
+    /// The utterance's number in the stream.
+    index: u64,
     stream: UtteranceStream,
     /// The stream's sample (16 kHz) the utterance's audio starts at.
     start: u64,
@@ -470,6 +483,8 @@ pub struct Streamer {
     closing: VecDeque<Active>,
     /// Whether any text has settled, so the next settled text keeps its leading space.
     wrote: bool,
+    /// Utterances started so far.
+    started: u64,
 }
 
 /// Audio kept for the time before an onset, comfortably more than voice activity reaches back.
@@ -490,6 +505,7 @@ impl Streamer {
             active: None,
             closing: VecDeque::new(),
             wrote: false,
+            started: 0,
         }
     }
 
@@ -548,7 +564,10 @@ impl Streamer {
                     }
                     let mut stream = UtteranceStream::new(&self.model);
                     stream.push(&self.history_since(audio_from));
+                    let index = self.started;
+                    self.started += 1;
                     self.active = Some(Active {
+                        index,
                         stream,
                         start: audio_from.max(self.history_start),
                         end: None,
@@ -559,6 +578,7 @@ impl Streamer {
                         tentative: String::new(),
                     });
                     events.push(Event::SpeechStart {
+                        utterance: index,
                         at: onset as f64 / SAMPLE_RATE as f64,
                     });
                 }
@@ -649,7 +669,10 @@ impl Streamer {
         }
         if !settled.is_empty() {
             self.wrote = true;
-            events.push(Event::Settled { text: settled });
+            events.push(Event::Settled {
+                utterance: a.index,
+                text: settled,
+            });
         }
         let mut tentative = out.tentative;
         if !self.wrote {
@@ -657,7 +680,10 @@ impl Streamer {
         }
         if tentative != a.tentative {
             a.tentative = tentative.clone();
-            events.push(Event::Tentative { text: tentative });
+            events.push(Event::Tentative {
+                utterance: a.index,
+                text: tentative,
+            });
         }
         Ok(out.last)
     }
@@ -676,6 +702,7 @@ impl Streamer {
         let now = a.start + a.stream.audio().len() as u64;
         let (speech_end, decided_at) = a.end.unwrap_or((a.reopened.unwrap_or(now), now));
         events.push(Event::UtteranceEnd {
+            utterance: a.index,
             at: decided_at as f64 / SAMPLE_RATE as f64,
             speech_end: speech_end as f64 / SAMPLE_RATE as f64,
         });
@@ -860,6 +887,19 @@ fn split_words(tokenizer: &Tokenizer, before: Option<u32>, hyp: &[Hyp]) -> Vec<W
 /// The most settled words a pass may repeat.
 const MAX_REPEAT: usize = 3;
 
+/// Whether `heard` looks like the end of `word` heard again: it isn't longer than `word`, and
+/// they end with the same five letters or more, at least half of `heard`.
+fn shares_end(heard: &str, word: &str) -> bool {
+    let common = heard
+        .chars()
+        .rev()
+        .zip(word.chars().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let len = heard.chars().count();
+    common >= 5 && 2 * common >= len && len <= word.chars().count()
+}
+
 /// A word's text in lower case without punctuation, for comparing words.
 fn normalized(tokenizer: &Tokenizer, ids: &[u32]) -> String {
     tokenizer
@@ -879,6 +919,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_word_heard_again_shares_the_end_of_the_settled_one() {
+        assert!(shares_end("inselves", "themselves"));
+        assert!(shares_end("selves", "themselves"));
+        assert!(!shares_end("at", "that"));
+        assert!(!shares_end("useful", "careful"));
+        assert!(!shares_end("wonderful", "careful"));
+    }
+
+    #[test]
     fn ctc_runs_collapse_and_resume_where_they_end() {
         // blank 0: frames "0 5 5 0 5 7 7 0"
         let ids = [0, 5, 5, 0, 5, 7, 7, 0];
@@ -891,7 +940,7 @@ mod tests {
         assert_eq!(got, vec![5, 7]);
         match &hyp[1].resume {
             Resume::Ctc { frame, prev } => assert_eq!((*frame, *prev), (5, 5)),
-            Resume::Tdt(_) => unreachable!(),
+            Resume::Frame(_) => unreachable!(),
         }
     }
 }

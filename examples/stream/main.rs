@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! cargo run --release --example stream -- sessions OUT_DIR LIST.tsv [--seconds 120] [--count 10] [--seed 1]
-//! cargo run --release --example stream -- run MODEL SESSIONS.tsv [--realtime] [--threads N] [--interval S] [--factor F] [--input-rate HZ] [--piece-ms MS] [--basic] [--out DIR] [--limit N]
+//! cargo run --release --example stream -- run MODEL SESSIONS.tsv [--realtime] [--threads N] [--interval S] [--factor F] [--margin S] [--context S] [--input-rate HZ] [--piece-ms MS] [--basic] [--out DIR] [--limit N]
 //! ```
 //!
 //! `sessions` joins consecutive utterances of a list (`id<TAB>wav<TAB>text`, 16 kHz WAVs, the
@@ -218,6 +218,9 @@ struct Totals {
     streamed: score::Errors,
     offline: score::Errors,
     against_offline: score::Errors,
+    /// Offline transcription of the utterances the stream found.
+    segmented: score::Errors,
+    against_segmented: score::Errors,
     audio: f64,
     cpu: f64,
     passes: usize,
@@ -251,6 +254,15 @@ fn run(args: &[String]) -> Result<(), String> {
             "--interval" => {
                 config.min_interval = Duration::from_secs_f64(
                     value()?.parse().map_err(|_| "--interval takes seconds")?,
+                )
+            }
+            "--margin" => {
+                config.passes.settle_margin =
+                    Duration::from_secs_f64(value()?.parse().map_err(|_| "--margin takes seconds")?)
+            }
+            "--context" => {
+                config.passes.context = Duration::from_secs_f64(
+                    value()?.parse().map_err(|_| "--context takes seconds")?,
                 )
             }
             "--factor" => {
@@ -321,13 +333,34 @@ fn run(args: &[String]) -> Result<(), String> {
             );
         }
         let offline = offline.join(" ");
+        // Offline transcription of the utterances the stream found, to tell what splitting at
+        // pauses costs from what passes over partial audio cost.
+        let mut segmented = Vec::new();
+        for (from, to) in segments(&events) {
+            let (a, b) = (
+                (from * SAMPLE_RATE as f64) as usize,
+                ((to * SAMPLE_RATE as f64) as usize).min(clip.samples.len()),
+            );
+            if b > a + SAMPLE_RATE / 10 {
+                segmented.push(
+                    model
+                        .transcribe(&clip.samples[a..b])
+                        .map_err(|e| e.to_string())?
+                        .text,
+                );
+            }
+        }
+        let segmented = segmented.join(" ");
         let (r, s, o) = (
             normalize(&session.reference),
             normalize(&text),
             normalize(&offline),
         );
+        let g = normalize(&segmented);
         let streamed = score::count_errors(&r, &s);
         let off = score::count_errors(&r, &o);
+        let seg = score::count_errors(&r, &g);
+        let vs_seg = score::count_errors(&g, &s);
         let vs = score::count_errors(&o, &s);
         let delays: Vec<f64> = utterances
             .iter()
@@ -353,6 +386,11 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             std::fs::write(dir.join(format!("{}.events", session.id)), log)
                 .map_err(|e| e.to_string())?;
+            std::fs::write(
+                dir.join(format!("{}.offline.txt", session.id)),
+                format!("{offline}\n"),
+            )
+            .map_err(|e| e.to_string())?;
             std::fs::write(dir.join(format!("{}.txt", session.id)), format!("{text}\n"))
                 .map_err(|e| e.to_string())?;
         }
@@ -362,6 +400,8 @@ fn run(args: &[String]) -> Result<(), String> {
         totals.streamed += streamed;
         totals.offline += off;
         totals.against_offline += vs;
+        totals.segmented += seg;
+        totals.against_segmented += vs_seg;
         totals.audio += seconds;
         totals.cpu += cpu;
         totals.passes += stats.0;
@@ -482,6 +522,7 @@ fn replay_simulated(
 fn summarize(events: &[Timed]) -> (String, Vec<Utterance>, usize, usize) {
     let mut text = String::new();
     let mut utterances: Vec<Utterance> = Vec::new();
+    // The tentative words shown, and the words settled since they were shown.
     let mut shown: Vec<String> = Vec::new();
     let mut settled_since: Vec<String> = Vec::new();
     let mut replaced = 0;
@@ -500,35 +541,69 @@ fn summarize(events: &[Timed]) -> (String, Vec<Utterance>, usize, usize) {
         };
     for (t, e) in events {
         match e {
-            Event::SpeechStart { at } => utterances.push(Utterance {
-                onset: *at,
-                ..Default::default()
-            }),
-            Event::Settled { text: s } => {
+            Event::SpeechStart { utterance, at } => {
+                let i = *utterance as usize;
+                utterances.resize(utterances.len().max(i + 1), Utterance::default());
+                utterances[i].onset = *at;
+            }
+            Event::Settled { utterance, text: s } => {
                 text.push_str(s);
                 settled_words += s.split_whitespace().count();
                 settled_since.extend(words(s));
-                if let Some(u) = utterances.last_mut() {
+                if let Some(u) = utterances.get_mut(*utterance as usize) {
                     u.first_text.get_or_insert(*t);
                 }
             }
-            Event::Tentative { text: s } => {
-                if let Some(u) = utterances.last_mut()
+            Event::Tentative { utterance, text: s } => {
+                if let Some(u) = utterances.get_mut(*utterance as usize)
                     && !s.trim().is_empty()
                 {
                     u.first_text.get_or_insert(*t);
                 }
                 compare(&mut shown, &mut settled_since, words(s));
             }
-            Event::UtteranceEnd { speech_end, .. } => {
+            Event::UtteranceEnd {
+                utterance,
+                speech_end,
+                ..
+            } => {
                 compare(&mut shown, &mut settled_since, Vec::new());
-                if let Some(u) = utterances.last_mut() {
+                if let Some(u) = utterances.get_mut(*utterance as usize) {
                     u.final_text = Some(t - speech_end);
                 }
             }
         }
     }
     (text.trim().to_string(), utterances, replaced, settled_words)
+}
+
+/// The audio of each utterance a stream found, in seconds: from 300 ms before its onset (but
+/// not before the previous one's end) to where its end was decided.
+fn segments(events: &[Timed]) -> Vec<(f64, f64)> {
+    let mut onsets: Vec<Option<f64>> = Vec::new();
+    let mut out = Vec::new();
+    let mut previous_end = 0.0f64;
+    for (_, e) in events {
+        match e {
+            Event::SpeechStart { utterance, at } => {
+                let i = *utterance as usize;
+                onsets.resize(onsets.len().max(i + 1), None);
+                onsets[i] = Some(*at);
+            }
+            Event::UtteranceEnd {
+                utterance,
+                at,
+                speech_end,
+            } => {
+                if let Some(Some(onset)) = onsets.get(*utterance as usize) {
+                    out.push(((onset - 0.3f64).max(previous_end), *at));
+                }
+                previous_end = *speech_end;
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn median(v: &[f64]) -> f64 {
@@ -579,6 +654,11 @@ fn report(t: &Totals) {
         100.0 * t.offline.wer(),
         100.0 * t.against_offline.wer(),
         t.streamed.reference_words
+    );
+    println!(
+        "WER of offline transcription of the streamed utterances {:.2}%, streamed against it {:.2}%",
+        100.0 * t.segmented.wer(),
+        100.0 * t.against_segmented.wer()
     );
     println!(
         "passes: {}, {:.2} s each on average, longest {:.2} s, busy {:.0}% of the time; CPU {:.2} cores on average",
