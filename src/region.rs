@@ -354,7 +354,7 @@ mod map {
             // alive after its handle is closed.
             unsafe {
                 let mapping = CreateFileMappingW(
-                    file.as_raw_handle() as *mut c_void,
+                    file.as_raw_handle(),
                     std::ptr::null(),
                     PAGE_READONLY,
                     0,
