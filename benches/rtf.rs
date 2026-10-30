@@ -2,7 +2,7 @@
 //! with the time of each step and a check that every thread count gives bit-identical output.
 //!
 //! ```text
-//! cargo bench --bench rtf -- MODEL_DIR LIST.tsv [--threads 1,6] [--seconds 2,5,10,20,30,60] [--runs 3] [--isa scalar|avx2|avx512]
+//! cargo bench --bench rtf -- MODEL_DIR LIST.tsv [--threads 1,6] [--seconds 2,5,10,20,30,60] [--runs 3] [--isa scalar|avx2|avx512|neon]
 //! ```
 //!
 //! The clips are consecutive utterances of LIST.tsv (`id<TAB>wav path<TAB>text`, 16 kHz audio)
@@ -46,7 +46,7 @@ fn main() {
                     args.next()
                         .as_deref()
                         .and_then(Isa::from_name)
-                        .expect("--isa takes scalar, avx2 or avx512"),
+                        .expect("--isa takes scalar, avx2, avx512 or neon"),
                 )
             }
             _ => positional.push(arg),
@@ -54,7 +54,7 @@ fn main() {
     }
     let [model_dir, list] = positional.as_slice() else {
         eprintln!(
-            "Usage: rtf MODEL_DIR LIST.tsv [--threads 1,6] [--seconds 2,5,...] [--runs 3] [--isa scalar|avx2|avx512]"
+            "Usage: rtf MODEL_DIR LIST.tsv [--threads 1,6] [--seconds 2,5,...] [--runs 3] [--isa scalar|avx2|avx512|neon]"
         );
         std::process::exit(2);
     };

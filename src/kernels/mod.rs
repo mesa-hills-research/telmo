@@ -1,5 +1,5 @@
 //! Numeric kernels in f32, with a scalar version of each (also the reference in tests) and
-//! AVX2 or AVX-512 versions where the CPU has them.
+//! AVX2, AVX-512 or NEON versions where the CPU has them.
 //!
 //! The matrix product splits work between threads by output columns only, so every output is
 //! summed in the same order whatever the thread count, and results are bit-identical across
@@ -21,12 +21,14 @@ use crate::threads::{Pool, SharedMut};
 mod avx2;
 #[cfg(target_arch = "x86_64")]
 mod avx512;
+#[cfg(target_arch = "aarch64")]
+mod neon;
 pub(crate) mod scalar;
 
 /// Output columns per weight panel, the width of the matrix product's register tile.
 pub const PANEL: usize = 16;
-/// Rows of the matrix product's register tile on AVX2 and in the scalar kernels. AVX-512 uses
-/// 12 (see [`Kernels::tile_rows`]).
+/// Rows of the matrix product's register tile on AVX2, on NEON and in the scalar kernels.
+/// AVX-512 uses 12 (see [`Kernels::tile_rows`]).
 pub const TILE_ROWS: usize = 6;
 /// Inputs per block of the matrix product (a 16 KB block of a weight panel).
 const KC: usize = 256;
@@ -39,14 +41,16 @@ pub enum Isa {
     Avx2,
     /// AVX-512F with FMA and F16C, on x86-64.
     Avx512,
+    /// NEON, on aarch64.
+    Neon,
 }
 
 impl Isa {
-    pub const ALL: [Isa; 3] = [Isa::Scalar, Isa::Avx2, Isa::Avx512];
+    pub const ALL: [Isa; 4] = [Isa::Scalar, Isa::Avx2, Isa::Avx512, Isa::Neon];
 
     /// The best instruction set this CPU supports.
     pub fn detect() -> Isa {
-        [Isa::Avx512, Isa::Avx2]
+        [Isa::Avx512, Isa::Avx2, Isa::Neon]
             .into_iter()
             .find(|isa| isa.is_supported())
             .unwrap_or(Isa::Scalar)
@@ -68,8 +72,12 @@ impl Isa {
                     && std::arch::is_x86_feature_detected!("fma")
                     && std::arch::is_x86_feature_detected!("f16c")
             }
+            #[cfg(target_arch = "aarch64")]
+            Isa::Neon => std::arch::is_aarch64_feature_detected!("neon"),
             #[cfg(not(target_arch = "x86_64"))]
             Isa::Avx2 | Isa::Avx512 => false,
+            #[cfg(not(target_arch = "aarch64"))]
+            Isa::Neon => false,
         }
     }
 
@@ -78,15 +86,17 @@ impl Isa {
             Isa::Scalar => "scalar",
             Isa::Avx2 => "avx2+fma+f16c",
             Isa::Avx512 => "avx512f+fma+f16c",
+            Isa::Neon => "neon",
         }
     }
 
-    /// The instruction set of a short name, `scalar`, `avx2` or `avx512`.
+    /// The instruction set of a short name, `scalar`, `avx2`, `avx512` or `neon`.
     pub fn from_name(name: &str) -> Option<Isa> {
         Some(match name {
             "scalar" => Isa::Scalar,
             "avx2" => Isa::Avx2,
             "avx512" => Isa::Avx512,
+            "neon" => Isa::Neon,
             _ => return None,
         })
     }
@@ -440,8 +450,12 @@ impl Kernels {
             Isa::Avx2 => avx2::kernels(),
             #[cfg(target_arch = "x86_64")]
             Isa::Avx512 => avx512::kernels(),
+            #[cfg(target_arch = "aarch64")]
+            Isa::Neon => neon::kernels(),
             #[cfg(not(target_arch = "x86_64"))]
             Isa::Avx2 | Isa::Avx512 => unreachable!(),
+            #[cfg(not(target_arch = "aarch64"))]
+            Isa::Neon => unreachable!(),
         })
     }
 
@@ -766,7 +780,12 @@ mod tests {
         }
         #[cfg(not(target_arch = "x86_64"))]
         assert!(!Isa::Avx2.is_supported() && !Isa::Avx512.is_supported());
+        #[cfg(not(target_arch = "aarch64"))]
+        assert!(!Isa::Neon.is_supported());
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(Isa::detect(), Isa::Neon);
         assert_eq!(Isa::from_name("avx512"), Some(Isa::Avx512));
+        assert_eq!(Isa::from_name("neon"), Some(Isa::Neon));
         assert_eq!(Isa::from_name("avx"), None);
     }
 

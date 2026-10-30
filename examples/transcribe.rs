@@ -1,7 +1,7 @@
 //! Transcribes WAV files and prints the text with timings.
 //!
 //! ```text
-//! cargo run --release --example transcribe -- MODEL_DIR FILE.wav... [--threads N] [--isa scalar|avx2|avx512] [--steps] [--repeat N]
+//! cargo run --release --example transcribe -- MODEL_DIR FILE.wav... [--threads N] [--isa scalar|avx2|avx512|neon] [--steps] [--repeat N]
 //! ```
 //!
 //! MODEL_DIR holds `model.safetensors`, `config.json` and `tokenizer.json` of
@@ -49,7 +49,7 @@ fn run() -> Result<(), String> {
                     args.next()
                         .as_deref()
                         .and_then(Isa::from_name)
-                        .ok_or("--isa takes scalar, avx2 or avx512")?,
+                        .ok_or("--isa takes scalar, avx2, avx512 or neon")?,
                 )
             }
             "--steps" => steps = true,
@@ -57,7 +57,7 @@ fn run() -> Result<(), String> {
         }
     }
     if paths.len() < 2 {
-        return Err("Usage: transcribe MODEL_DIR FILE.wav... [--threads N] [--isa scalar|avx2|avx512] [--steps] [--repeat N]".into());
+        return Err("Usage: transcribe MODEL_DIR FILE.wav... [--threads N] [--isa scalar|avx2|avx512|neon] [--steps] [--repeat N]".into());
     }
     let model_dir = paths.remove(0);
 
