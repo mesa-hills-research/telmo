@@ -18,6 +18,7 @@ use telmo::json::{self, Value};
 use telmo::kernels::Isa;
 use telmo::parakeet::{DecodeTrace, Timings};
 use telmo::safetensors::SafeTensors;
+use telmo::tokenizer::Tokenizer;
 use telmo::{Options, Parakeet, Precision};
 
 /// Features may differ by this much (after normalization to unit variance). The reference
@@ -265,6 +266,28 @@ fn check_clip(model: &Parakeet, clip: &mut Clip) {
         .decode(&tokens.iter().map(|t| t.id).collect::<Vec<_>>());
     assert_eq!(text, clip.reference_text, "{id}: text");
     assert!(errors.is_empty(), "{id}: errors over tolerance {errors:?}");
+}
+
+#[test]
+#[ignore = "needs the model files, see the top of this file"]
+fn the_tokenizer_encodes_like_the_reference() {
+    let tokenizer = Tokenizer::load(&model_dir().join("tokenizer.json")).unwrap();
+    let vectors =
+        std::fs::read(golden_dir().join("encode-vectors.json")).expect("encode-vectors.json");
+    let vectors = json::parse(&vectors).unwrap();
+    let vectors = vectors.get("vectors").and_then(Value::as_array).unwrap();
+    assert!(vectors.len() >= 200);
+    for vector in vectors {
+        let text = vector.get("text").and_then(Value::as_str).unwrap();
+        let want: Vec<u32> = vector
+            .get("ids")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|i| i.as_u64().unwrap() as u32)
+            .collect();
+        assert_eq!(tokenizer.encode(text), want, "{text}");
+    }
 }
 
 #[test]
