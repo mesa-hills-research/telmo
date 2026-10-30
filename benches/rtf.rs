@@ -2,7 +2,7 @@
 //! with the time of each step and a check that every thread count gives bit-identical output.
 //!
 //! ```text
-//! cargo bench --bench rtf -- MODEL LIST.tsv [--threads 1,6] [--seconds 2,5,10,20,30,60] [--runs 3] [--isa scalar|avx2] [--precision P]
+//! cargo bench --bench rtf -- MODEL LIST.tsv [--threads 1,6] [--seconds 2,5,10,20,30,60] [--runs 3] [--isa scalar|avx2|avx512|neon] [--precision P]
 //! ```
 //!
 //! MODEL is what `Parakeet::load` takes. `--precision` applies when it isn't a pack.
@@ -45,11 +45,12 @@ fn main() {
             }
             "--runs" => runs = args.next().unwrap().parse().unwrap(),
             "--isa" => {
-                isa = Some(if args.next().as_deref() == Some("scalar") {
-                    Isa::Scalar
-                } else {
-                    Isa::Avx2
-                })
+                isa = Some(
+                    args.next()
+                        .as_deref()
+                        .and_then(Isa::from_name)
+                        .expect("--isa takes scalar, avx2, avx512 or neon"),
+                )
             }
             "--precision" => {
                 precision = Precision::from_name(&args.next().unwrap()).expect("a precision")
@@ -59,7 +60,7 @@ fn main() {
     }
     let [model_dir, list] = positional.as_slice() else {
         eprintln!(
-            "Usage: rtf MODEL LIST.tsv [--threads 1,6] [--seconds 2,5,...] [--runs 3] [--isa scalar|avx2] [--precision P]"
+            "Usage: rtf MODEL LIST.tsv [--threads 1,6] [--seconds 2,5,...] [--runs 3] [--isa scalar|avx2|avx512|neon] [--precision P]"
         );
         std::process::exit(2);
     };
