@@ -7,6 +7,7 @@
 
 use std::time::Instant;
 
+use notate::features::{FrontEnd, FrontEndConfig};
 use notate::resample::Resampler;
 use notate::vad::{Vad, VadConfig};
 
@@ -36,6 +37,21 @@ fn main() {
         }
     });
     report("voice activity", per_second);
+
+    let front_end = FrontEnd::new(FrontEndConfig::parakeet());
+    let per_second = best_of(|| {
+        let mut stream = front_end.stream();
+        for block in audio.chunks(320) {
+            stream.push(block);
+        }
+        stream.finish();
+        std::hint::black_box(stream.normalize(0..stream.frames()));
+    });
+    report("log-mel features, streamed", per_second);
+    let per_second = best_of(|| {
+        std::hint::black_box(front_end.compute(&audio).unwrap());
+    });
+    report("log-mel features, offline", per_second);
 }
 
 /// The best time of `RUNS` runs of `f`, in seconds per second of audio.
