@@ -357,9 +357,31 @@ fn word_end(s: &[char], i: usize) -> usize {
 /// The filler patterns of 2026 after "ah-ha", each a sequence of a character or a set in
 /// brackets with an optional `+` or `*`. Python writes the tenth as `m{2,}`.
 const FILLERS_2026: [&str; 25] = [
-    "a+h+m*", "a+h+a+", "e+h+m*", "e+m+", "e+r+m*", "h+a+h+", "h+e+h+", "h+m+", "h+u+h+", "mm+",
-    "m+h+m*", "t+s+k+", "u+g+h+", "u+h+m*", "u+h+u+[hm]*", "u+m+h*", "ahem", "eheh", "ehehe",
-    "ehr", "hmmph", "hum", "hunh", "mhum", "mmkay",
+    "a+h+m*",
+    "a+h+a+",
+    "e+h+m*",
+    "e+m+",
+    "e+r+m*",
+    "h+a+h+",
+    "h+e+h+",
+    "h+m+",
+    "h+u+h+",
+    "mm+",
+    "m+h+m*",
+    "t+s+k+",
+    "u+g+h+",
+    "u+h+m*",
+    "u+h+u+[hm]*",
+    "u+m+h*",
+    "ahem",
+    "eheh",
+    "ehehe",
+    "ehr",
+    "hmmph",
+    "hum",
+    "hunh",
+    "mhum",
+    "mmkay",
 ];
 
 /// Whether a whole word matches a filler pattern. Each pattern's neighbouring parts take
@@ -511,7 +533,8 @@ const REPLACERS: [(&str, bool, &str); 49] = [
 /// The words that "'s" expands after in 2026,
 /// `\b(it|he|she|what|that|who|here|there|how|when|where|why|this)'s\b`.
 const IS_WORDS: [&str; 13] = [
-    "it", "he", "she", "what", "that", "who", "here", "there", "how", "when", "where", "why", "this",
+    "it", "he", "she", "what", "that", "who", "here", "there", "how", "when", "where", "why",
+    "this",
 ];
 
 /// The 2026 replacer `\b(it|he|...|this)'s\b`, which becomes `\1 is`.

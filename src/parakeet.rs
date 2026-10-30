@@ -1315,9 +1315,14 @@ impl Parakeet {
         timings: &mut Timings,
     ) -> Vec<(Token, DecoderState)> {
         let mut out = Vec::new();
-        self.decode_inner(encoded, offset, state.clone(), timings, None, &mut |token, after| {
-            out.push((token, after.clone()))
-        });
+        self.decode_inner(
+            encoded,
+            offset,
+            state.clone(),
+            timings,
+            None,
+            &mut |token, after| out.push((token, after.clone())),
+        );
         out
     }
 

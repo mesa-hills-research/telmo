@@ -141,15 +141,25 @@ fn main() {
                 Model::Parakeet(m) => {
                     let features = m.features(samples).unwrap();
                     let mut timings = Timings::default();
-                    m.encode(&features.data, features.frames, &mut timings, &mut |_, _, _| {})
-                        .data
+                    m.encode(
+                        &features.data,
+                        features.frames,
+                        &mut timings,
+                        &mut |_, _, _| {},
+                    )
+                    .data
                 }
                 Model::Granite(m) => {
                     let features = m.features(samples).unwrap();
                     let mut timings = Timings::default();
-                    m.encode(&features.data, features.frames, &mut timings, &mut |_, _, _| {})
-                        .unwrap()
-                        .data
+                    m.encode(
+                        &features.data,
+                        features.frames,
+                        &mut timings,
+                        &mut |_, _, _| {},
+                    )
+                    .unwrap()
+                    .data
                 }
             };
             outputs[i].push(encoded);

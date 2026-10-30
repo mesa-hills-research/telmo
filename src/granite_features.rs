@@ -113,8 +113,11 @@ impl GraniteFrontEnd {
             };
             *s = samples.get(j).map_or(0.0, |&v| v as f64) * self.window[i];
         }
-        self.fft
-            .forward(&buffers.segment, &mut buffers.spectrum, &mut buffers.scratch);
+        self.fft.forward(
+            &buffers.segment,
+            &mut buffers.spectrum,
+            &mut buffers.scratch,
+        );
         for (p, s) in buffers.power.iter_mut().zip(&buffers.spectrum) {
             *p = s.norm_sqr();
         }

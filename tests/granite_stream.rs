@@ -180,10 +180,7 @@ fn compare(model: &Granite, stream: &GraniteStream, reference: &Offline) -> Comp
         same_ids,
         same_text: stream.text(model) == reference.text,
         frozen_l2,
-        encoder_l2: relative_l2(
-            stream.encoder_output(model, 0, frames),
-            &reference.encoded,
-        ),
+        encoder_l2: relative_l2(stream.encoder_output(model, 0, frames), &reference.encoded),
     }
 }
 

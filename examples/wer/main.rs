@@ -319,12 +319,7 @@ fn report(
 ) {
     let normalized: Vec<(String, String)> = pairs
         .iter()
-        .map(|(u, hyp)| {
-            (
-                scoring.units(&u.reference),
-                scoring.units(hyp),
-            )
-        })
+        .map(|(u, hyp)| (scoring.units(&u.reference), scoring.units(hyp)))
         .collect();
     let scored = normalized
         .iter()

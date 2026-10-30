@@ -93,10 +93,12 @@ impl Tokenizer {
         let decoder = root.get("decoder");
         let byte_runs = decoder.is_some_and(|d| {
             d.get("type").and_then(|t| t.as_str()) == Some("ByteFallback")
-                || d.get("decoders").and_then(|l| l.as_array()).is_some_and(|l| {
-                    l.iter()
-                        .any(|d| d.get("type").and_then(|t| t.as_str()) == Some("ByteFallback"))
-                })
+                || d.get("decoders")
+                    .and_then(|l| l.as_array())
+                    .is_some_and(|l| {
+                        l.iter()
+                            .any(|d| d.get("type").and_then(|t| t.as_str()) == Some("ByteFallback"))
+                    })
         });
         Ok(Tokenizer { pieces, byte_runs })
     }
