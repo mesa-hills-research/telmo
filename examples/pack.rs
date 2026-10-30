@@ -16,8 +16,7 @@ use std::time::Instant;
 
 use notate::Precision;
 use notate::model::ModelType;
-use notate::pack::{FileSink, Kind, Pack};
-use notate::parakeet;
+use notate::pack::{self, FileSink, Kind, Pack};
 
 fn main() -> ExitCode {
     match run() {
@@ -74,7 +73,7 @@ fn run() -> Result<(), String> {
     let mut sink = FileSink::create(
         output,
         model.pack_model(),
-        parakeet::pack_metadata(input, precision),
+        pack::metadata_for(input, precision),
     )
     .map_err(|e| e.to_string())?;
     model

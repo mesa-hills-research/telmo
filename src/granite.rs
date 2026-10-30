@@ -20,7 +20,7 @@ use crate::granite_features::GraniteFrontEnd;
 use crate::json;
 use crate::kernels::{Act, BView, Epilogue, Isa, Kernels, PackedWeights, for_rows};
 use crate::pack::{MemorySink, Pack, Sink};
-use crate::parakeet::{Options, Timings, Token, Transcript, pack_metadata};
+use crate::parakeet::{Options, Timings, Token, Transcript};
 use crate::quant::{Precision, Rows};
 use crate::region::Vector;
 use crate::safetensors::SafeTensors;
@@ -270,17 +270,47 @@ pub fn convert(
         let (p, o) = (format!("encoder.layers.{i}"), format!("blocks.{i}"));
         for n in [1, 2] {
             let f = format!("{o}.ff{n}");
-            norm(src, sink, &format!("{p}.norm_feed_forward{n}"), &format!("{f}.norm"))?;
+            norm(
+                src,
+                sink,
+                &format!("{p}.norm_feed_forward{n}"),
+                &format!("{f}.norm"),
+            )?;
             let ff = format!("{p}.feed_forward{n}");
-            linear(src, sink, &format!("{ff}.linear1"), &format!("{f}.up"), c.ff, d)?;
-            linear(src, sink, &format!("{ff}.linear2"), &format!("{f}.down"), d, c.ff)?;
+            linear(
+                src,
+                sink,
+                &format!("{ff}.linear1"),
+                &format!("{f}.up"),
+                c.ff,
+                d,
+            )?;
+            linear(
+                src,
+                sink,
+                &format!("{ff}.linear2"),
+                &format!("{f}.down"),
+                d,
+                c.ff,
+            )?;
         }
-        norm(src, sink, &format!("{p}.norm_self_att"), &format!("{o}.norm_att"))?;
+        norm(
+            src,
+            sink,
+            &format!("{p}.norm_self_att"),
+            &format!("{o}.norm_att"),
+        )?;
         let qkv = ["q", "k", "v"]
             .iter()
             .map(|x| src.matrix(&format!("{p}.self_attn.{x}_proj.weight"), &[d, d]))
             .collect::<Result<Vec<_>>>()?;
-        sink.matrix(&format!("{o}.qkv"), &Matrix::stack(qkv).rows(), 3 * d, d, precision)?;
+        sink.matrix(
+            &format!("{o}.qkv"),
+            &Matrix::stack(qkv).rows(),
+            3 * d,
+            d,
+            precision,
+        )?;
         // Distance i - j inside a block reads row max_relative + i - j. Keep the rows from
         // distance context - 1 down to 1 - context, so column m is distance context - 1 - m.
         let table = src.tensor(
@@ -294,8 +324,20 @@ pub fn convert(
             rel.extend_from_slice(&table[r * hd..(r + 1) * hd]);
         }
         sink.matrix(&format!("{o}.rel"), &Rows::F32(&rel), rows, hd, precision)?;
-        linear(src, sink, &format!("{p}.self_attn.o_proj"), &format!("{o}.out"), d, d)?;
-        norm(src, sink, &format!("{p}.norm_conv"), &format!("{o}.norm_conv"))?;
+        linear(
+            src,
+            sink,
+            &format!("{p}.self_attn.o_proj"),
+            &format!("{o}.out"),
+            d,
+            d,
+        )?;
+        norm(
+            src,
+            sink,
+            &format!("{p}.norm_conv"),
+            &format!("{o}.norm_conv"),
+        )?;
         let pw1 = format!("{p}.conv.pointwise_lin1");
         linear(src, sink, &pw1, &format!("{o}.pw1"), 2 * cc, d)?;
         let gamma = src.tensor(&format!("{p}.conv.norm.weight"), &[cc])?;
@@ -316,7 +358,12 @@ pub fn convert(
         sink.f32(&format!("{o}.dw.b"), &[cc], &dw_b)?;
         let pw2 = format!("{p}.conv.pointwise_lin2");
         linear(src, sink, &pw2, &format!("{o}.pw2"), d, cc)?;
-        norm(src, sink, &format!("{p}.norm_out"), &format!("{o}.norm_out"))?;
+        norm(
+            src,
+            sink,
+            &format!("{p}.norm_out"),
+            &format!("{o}.norm_out"),
+        )?;
     }
     linear(src, sink, "encoder.out", "head", c.vocab, d)?;
     linear(src, sink, "encoder.out_mid", "mid", d, c.vocab)
@@ -332,21 +379,6 @@ pub fn convert_path(path: &Path, precision: Precision, sink: &mut dyn Sink) -> R
     let (config, tokenizer) = (read("config.json")?, read("tokenizer.json")?);
     let mut st = SafeTensors::open(&path.join("model.safetensors"))?;
     convert(&mut st, &config, &tokenizer, precision, sink)
-}
-
-/// The precision a pack's weight matrices are in, if they share one.
-fn pack_precision(pack: &Pack) -> Option<Precision> {
-    let mut found = None;
-    for entry in pack.entries() {
-        if let crate::pack::Kind::Matrix { precision, .. } = entry.kind {
-            match found {
-                None => found = Some(precision),
-                Some(p) if p != precision => return None,
-                _ => {}
-            }
-        }
-    }
-    found
 }
 
 /// A loaded Granite Speech CTC model.
@@ -379,7 +411,10 @@ impl Granite {
         if path.is_file() {
             return Granite::from_pack(&Pack::open(path)?, options);
         }
-        let mut sink = MemorySink::new(PACK_MODEL, pack_metadata(path, options.precision));
+        let mut sink = MemorySink::new(
+            PACK_MODEL,
+            crate::pack::metadata_for(path, options.precision),
+        );
         convert_path(path, options.precision, &mut sink)?;
         Granite::from_pack(&sink.finish()?, options)
     }
@@ -459,7 +494,7 @@ impl Granite {
             tokenizer,
             kernels,
             pool: Pool::new(options.threads),
-            precision: pack_precision(pack),
+            precision: pack.precision(),
         })
     }
 
@@ -491,7 +526,13 @@ impl Granite {
         let mut total = linear(&w.input) + linear(&w.head) + linear(&w.mid);
         for b in &w.blocks {
             total += [
-                &b.ff1.up, &b.ff1.down, &b.out, &b.pw1, &b.pw2, &b.ff2.up, &b.ff2.down,
+                &b.ff1.up,
+                &b.ff1.down,
+                &b.out,
+                &b.pw1,
+                &b.pw2,
+                &b.ff2.up,
+                &b.ff2.down,
             ]
             .iter()
             .map(|l| linear(l))
@@ -687,7 +728,9 @@ impl Granite {
 
         self.feed_forward(&b.ff1, x, t, s, timings);
 
-        timed(timings, "layer_norm", || self.norm(&b.norm_att, x, &mut s.h, t));
+        timed(timings, "layer_norm", || {
+            self.norm(&b.norm_att, x, &mut s.h, t)
+        });
         timed(timings, "qkv", || {
             k.linear(
                 pool,
@@ -982,14 +1025,20 @@ mod tests {
         assert_eq!((c.conv_kernel, c.conv_channels, c.n_mels), (7, 2048, 80));
         assert_eq!((c.context, c.max_relative), (128, 512));
         assert_eq!(c.subsample_layers, vec![0, 1]);
-        assert_eq!((c.vocab, c.blank, c.self_conditioning_layer()), (16384, 0, 7));
+        assert_eq!(
+            (c.vocab, c.blank, c.self_conditioning_layer()),
+            (16384, 0, 7)
+        );
         assert_eq!(c.frames_for(337), 84);
         assert_eq!(c.frames_for(3), 0);
         for (from, to) in [
             ("granite_speech5_ctc", "parakeet_tdt"),
             (r#""hidden_act":"silu""#, r#""hidden_act":"relu""#),
             (r#""context_size":128"#, r#""context_size":1024"#),
-            (r#""tie_word_embeddings":true"#, r#""tie_word_embeddings":false"#),
+            (
+                r#""tie_word_embeddings":true"#,
+                r#""tie_word_embeddings":false"#,
+            ),
             (r#""subsample_layers":[0,1]"#, r#""subsample_layers":[1,0]"#),
             (r#""num_key_value_heads":8"#, r#""num_key_value_heads":4"#),
         ] {
@@ -1003,10 +1052,8 @@ mod tests {
     #[test]
     fn ctc_merges_repeats_and_drops_blanks() {
         let tokens = ctc_tokens(&[0, 5, 5, 0, 5, 7, 7, 7, 0, 0, 2], 0);
-        let got: Vec<(u32, u32, u32)> = tokens
-            .iter()
-            .map(|t| (t.id, t.frame, t.duration))
-            .collect();
+        let got: Vec<(u32, u32, u32)> =
+            tokens.iter().map(|t| (t.id, t.frame, t.duration)).collect();
         assert_eq!(got, vec![(5, 1, 2), (5, 4, 1), (7, 5, 3), (2, 10, 1)]);
         assert!(ctc_tokens(&[0, 0], 0).is_empty());
     }
