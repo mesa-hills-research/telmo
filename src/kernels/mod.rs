@@ -48,12 +48,41 @@ pub enum Isa {
 impl Isa {
     pub const ALL: [Isa; 4] = [Isa::Scalar, Isa::Avx2, Isa::Avx512, Isa::Neon];
 
-    /// The best instruction set this CPU supports.
+    /// The instruction set used unless a caller names one: the one the `NOTATE_ISA`
+    /// environment variable names (`scalar`, `avx2`, `avx512` or `neon`) if this CPU runs it,
+    /// otherwise AVX2 where the CPU has it and the scalar kernels elsewhere.
+    ///
+    /// The AVX-512 and NEON kernels are compared with the scalar ones by the tests but haven't
+    /// run on real hardware yet, so they are used only when named, here or in `Options::isa`.
     pub fn detect() -> Isa {
+        Isa::choose(std::env::var("NOTATE_ISA").ok().as_deref())
+    }
+
+    /// The default for a value of `NOTATE_ISA`.
+    fn choose(requested: Option<&str>) -> Isa {
+        if let Some(isa) = requested.and_then(Isa::from_name)
+            && isa.is_supported()
+        {
+            return isa;
+        }
+        if Isa::Avx2.is_supported() {
+            Isa::Avx2
+        } else {
+            Isa::Scalar
+        }
+    }
+
+    /// The fastest instruction set this CPU supports, AVX-512 and NEON included.
+    pub fn fastest() -> Isa {
         [Isa::Avx512, Isa::Avx2, Isa::Neon]
             .into_iter()
             .find(|isa| isa.is_supported())
             .unwrap_or(Isa::Scalar)
+    }
+
+    /// Whether the kernels have run on real hardware. The others are opt-in.
+    pub fn is_verified(self) -> bool {
+        matches!(self, Isa::Scalar | Isa::Avx2)
     }
 
     /// Whether this CPU can run the instruction set. Those of other architectures never run.
@@ -825,11 +854,25 @@ mod tests {
         assert!(!Isa::Avx2.is_supported() && !Isa::Avx512.is_supported());
         #[cfg(not(target_arch = "aarch64"))]
         assert!(!Isa::Neon.is_supported());
-        #[cfg(target_arch = "aarch64")]
-        assert_eq!(Isa::detect(), Isa::Neon);
+        assert!(Isa::fastest().is_supported());
         assert_eq!(Isa::from_name("avx512"), Some(Isa::Avx512));
         assert_eq!(Isa::from_name("neon"), Some(Isa::Neon));
         assert_eq!(Isa::from_name("avx"), None);
+    }
+
+    #[test]
+    fn only_kernels_run_on_real_hardware_are_chosen_unless_named() {
+        let default = Isa::choose(None);
+        assert!(default.is_verified() && default.is_supported());
+        assert_eq!(default == Isa::Avx2, Isa::Avx2.is_supported());
+        assert_eq!(Isa::choose(Some("scalar")), Isa::Scalar);
+        assert_eq!(Isa::choose(Some("bogus")), default);
+        for name in ["avx512", "neon"] {
+            let isa = Isa::from_name(name).unwrap();
+            assert!(!isa.is_verified());
+            let want = if isa.is_supported() { isa } else { default };
+            assert_eq!(Isa::choose(Some(name)), want);
+        }
     }
 
     /// Every tile output is the sum of its products in input order, fused on the instruction
