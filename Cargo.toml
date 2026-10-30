@@ -30,3 +30,7 @@ test = true
 [[bench]]
 name = "matmul"
 harness = false
+
+[[bench]]
+name = "rtf"
+harness = false
