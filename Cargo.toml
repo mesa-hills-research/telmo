@@ -38,3 +38,7 @@ harness = false
 [[bench]]
 name = "weights"
 harness = false
+
+[[bench]]
+name = "stream"
+harness = false
