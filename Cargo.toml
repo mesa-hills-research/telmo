@@ -22,6 +22,11 @@ debug = "line-tables-only"
 opt-level = 3
 debug = "line-tables-only"
 
+# The WER example's normalizer and scorer have tests of their own.
+[[example]]
+name = "wer"
+test = true
+
 [[bench]]
 name = "matmul"
 harness = false

@@ -1,0 +1,869 @@
+Hello, world!
+HELLO WORLD
+The quick brown fox jumps over the lazy dog.
+I have twenty-five apples and thirty two oranges.
+It cost $20 million in 2019.
+He paid twenty dollars and fifty cents.
+She paid £3.50 for a coffee.
+The price is €1,250.99 today.
+That's 50% off, or fifty percent, or fifty per cent.
+About 3.5% of people.
+One hundred and twenty three thousand four hundred and fifty six.
+one thousand nine hundred and eighty four
+nineteen eighty four
+twenty twenty-four
+two thousand and twenty four
+In 1984, George Orwell wrote a book.
+The 1960s were wild, and so were the '70s.
+Call me at five five five, one two one two.
+My number is one oh five.
+Room one oh one.
+Agent double oh seven.
+It was triple seven at the casino.
+Flight two two oh nine departs at 7:45 p.m.
+Meet me at 10:30 a.m. on the 3rd of May.
+It's 2:00 o'clock.
+The meeting is at half past three.
+I'm on the 21st floor, she's on the twenty-first.
+He came in first, I came in second, and they came third.
+The fourth, fifth, sixth, seventh, eighth, ninth and tenth.
+The twelfth night and the twentieth century.
+Our nineteenth birthday and his ninetieth.
+They're in their thirties; we're in our forties.
+Sixes and sevens.
+Ones and twos.
+Hundreds of thousands of millions.
+The thousandth visitor.
+Three point one four one five nine.
+Zero point five.
+Point five.
+0.5 and .5 and 5.
+Pi is roughly 3.14159.
+Two and a half hours.
+Five and a half million dollars.
+and a half
+A half and a half.
+It's minus five degrees, or negative five.
+Plus or minus two percent.
+The temperature dropped to -5 °C.
+1/2 cup of sugar and 3/4 cup of flour.
+One half, one third, two thirds, three quarters.
+½ teaspoon of salt, ¼ cup of milk.
+Pages 10-20 and chapters 3–5.
+From 1990 to 2000.
+Between five and ten people.
+x² + y² = z²
+H₂O is water.
+Mr. Smith met Dr. Jones and Mrs. Brown.
+St. Louis and St. Paul.
+Prof. Higgins, Capt. Hook, Gen. Patton and Lt. Dan.
+Rev. King, Sen. Warren, Rep. Pelosi, Gov. Newsom, Pres. Lincoln.
+Hon. Judge Judy, Asst. Manager Bob, Assoc. Professor Lee, Col. Sanders.
+Martin Luther King Jr. and Sr. Mary, John Doe Esq.
+Ald. Johnson voted.
+I won't, you can't, let's go, ain't nobody, y'all.
+I wanna go, I gotta go, I'm gonna go.
+I'ma do it. Imma do it.
+I woulda, coulda, shoulda.
+Yes ma'am.
+He'd been there. She's been here. They'd gone. It's gone. We'd done it. He's got it.
+Don't, doesn't, didn't, isn't, aren't, wasn't, weren't.
+You're, they're, we're.
+It's, he's, she's, that's, what's, there's.
+I'd, you'd, he'd. I'll, you'll, we'll.
+I've, you've, we've. I'm here.
+John's car and James' house.
+The dog's bone and the dogs' bones.
+Rock 'n' roll.
+'Tis the season.
+O'Brien and D'Angelo.
+It’s a curly apostrophe, isn’t it? I’m sure you’ll agree.
+‘Single quotes’ and “double quotes”.
+Don’t you dare!
+Um, I think, uh, we should go.
+Uh huh. Mm hmm. Hmm. Mhm. Mmm.
+Um... uh... er... ah... eh...
+Umm, uhh, hmmm.
+I mean, like, you know.
+[laughter] That's funny. [applause]
+<unk> said the man.
+(inaudible) and then he left.
+He said (quietly) that it was fine.
+Nested ((brackets)) here.
+Unclosed (parenthesis here.
+Unclosed [bracket here.
+Empty () and [] and <>.
+The colour of the theatre was grey.
+I realise the organisation's behaviour was centred on defence.
+The programme's catalogue analysed the neighbours' favourite flavours.
+Travelling travellers cancelled their cheques at the jewellery centre.
+Aeroplanes, aluminium and archaeology.
+Archaeological cancellation of the pummelled snowploughs on the travelogue.
+OK, ok, okay, kay.
+Etcetera, etc.
+Café, naïve, résumé, façade, jalapeño, Zoë, Noël.
+Ångström, Øresund, Æsir, straße, Łódź, Đorđe, þorn.
+Crème brûlée à la carte.
+Ça va? Où est la bibliothèque?
+Müller, Schröder, Gößner.
+São Paulo and Bogotá.
+Ελληνικά, Русский, 日本語, 한국어, العربية, עברית.
+Ⅻ o'clock and Ⅳ chapters.
+① ② ③
+ﬁne ﬂower
+™ ® © ℠
+Fullwidth ＡＢＣ １２３
+I ❤️ NY 🙂👍
+The ∞ symbol and the → arrow.
+50°F is 10°C.
+#hashtag @mention http://example.com/path?q=1
+email@example.com
+5 * 3 = 15, 10 / 2 = 5, 2 + 2 = 4, 7 - 3 = 4.
+A & B, C | D, E ^ F, ~G.
+Fifty-fifty chance.
+A well-known, long-term, state-of-the-art e-mail.
+Re-enter the co-op.
+Twenty-one, thirty-two, forty-three, fifty-four, sixty-five, seventy-six, eighty-seven, ninety-eight.
+One hundred one, one hundred and one.
+A hundred, a thousand, a million.
+Hundred, thousand.
+1,000,000 people and 1.000.000 people.
+10,000 and 10 000.
+3,14 and 3.14.
+The year 2000 and Y2K.
+COVID-19 and the 5G network.
+Windows 10, iPhone 12, PS5.
+MP3, MP4, 4K, 3D, A4 paper.
+1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st, 22nd, 23rd, 101st.
+1 st, 2 nd, 3 rd, 4 th.
+the 1990 s and 1990s
+He's 6'2" tall.
+It's 5 o'clock somewhere.
+$5, $50, $500, $5,000, $5.00, $0.50, $0.05.
+5 dollars, 50 cents, five dollars and five cents.
+Two dollars and seven cents.
+$2 and 7 cents.
+£1 and 10p.
+€5 and 20 cents.
+¢50
+It costs one dollar.
+It costs a dollar.
+One, two, three.
+One two three.
+I have one.
+The one and only.
+It was the ones I wanted.
+1 and 1s and 10s.
+He's number 1.
+Number one.
+One by one.
+Oh, I see.
+Oh no, oh my, oh well.
+Oh oh.
+Zero, zero, seven.
+O two.
+Double you.
+Triple threat.
+Double double.
+Point blank.
+The point is, and so on.
+And, and, and.
+Plus.
+Minus.
+Per se.
+Per cent.
+Percent.
+Dollars.
+Pounds of flour.
+Ten pounds.
+Ten pound note.
+Ten euro.
+Euros.
+Five cent coin.
+Twenty-one guns.
+Twenty one guns.
+Twenty first century.
+Two thousand and one: a space odyssey.
+Nineteen oh five.
+Twenty oh one.
+Oh one oh one.
+Seven fifty.
+Seven fifty five.
+Seven fifty-five p.m.
+Six thirty.
+Eleven eleven.
+Twelve hundred.
+Fifteen hundred and sixty.
+Nineteen hundred.
+Twenty two hundred.
+Nine eleven.
+Four oh four.
+Two by four.
+One point five million.
+One point two five billion dollars.
+Three point five percent.
+Point five percent.
+Seven point.
+Twelve point five.
+Twenty point oh.
+One point oh one.
+Ten point two point three.
+A hundred and fifty.
+Hundred and fifty.
+Thousand and one nights.
+One million two hundred thousand.
+Five thousand three hundred and twenty one.
+Ninety nine thousand nine hundred and ninety nine.
+Nine hundred ninety nine million.
+A trillion, a quadrillion, a quintillion.
+Sextillion septillion octillion nonillion decillion.
+Two decillion.
+Twelve decillion three hundred.
+Millions and billions.
+Millionth and billionth.
+The hundredth time.
+Two hundredth.
+Three thousandths.
+Zeroth law.
+1990s, 1980's, '90s.
+The 80s and the eighties.
+Twenty-twenties.
+Hello. Goodbye.
+Wait... what?
+What?! Really?!
+Yes; no: maybe.
+"Quoted," she said.
+‘Hello,’ he said, ‘goodbye.’
+—em dash— and –en dash–
+A…B
+Three.Dots.Here
+U.S.A. and U.K.
+e.g. and i.e.
+a.m. p.m. A.M. P.M.
+The end.
+.
+...
+,
+!
+?
+'
+"
+-
+$
+%
+.5
+5.
+$.
+.$
+%5
+5%
+5 %
+$ 5
+5 $
+50%.
+50.%
+$5.
+The U.S. economy grew 2.5% in Q3.
+Mr. and Mrs. Smith's 25th anniversary was on Dec. 3rd, 1999.
+Dr. Strangelove, or: How I Learned to Stop Worrying.
+St. Patrick's Day is March 17th.
+Washington D.C.
+Apollo 11 landed on July 20, 1969.
+World War II ended in 1945.
+Henry VIII had six wives.
+Louis XIV.
+Chapter IV, verse 12.
+Section 3(a)(ii).
+Item #5.
+Version 2.0.1
+IP address 192.168.0.1
+1.2.3.4
+Phone: (555) 123-4567.
+555-1234
+Call 1-800-FLOWERS.
+ZIP code 90210.
+It's 98.6 degrees.
+Mile 26.2.
+A 3-2 win.
+The score was 21 to 14.
+Twenty-one to fourteen.
+A 50/50 split.
+24/7 service.
+9/11
+4:20
+12:00 midnight.
+3:00 PM
+11:59:59
+2019-12-31
+31/12/2019
+1st January 2020
+January 1st, 2020
+the 1st of January
+Monday, Tuesday.
+HE HOPED THERE WOULD BE STEW FOR DINNER TURNIPS AND CARROTS AND BRUISED POTATOES AND FAT MUTTON PIECES TO BE LADLED OUT IN THICK PEPPERED FLOUR FATTENED SAUCE
+STUFF IT INTO YOU HIS BELLY COUNSELLED HIM
+AFTER EARLY NIGHTFALL THE YELLOW LAMPS WOULD LIGHT UP HERE AND THERE THE SQUALID QUARTER OF THE BROTHELS
+HELLO BERTIE ANY GOOD IN YOUR MIND
+NUMBER TEN FRESH NELLY IS WAITING ON YOU GOOD NIGHT HUSBAND
+THE MUSIC CAME NEARER AND HE RECALLED THE WORDS THE WORDS OF SHELLEY'S FRAGMENT UPON THE MOON WANDERING COMPANIONLESS PALE FOR WEARINESS
+MISTER QUILTER IS THE APOSTLE OF THE MIDDLE CLASSES AND WE ARE GLAD TO WELCOME HIS GOSPEL
+NOR IS MISTER QUILTER'S MANNER LESS INTERESTING THAN HIS MATTER
+HE TELLS US THAT AT THIS FESTIVE SEASON OF THE YEAR WITH CHRISTMAS AND ROAST BEEF LOOMING BEFORE US SIMILES DRAWN FROM EATING AND ITS RESULTS OCCUR MOST READILY TO THE MIND
+IN EIGHTEEN SIXTY TWO A LAW WAS ENACTED
+THE TWENTY FIFTH OF DECEMBER
+CHAPTER ONE THE FIRST
+ONE HUNDRED AND TWENTY YEARS
+A THOUSAND POUNDS A YEAR
+THE O'NEILL FAMILY
+I'D RATHER NOT SAY
+SO YOU'VE COME AT LAST
+Mister Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.
+Nor is Mr. Quilter's manner less interesting than his matter.
+He hoped there would be stew for dinner, turnips and carrots and bruised potatoes.
+In eighteen sixty-two, a law was enacted.
+In 1862, a law was enacted.
+The 25th of December.
+A thousand pounds a year.
+£1,000 a year.
+I'd rather not say.
+So you've come at last.
+O'Neill.
+o'clock
+rock'n'roll
+can't won't don't
+CAN'T WON'T DON'T
+I'M I'VE I'LL I'D
+ leading space
+trailing space 
+  multiple   spaces   here  
+tab	separated	words
+line
+break
+ALL CAPS SENTENCE WITH NUMBER 42.
+mixed Case WoRdS
+a b c d e
+A B C
+I a I
+the U S A
+F B I
+Hmm, mm-hmm, uh-huh, um-hum.
+Huh?
+Erm, well.
+Ah, I see.
+Uhm.
+Ehm.
+Tsk tsk.
+Ugh.
+Ahem.
+Hah, ha ha.
+Mmkay.
+Okay, OK, O.K.
+ok
+Okey dokey.
+Alright, all right.
+Gray and grey.
+Theater and theatre.
+Color and colour.
+Labor and labour.
+Center and centre.
+Organize and organise.
+Analyze and analyse.
+Defense and defence.
+Traveling and travelling.
+Judgment and judgement.
+Aging and ageing.
+Catalog and catalogue.
+Dialog and dialogue.
+Program and programme.
+Tire and tyre.
+Mold and mould.
+Plow and plough.
+Pajamas and pyjamas.
+Draft and draught.
+Check and cheque.
+Jail and gaol.
+Licence and license.
+Practise and practice.
+Mum and mom.
+Learnt and learned.
+Spelt and spelled.
+Whilst and while.
+Amongst and among.
+Towards and toward.
+Flyer / flier.
+flyer / flier
+Fulfil and fulfill.
+Skilful and skillful.
+Enrolment and enrollment.
+Instalment and installment.
+Manoeuvre and maneuver.
+Encyclopaedia and encyclopedia.
+Paediatric and pediatric.
+Oestrogen and estrogen.
+Haemorrhage and hemorrhage.
+Anaesthesia and anesthesia.
+Foetus and fetus.
+Sceptical and skeptical.
+Moustache and mustache.
+Storey and story.
+Kerb and curb.
+Aluminium foil.
+Sulphur and sulfur.
+Doughnut and donut.
+Behaviour's.
+Colours'.
+The colour's fine.
+Recognised, recognized.
+Apologise, apologize.
+Criticise, criticize.
+Emphasise, emphasize.
+Memorise, memorize.
+Summarise, summarize.
+Sympathise, sympathize.
+2nd-hand and first-hand.
+Three-quarters.
+One-third.
+Twenty-something.
+Thirty-ish.
+Forty-niners.
+Nine-to-five.
+Twenty-four seven.
+Seven-eleven.
+Catch-22.
+Area 51.
+Route 66.
+Boeing 747.
+Agent 007.
+Studio 54.
+The 3 Musketeers.
+4 score and 7 years ago.
+Four score and seven years ago.
+A dozen eggs.
+A couple of dozen.
+A score of people.
+First and foremost.
+Second to none.
+At first sight.
+For the first time.
+Once upon a time.
+Twice.
+Thrice.
+A pair of twins.
+Single, double, triple, quadruple.
+Half a dozen.
+Quarter past four.
+Ten to five.
+Five past ten.
+Noon and midnight.
+Midday.
+1 hour 30 minutes.
+1h30m.
+90 min.
+100 km/h.
+60 mph.
+5 kg and 10 lbs.
+3 ft 2 in.
+25 m².
+100 m³.
+30°.
+45° angle.
+-40 degrees.
++5 points.
+±3.
+≈ 10.
+≠ 5.
+≤ 3 and ≥ 4.
+x × y ÷ z.
+√2.
+π r².
+ℓ.
+µs and μs.
+Å.
+K and K.
+ﬀ ﬃ ﬄ.
+ǅ ǈ ǋ.
+İstanbul.
+ΣΑΣ and ΌΣΟΣ and Σ.
+ὈΔΥΣΣΕΎΣ.
+ﬆ ﬅ.
+ŉ.
+ẞ.
+Ǆ.
+The año and the niño.
+Naïveté.
+Coöperate.
+Reëlect.
+Zoë Saldaña.
+Beyoncé.
+Pokémon.
+Häagen-Dazs.
+Mötley Crüe.
+Spın̈al Tap.
+Ꝩ.
+𝐁𝐨𝐥𝐝 𝘐𝘵𝘢𝘭𝘪𝘤 𝔉𝔯𝔞𝔨𝔱𝔲𝔯.
+٣ apples and ٤٥ oranges.
+१२३ rupees.
+๒๕๖๗.
+〇一二三.
+零一二三.
+Ⅰ Ⅱ Ⅲ.
+⑴ ⒈.
+🄰 🄱.
+Ⓐ Ⓑ.
+㎞ ㎏ ㏂.
+℃ ℉.
+№ 5.
+℡.
+ⅰⅱⅲ.
+¹²³.
+₁₂₃.
+⁰.
+½ ⅓ ¼ ⅕ ⅙ ⅛ ⅔ ¾.
+1½.
+2¼ miles.
+3 ½ inches.
+Soft­hyphen.
+Zero​width space.
+Non breaking space.
+Narrow no break.
+Ideographic　space.
+Em space.
+Line separator.
+Para separator.
+Joiner‍here and non‍joiner.
+Left‎to right mark.
+Bidi‮override.
+Word joiner⁠here.
+Tab	and vertical tab and form feed.
+Control chars here.
+Null char.
+‚low quote‘ and „low double“.
+«guillemets» and ‹single›.
+「brackets」 and 『double』.
+【lenticular】.
+〈angle〉 and ⟨math angle⟩.
+{curly} braces.
+Back\slash.
+Under_score and snake_case_name.
+dash-separated-words
+dot.separated.words
+slash/separated/words
+comma,separated,words
+colon:separated:words
+semi;colon;words
+question?mark?words
+exclamation!mark!words
+Hello,world.
+Hello.World
+3.0
+3.00
+1.0 and 2.0 and 10.0
+0.0
+00
+007
+0042
+0.50
+$0.5
+$0.50 and $0.05
+$1.00
+$1
+£1
+€1
+1$
+1£
+$1 billion
+$1.5 billion
+$ 1.5 billion
+1.5 billion dollars
+one and a half billion dollars
+a million and a half
+half a million
+nine and a half weeks
+three and a half percent
+twelve and a half
+one and a half
+zero and a half
+oh and a half
+hundred and a half
+the third and a half
+and a half and a half
+two and a half and a half
+point and a half
+Two and a  half.
+Two and	a half.
+two and a halfway
+two and a halves
+twoand a half
+2 and a half
+2.5
+two point five
+two dot five
+two comma five
+1, 2, 3
+1,2,3
+1,23
+12,345,678
+1,234.56
+1.234,56
+-1,5
+one,two
+1st,2nd
+I am one of the 99%.
+99 percent.
+Ninety nine percent.
+Ninety-nine per cent.
+A hundred percent.
+One hundred percent.
+100%
+100 %
+0%
+Zero percent.
+Per cent.
+per
+percent
+Five per.
+Five per cent cent.
+Five percent percent.
+$5 percent.
+5 dollars percent.
+Five dollars five cents.
+Five dollars and five.
+Five pounds fifty.
+Five pounds and fifty pence.
+Fifty pence.
+Twenty quid.
+A buck fifty.
+Two bucks.
+One cent.
+1 cent
+1 cents
+One cents.
+Two cent.
+A dollar and one cent.
+$1 and ¢1
+$1 ¢1
+$1 and ¢15
+$1 and ¢150
+$10 and ¢05
+£3 and ¢7
+€0 and ¢5
+$0 ¢5
+$0.
+$0.0
+$0.00
+$0.001
+$00.05
+€0.99
+£0.5
+$0x5
+¢5
+¢05
+Minus one.
+Minus one hundred.
+Negative two point five.
+Plus three.
+Positive four.
+Minus minus five.
+Minus and.
+Plus or minus.
+Minus.
+-1
++1
++-1
+-1.5
+−1 with a real minus sign.
+Double oh seven.
+Double zero.
+Double one.
+Double ten.
+Double twenty.
+Triple oh.
+Triple nine.
+Double double oh.
+Five double one.
+Oh double one.
+Double.
+Triple.
+Point.
+Point point.
+Point one.
+Point oh one.
+One point.
+One point point five.
+Point five five.
+1 point 5
+1 point five
+one point 5
+one . five
+1 . 5
+one hundred point five
+one hundred and five point two
+one point five hundred
+point five hundred
+1.5 hundred
+1.5 thousand
+1.25 thousand
+1.255 thousand
+1.2555 thousand
+.5 million
+0 million
+0 hundredth
+0 thousands
+zero million
+zero hundred
+oh hundred
+o hundred
+the o
+o'
+o
+oh
+zero
+nil
+nought
+naught
+ten ten
+ten eleven
+ten one
+ten oh one
+twenty one twenty two
+twenty twenty
+nineteen nineteen
+one one one
+one two three four five six seven eight nine ten
+one two three hundred
+one hundred two hundred
+one thousand one thousand
+twenty thousand thirty thousand
+thirty five thousand and forty
+the thirties and forties
+thirty first
+twenty second
+forty third
+fifty fourth
+sixty fifth
+seventy sixth
+eighty seventh
+ninety eighth
+ninety ninth
+ninety nineth
+one hundred and first
+two hundred and second
+one thousandth
+one millionth
+two millionths
+three hundreds
+four thousands
+five millions
+one hundred thousands
+twenty hundreds
+twenties
+thirtieth
+first second third
+the first second
+second hand
+a second
+seconds
+thirds
+fourths
+fifths
+sixths
+tenths
+hundredths
+one sixes
+two sevens
+three ones
+four tens
+sixty sixes
+seventies
+eighties music
+1980s music
+the 80's
+80s
+'80s
+mid-1990s
+mid nineties
+1900 and 2000
+nineteen hundred and two thousand
+two thousand
+twenty
+two
+thousand
+million
+billion
+A billion and one.
+Billion and billion.
+One hundred and.
+And one.
+One and.
+And.
+One and one.
+Five and five.
+One hundred and and one.
+One hundred, and one.
+One hundred. And one.
+Twenty, twenty-one, twenty-two.
+1 2 3
+12 34
+123 456
+1 000
+10 20 30
+one 2 three
+1 two 3
+twenty 5
+5 twenty
+5 hundred
+5 hundred and 5
+5 thousand 5
+5th
+5 th
+5ths
+5s
+5 s
+1s
+1 s
+the 1
+1 apple
+1st
+11
+111
+1.1
+1.10
+10.1
+1st 1
+a1b2c3
+abc123def
+123abc
+abc 123
+x1
+1x
+2nd2
+H2O
+CO2
+B12
+A1
+COVID19
+mp3
+3d
+4k
+5g
+24h
+3pm
+3 pm
+3 p.m.
+3:15 pm
+15:45
+00:00
+7:05
+7:5
+:30
+30:
+1:2:3
+10:00
+10:00:00
+1:00
+01:00
+100:00
+2:000
+The 2:00 train.
+At 12:00.
+At 1:00 or 2:00.
