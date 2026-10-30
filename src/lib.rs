@@ -3,9 +3,11 @@
 pub mod error;
 pub mod features;
 pub mod fft;
+pub mod granite;
 pub mod granite_features;
 pub mod json;
 pub mod kernels;
+pub mod model;
 pub mod parakeet;
 pub mod safetensors;
 pub mod threads;
@@ -13,4 +15,6 @@ pub mod tokenizer;
 pub mod wav;
 
 pub use error::{Error, Result};
+pub use granite::Granite;
+pub use model::Model;
 pub use parakeet::{Options, Parakeet, Transcript};

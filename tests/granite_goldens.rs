@@ -11,14 +11,29 @@
 
 use std::path::{Path, PathBuf};
 
+use notate::granite::{Granite, ctc_tokens};
 use notate::granite_features::GraniteFrontEnd;
 use notate::json::{self, Value};
+use notate::kernels::Isa;
+use notate::parakeet::Timings;
 use notate::safetensors::SafeTensors;
 use notate::tokenizer::Tokenizer;
+use notate::Options;
 
 /// Features may differ by this much. The reference computes its STFT and mel sums in f32.
 const FEATURES_MAX_ABS: f32 = 5e-5;
 const FEATURES_MEAN_ABS: f64 = 5e-7;
+
+/// Relative L2 error allowed for a block's output, growing with depth. The self-conditioning
+/// injection follows block 7, and the logits the last block.
+fn layer_tolerance(name: &str) -> f64 {
+    let depth = match name {
+        "selfcond_injection" => 8.0,
+        "logits" => 16.0,
+        _ => 1.0 + name.strip_prefix("layer.").unwrap().parse::<f64>().unwrap(),
+    };
+    1e-4 * (1.0 + depth / 8.0)
+}
 
 fn golden_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/granite-speech-5.0-470m-turboctc")
@@ -34,6 +49,7 @@ struct Clip {
     id: String,
     samples: Vec<f32>,
     tensors: SafeTensors,
+    text: String,
 }
 
 fn clips() -> Vec<Clip> {
@@ -62,9 +78,30 @@ fn clips() -> Vec<Clip> {
                 id: field("id"),
                 samples: audio.samples,
                 tensors,
+                text: field("text"),
             }
         })
         .collect()
+}
+
+fn model(isa: Option<Isa>, threads: usize) -> Granite {
+    Granite::load(&model_dir(), &Options { threads, isa }).expect("the model loads")
+}
+
+/// ||got - want|| / ||want||.
+fn relative_l2(got: &[f32], want: &[f32]) -> f64 {
+    assert_eq!(got.len(), want.len());
+    let (mut num, mut den) = (0f64, 0f64);
+    for (&g, &w) in got.iter().zip(want) {
+        num += (g as f64 - w as f64).powi(2);
+        den += (w as f64).powi(2);
+    }
+    (num / den).sqrt()
+}
+
+fn i64s(st: &mut SafeTensors, name: &str) -> Vec<i64> {
+    st.read_i64(name, None)
+        .unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
 fn f32s(st: &mut SafeTensors, name: &str) -> (Vec<usize>, Vec<f32>) {
@@ -153,5 +190,145 @@ fn the_tokenizer_decodes_like_the_reference() {
             .collect();
         let want = sequence.get("text").and_then(Value::as_str).unwrap();
         assert_eq!(tokenizer.decode(&ids), want, "ids {ids:?}");
+    }
+}
+
+/// Runs a clip through the encoder and the CTC head, checking every saved tensor.
+fn check_clip(model: &Granite, clip: &mut Clip) {
+    let id = clip.id.clone();
+    let st = &mut clip.tensors;
+    let d = model.config().d_model;
+    let features = model.features(&clip.samples).unwrap();
+    let mut errors: Vec<(String, f64)> = Vec::new();
+    let mut compared = Vec::new();
+    let encoded = model
+        .encode(
+            &features.data,
+            features.frames,
+            &mut Timings::default(),
+            &mut |name, rows, x| {
+                if st.info(name).is_none() {
+                    return;
+                }
+                let (shape, want) = f32s(st, name);
+                assert_eq!(shape, [rows, d], "{id}: {name} shape");
+                let err = relative_l2(x, &want);
+                eprintln!("{id}: {name} relative L2 error {err:.2e}");
+                compared.push(name.to_string());
+                if err > layer_tolerance(name) {
+                    errors.push((name.to_string(), err));
+                }
+            },
+        )
+        .unwrap();
+    let saved = ["layer.0", "layer.1", "layer.7", "selfcond_injection", "layer.15"];
+    for name in saved.iter().filter(|n| st.info(n).is_some()) {
+        assert!(compared.iter().any(|c| c == name), "{id}: {name} wasn't reached");
+    }
+
+    let vocab = model.config().vocab;
+    let logits = model.ctc_logits(&encoded, 0, encoded.frames);
+    let argmax = |row: &[f32]| {
+        row.iter()
+            .enumerate()
+            .fold(0, |best, (i, &v)| if v > row[best] { i } else { best })
+    };
+    let ids: Vec<u32> = logits.chunks_exact(vocab).map(|r| argmax(r) as u32).collect();
+    let want_ids = i64s(st, "ctc_ids");
+    let (_, margins) = f32s(st, "logit_margin");
+    let differ: Vec<(usize, f32)> = (0..want_ids.len())
+        .filter(|&f| ids.get(f).map(|&i| i as i64) != Some(want_ids[f]))
+        .map(|f| (f, margins[f]))
+        .collect();
+    assert_eq!(ids.len(), want_ids.len(), "{id}: CTC frames");
+    assert!(
+        differ.is_empty(),
+        "{id}: the argmax differs at (frame, reference margin) {differ:?}"
+    );
+    let (_, want_max) = f32s(st, "logit_max");
+    let got_max: Vec<f32> = logits
+        .chunks_exact(vocab)
+        .map(|r| r.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v)))
+        .collect();
+    let err = relative_l2(&got_max, &want_max);
+    eprintln!("{id}: largest logit per frame relative L2 error {err:.2e}");
+    if err > layer_tolerance("logits") {
+        errors.push(("logit_max".into(), err));
+    }
+    let frames = i64s(st, "logit_frames");
+    let (_, want_logits) = f32s(st, "logits");
+    for (k, &f) in frames.iter().enumerate() {
+        let f = f as usize;
+        let err = relative_l2(
+            &logits[f * vocab..(f + 1) * vocab],
+            &want_logits[k * vocab..(k + 1) * vocab],
+        );
+        eprintln!("{id}: logits of frame {f} relative L2 error {err:.2e}");
+        if err > layer_tolerance("logits") {
+            errors.push((format!("logits of frame {f}"), err));
+        }
+    }
+
+    let tokens: Vec<i64> = ctc_tokens(&ids, model.config().blank)
+        .iter()
+        .map(|t| t.id as i64)
+        .collect();
+    assert_eq!(tokens, i64s(st, "tokens"), "{id}: tokens");
+    let transcript = model.transcribe(&clip.samples).unwrap();
+    let transcribed: Vec<i64> = transcript.tokens.iter().map(|t| t.id as i64).collect();
+    assert_eq!(transcribed, tokens, "{id}: tokens of transcribe");
+    assert_eq!(transcript.text, clip.text, "{id}: text");
+    assert!(errors.is_empty(), "{id}: errors over tolerance {errors:?}");
+}
+
+#[test]
+#[ignore = "needs the model files, see the top of this file"]
+fn every_tensor_matches_the_reference() {
+    let model = model(None, 6);
+    for mut clip in clips() {
+        check_clip(&model, &mut clip);
+    }
+}
+
+#[test]
+#[ignore = "needs the model files, see the top of this file"]
+fn encoder_output_is_bit_identical_at_every_thread_count() {
+    // The 40 s clip spans several attention blocks in every layer.
+    let clip = clips()
+        .into_iter()
+        .max_by_key(|c| c.samples.len())
+        .unwrap();
+    let mut first: Option<Vec<f32>> = None;
+    for threads in [1, 2, 3, 6] {
+        let model = model(None, threads);
+        let features = model.features(&clip.samples).unwrap();
+        let encoded = model
+            .encode(
+                &features.data,
+                features.frames,
+                &mut Timings::default(),
+                &mut |_, _, _| {},
+            )
+            .unwrap();
+        match &first {
+            None => first = Some(encoded.data),
+            Some(f) => {
+                let same = f
+                    .iter()
+                    .zip(&encoded.data)
+                    .all(|(a, b)| a.to_bits() == b.to_bits());
+                assert!(same, "{threads} threads give a different encoder output");
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs the model files, see the top of this file"]
+fn the_scalar_kernels_give_the_same_text() {
+    let model = model(Some(Isa::Scalar), 6);
+    for clip in clips().iter().filter(|c| c.samples.len() < 16000 * 10) {
+        let transcript = model.transcribe(&clip.samples).unwrap();
+        assert_eq!(transcript.text, clip.text, "{}", clip.id);
     }
 }
