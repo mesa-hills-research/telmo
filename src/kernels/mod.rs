@@ -1,5 +1,5 @@
 //! Numeric kernels in f32, with a scalar version of each (also the reference in tests) and
-//! AVX2 with FMA where the CPU has them.
+//! AVX2 or AVX-512 versions where the CPU has them.
 //!
 //! The matrix product splits work between threads by output columns only, so every output is
 //! summed in the same order whatever the thread count, and results are bit-identical across
@@ -19,12 +19,14 @@ use crate::threads::{Pool, SharedMut};
 
 #[cfg(target_arch = "x86_64")]
 mod avx2;
+#[cfg(target_arch = "x86_64")]
+mod avx512;
 pub(crate) mod scalar;
 
 /// Output columns per weight panel, the width of the matrix product's register tile.
 pub const PANEL: usize = 16;
-/// Rows of the matrix product's register tile on AVX2 and in the scalar kernels. Other
-/// instruction sets may use more (see [`Kernels::tile_rows`]).
+/// Rows of the matrix product's register tile on AVX2 and in the scalar kernels. AVX-512 uses
+/// 12 (see [`Kernels::tile_rows`]).
 pub const TILE_ROWS: usize = 6;
 /// Inputs per block of the matrix product (a 16 KB block of a weight panel).
 const KC: usize = 256;
@@ -35,26 +37,39 @@ pub enum Isa {
     Scalar,
     /// AVX2 with FMA and F16C, on x86-64.
     Avx2,
+    /// AVX-512F with FMA and F16C, on x86-64.
+    Avx512,
 }
 
 impl Isa {
+    pub const ALL: [Isa; 3] = [Isa::Scalar, Isa::Avx2, Isa::Avx512];
+
     /// The best instruction set this CPU supports.
     pub fn detect() -> Isa {
-        #[cfg(target_arch = "x86_64")]
-        if std::arch::is_x86_feature_detected!("avx2")
-            && std::arch::is_x86_feature_detected!("fma")
-            && std::arch::is_x86_feature_detected!("f16c")
-        {
-            return Isa::Avx2;
-        }
-        Isa::Scalar
+        [Isa::Avx512, Isa::Avx2]
+            .into_iter()
+            .find(|isa| isa.is_supported())
+            .unwrap_or(Isa::Scalar)
     }
 
-    /// Whether this CPU can run the instruction set.
+    /// Whether this CPU can run the instruction set. Those of other architectures never run.
     pub fn is_supported(self) -> bool {
         match self {
             Isa::Scalar => true,
-            Isa::Avx2 => Isa::detect() == Isa::Avx2,
+            #[cfg(target_arch = "x86_64")]
+            Isa::Avx2 => {
+                std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma")
+                    && std::arch::is_x86_feature_detected!("f16c")
+            }
+            #[cfg(target_arch = "x86_64")]
+            Isa::Avx512 => {
+                std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("fma")
+                    && std::arch::is_x86_feature_detected!("f16c")
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            Isa::Avx2 | Isa::Avx512 => false,
         }
     }
 
@@ -62,7 +77,18 @@ impl Isa {
         match self {
             Isa::Scalar => "scalar",
             Isa::Avx2 => "avx2+fma+f16c",
+            Isa::Avx512 => "avx512f+fma+f16c",
         }
+    }
+
+    /// The instruction set of a short name, `scalar`, `avx2` or `avx512`.
+    pub fn from_name(name: &str) -> Option<Isa> {
+        Some(match name {
+            "scalar" => Isa::Scalar,
+            "avx2" => Isa::Avx2,
+            "avx512" => Isa::Avx512,
+            _ => return None,
+        })
     }
 }
 
@@ -412,8 +438,10 @@ impl Kernels {
             Isa::Scalar => scalar::kernels(),
             #[cfg(target_arch = "x86_64")]
             Isa::Avx2 => avx2::kernels(),
+            #[cfg(target_arch = "x86_64")]
+            Isa::Avx512 => avx512::kernels(),
             #[cfg(not(target_arch = "x86_64"))]
-            Isa::Avx2 => unreachable!(),
+            Isa::Avx2 | Isa::Avx512 => unreachable!(),
         })
     }
 
@@ -720,11 +748,103 @@ mod tests {
         c
     }
 
+    /// The kernels of every instruction set this CPU runs.
     fn all_kernels() -> Vec<Kernels> {
-        [Isa::Scalar, Isa::Avx2]
-            .into_iter()
-            .filter_map(Kernels::new)
-            .collect()
+        Isa::ALL.into_iter().filter_map(Kernels::new).collect()
+    }
+
+    #[test]
+    fn kernels_exist_for_the_instruction_sets_the_cpu_supports() {
+        assert!(Isa::detect().is_supported());
+        for isa in Isa::ALL {
+            let kernels = Kernels::new(isa);
+            assert_eq!(kernels.is_some(), isa.is_supported(), "{isa:?}");
+            if let Some(kernels) = kernels {
+                assert_eq!(kernels.isa(), isa);
+                assert!((1..=PANEL).contains(&kernels.tile_rows()));
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        assert!(!Isa::Avx2.is_supported() && !Isa::Avx512.is_supported());
+        assert_eq!(Isa::from_name("avx512"), Some(Isa::Avx512));
+        assert_eq!(Isa::from_name("avx"), None);
+    }
+
+    /// Every tile output is the sum of its products in input order, fused on the instruction
+    /// sets with FMA, so tiles can be checked bit for bit.
+    #[test]
+    fn tiles_sum_their_products_in_input_order() {
+        for kernels in all_kernels() {
+            let fused = kernels.isa() != Isa::Scalar;
+            for rows in 1..=kernels.tile_rows() {
+                for (k, lda, k_stride) in [(1, 1, 16), (7, 9, 16), (256, 300, 40)] {
+                    let a = random(rows * lda, 40);
+                    let b = random(k * k_stride + PANEL, 41);
+                    let start = random(rows * PANEL, 42);
+                    for load in [false, true] {
+                        let mut out = start.clone();
+                        // SAFETY: `a` holds `rows` rows of `lda >= k` values, `b` holds `k` runs
+                        // of 16 values `k_stride` apart, and `out` holds `rows` rows of 16.
+                        unsafe {
+                            (kernels.tile)(
+                                k,
+                                a.as_ptr(),
+                                lda,
+                                rows,
+                                b.as_ptr(),
+                                k_stride,
+                                out.as_mut_ptr(),
+                                load,
+                            )
+                        };
+                        for r in 0..rows {
+                            for j in 0..PANEL {
+                                let mut s = if load { start[r * PANEL + j] } else { 0.0 };
+                                for i in 0..k {
+                                    let (x, y) = (a[r * lda + i], b[i * k_stride + j]);
+                                    s = if fused { x.mul_add(y, s) } else { s + x * y };
+                                }
+                                let got = out[r * PANEL + j];
+                                assert!(
+                                    got.to_bits() == s.to_bits(),
+                                    "{:?} {rows} rows k={k} load={load} at {r},{j}: {got} vs {s}",
+                                    kernels.isa()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_epilogue_agrees_across_instruction_sets_and_stays_in_its_columns() {
+        let scalar = Kernels::new(Isa::Scalar).unwrap();
+        let acc: Vec<f32> = random(PANEL, 50).iter().map(|v| v * 8.0).collect();
+        let bias = random(PANEL, 51);
+        let c0 = random(PANEL + 4, 52);
+        for kernels in all_kernels() {
+            for cols in 1..=PANEL {
+                for act in [Act::None, Act::Relu, Act::Silu] {
+                    for (with_bias, accumulate) in [(false, false), (true, false), (true, true)] {
+                        let bias = with_bias.then_some(&bias[..cols]);
+                        let (mut want, mut got) = (c0.clone(), c0.clone());
+                        let acc = &acc[..cols];
+                        (scalar.store)(acc, &mut want[..cols], bias, act, 0.5, accumulate);
+                        (kernels.store)(acc, &mut got[..cols], bias, act, 0.5, accumulate);
+                        assert_eq!(got[cols..], c0[cols..], "{:?}", kernels.isa());
+                        assert!(
+                            got.iter()
+                                .zip(&want)
+                                .all(|(g, w)| (g - w).abs() <= 1e-6 + 1e-6 * w.abs()),
+                            "{:?} {act:?} {cols} columns",
+                            kernels.isa()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -946,13 +1066,21 @@ mod tests {
     #[test]
     fn row_kernels_agree_across_instruction_sets() {
         let scalar = Kernels::new(Isa::Scalar).unwrap();
-        for kernels in all_kernels() {
-            let x = random(1030, 9);
-            let (g, b) = (random(1030, 10), random(1030, 11));
-            let (mut o1, mut o2) = (vec![0f32; 1030], vec![0f32; 1030]);
+        // Lengths below and above each vector width, with every kind of remainder.
+        for (kernels, n) in all_kernels()
+            .into_iter()
+            .flat_map(|k| [1, 3, 4, 8, 15, 17, 1030].map(|n| (k, n)))
+        {
+            let x = random(n, 9);
+            let (g, b) = (random(n, 10), random(n, 11));
+            let (mut o1, mut o2) = (vec![0f32; n], vec![0f32; n]);
             (scalar.layer_norm)(&x, &mut o1, &g, &b, 1e-5);
             (kernels.layer_norm)(&x, &mut o2, &g, &b, 1e-5);
-            assert!(o1.iter().zip(&o2).all(|(p, q)| (p - q).abs() < 1e-5));
+            assert!(
+                o1.iter().zip(&o2).all(|(p, q)| (p - q).abs() < 1e-5),
+                "{:?} n={n}",
+                kernels.isa()
+            );
 
             let mut s1: Vec<f32> = x.iter().map(|v| v * 30.0).collect();
             let mut s2 = s1.clone();
@@ -975,10 +1103,39 @@ mod tests {
                     .all(|(p, q)| (p - q).abs() <= 1e-6 + 1e-6 * p.abs())
             );
 
-            let (mut g1, mut g2) = (vec![0f32; 1030], vec![0f32; 1030]);
+            let (mut g1, mut g2) = (vec![0f32; n], vec![0f32; n]);
             (scalar.glu)(&x, &g, &mut g1);
             (kernels.glu)(&x, &g, &mut g2);
             assert!(g1.iter().zip(&g2).all(|(p, q)| (p - q).abs() < 1e-6));
+        }
+    }
+
+    #[test]
+    fn strided_conv_agrees_across_instruction_sets() {
+        let scalar = Kernels::new(Isa::Scalar).unwrap();
+        let (in_t, in_f, channels) = (7, 9, 20);
+        let out_f = (in_f - 1) / 2 + 1;
+        let w = random(9 * channels, 60);
+        let bias = random(channels, 61);
+        for depthwise in [false, true] {
+            let input = random(in_t * in_f * if depthwise { channels } else { 1 }, 62);
+            for kernels in all_kernels() {
+                for t in 0..(in_t - 1) / 2 + 1 {
+                    let mut want = vec![0f32; out_f * channels];
+                    let mut got = want.clone();
+                    for (conv, out) in [
+                        (scalar.conv3x3s2_row, &mut want),
+                        (kernels.conv3x3s2_row, &mut got),
+                    ] {
+                        conv(&input, in_t, in_f, channels, depthwise, &w, &bias, t, out);
+                    }
+                    assert!(
+                        got.iter().zip(&want).all(|(g, w)| (g - w).abs() < 1e-5),
+                        "{:?} depthwise={depthwise} t={t}",
+                        kernels.isa()
+                    );
+                }
+            }
         }
     }
 

@@ -1,7 +1,7 @@
 //! Transcribes WAV files and prints the text with timings.
 //!
 //! ```text
-//! cargo run --release --example transcribe -- MODEL_DIR FILE.wav... [--threads N] [--isa scalar|avx2] [--steps] [--repeat N]
+//! cargo run --release --example transcribe -- MODEL_DIR FILE.wav... [--threads N] [--isa scalar|avx2|avx512] [--steps] [--repeat N]
 //! ```
 //!
 //! MODEL_DIR holds `model.safetensors`, `config.json` and `tokenizer.json` of
@@ -45,18 +45,19 @@ fn run() -> Result<(), String> {
                     .ok_or("--repeat takes a number")?
             }
             "--isa" => {
-                options.isa = Some(match args.next().as_deref() {
-                    Some("scalar") => Isa::Scalar,
-                    Some("avx2") => Isa::Avx2,
-                    _ => return Err("--isa takes scalar or avx2".into()),
-                })
+                options.isa = Some(
+                    args.next()
+                        .as_deref()
+                        .and_then(Isa::from_name)
+                        .ok_or("--isa takes scalar, avx2 or avx512")?,
+                )
             }
             "--steps" => steps = true,
             _ => paths.push(arg.into()),
         }
     }
     if paths.len() < 2 {
-        return Err("Usage: transcribe MODEL_DIR FILE.wav... [--threads N] [--isa scalar|avx2] [--steps] [--repeat N]".into());
+        return Err("Usage: transcribe MODEL_DIR FILE.wav... [--threads N] [--isa scalar|avx2|avx512] [--steps] [--repeat N]".into());
     }
     let model_dir = paths.remove(0);
 

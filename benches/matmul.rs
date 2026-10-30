@@ -1,7 +1,7 @@
 //! Throughput of the matrix product on the shapes of Parakeet's encoder.
 //!
 //! ```text
-//! cargo bench --bench matmul [-- --threads 1,6] [--isa scalar|avx2]
+//! cargo bench --bench matmul [-- --threads 1,6] [--isa scalar|avx2|avx512]
 //! ```
 
 use std::time::Instant;
@@ -24,11 +24,11 @@ fn main() {
                     .collect()
             }
             "--isa" => {
-                isa = if args.next().as_deref() == Some("scalar") {
-                    Isa::Scalar
-                } else {
-                    Isa::Avx2
-                }
+                isa = args
+                    .next()
+                    .as_deref()
+                    .and_then(Isa::from_name)
+                    .expect("--isa takes scalar, avx2 or avx512")
             }
             _ => {}
         }
