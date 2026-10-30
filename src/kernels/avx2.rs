@@ -5,13 +5,16 @@
 
 use std::arch::x86_64::*;
 
-use super::{Act, Isa, Kernels, PANEL, scalar};
+use super::{Act, Isa, Kernels, PANEL, TILE_ROWS, scalar};
+use crate::quant::{Precision, Q8_BLOCK};
 
 pub(crate) fn kernels() -> Kernels {
     assert!(Isa::Avx2.is_supported());
     Kernels {
         isa: Isa::Avx2,
+        tile_rows: TILE_ROWS,
         tile,
+        widen,
         store: |acc, c, bias, act, scale, accumulate| unsafe {
             store(acc, c, bias, act, scale, accumulate)
         },
@@ -55,7 +58,7 @@ unsafe fn tile(
 
 /// An `R x 16` register tile: for each input, two 8-wide loads of the panel and one broadcast
 /// per row feed `2R` fused multiply-adds.
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn tile_rows<const R: usize>(
     k: usize,
     a: *const f32,
@@ -102,9 +105,73 @@ unsafe fn tile_rows<const R: usize>(
     }
 }
 
+/// Widens narrow weights to f32, 16 values per input. The conversions are exact (and the int8
+/// products correctly rounded), so the values equal the scalar kernel's.
+///
+/// # Safety
+/// As for the scalar `widen`, and the CPU must have AVX2, FMA and F16C.
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn widen(precision: Precision, k: usize, src: *const u8, scales: *const f32, out: *mut f32) {
+    // SAFETY: every pointer stays inside the ranges the caller guarantees.
+    unsafe {
+        match precision {
+            Precision::F32 => scalar::widen(precision, k, src, scales, out),
+            Precision::F16 => {
+                for i in 0..k {
+                    let p = src.add(i * 32) as *const __m128i;
+                    _mm256_storeu_ps(out.add(i * 16), _mm256_cvtph_ps(_mm_loadu_si128(p)));
+                    _mm256_storeu_ps(
+                        out.add(i * 16 + 8),
+                        _mm256_cvtph_ps(_mm_loadu_si128(p.add(1))),
+                    );
+                }
+            }
+            Precision::Bf16 => {
+                for i in 0..k {
+                    let p = src.add(i * 32) as *const __m128i;
+                    let lo = _mm256_slli_epi32::<16>(_mm256_cvtepu16_epi32(_mm_loadu_si128(p)));
+                    let hi =
+                        _mm256_slli_epi32::<16>(_mm256_cvtepu16_epi32(_mm_loadu_si128(p.add(1))));
+                    _mm256_storeu_ps(out.add(i * 16), _mm256_castsi256_ps(lo));
+                    _mm256_storeu_ps(out.add(i * 16 + 8), _mm256_castsi256_ps(hi));
+                }
+            }
+            Precision::Int8 => {
+                let (s0, s1) = (_mm256_loadu_ps(scales), _mm256_loadu_ps(scales.add(8)));
+                for i in 0..k {
+                    widen_i8(src.add(i * 16), s0, s1, out.add(i * 16));
+                }
+            }
+            Precision::Q8_0 => {
+                for b in 0..k.div_ceil(Q8_BLOCK) {
+                    let s = scales.add(b * PANEL);
+                    let (s0, s1) = (_mm256_loadu_ps(s), _mm256_loadu_ps(s.add(8)));
+                    for i in b * Q8_BLOCK..((b + 1) * Q8_BLOCK).min(k) {
+                        widen_i8(src.add(i * 16), s0, s1, out.add(i * 16));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 16 int8 values times their scales.
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn widen_i8(src: *const u8, s0: __m256, s1: __m256, out: *mut f32) {
+    // SAFETY: the caller passes 16 readable bytes and 16 writable floats.
+    unsafe {
+        let lo = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(src as *const __m128i)));
+        let hi = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+            src.add(8) as *const __m128i
+        )));
+        _mm256_storeu_ps(out, _mm256_mul_ps(lo, s0));
+        _mm256_storeu_ps(out.add(8), _mm256_mul_ps(hi, s1));
+    }
+}
+
 /// e^x for 8 lanes, within about 2 ulp of the true value. Inputs are clamped to
 /// [-87.3, 88.4], so very negative inputs give about 1e-38 instead of 0.
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2,fma,f16c")]
 fn exp256(x: __m256) -> __m256 {
     let x = _mm256_min_ps(
         _mm256_max_ps(x, _mm256_set1_ps(-87.336_54)),
@@ -133,13 +200,13 @@ fn exp256(x: __m256) -> __m256 {
 }
 
 /// x * sigmoid(x) = x / (1 + e^-x).
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2,fma,f16c")]
 fn silu256(x: __m256) -> __m256 {
     let e = exp256(_mm256_sub_ps(_mm256_setzero_ps(), x));
     _mm256_div_ps(x, _mm256_add_ps(_mm256_set1_ps(1.0), e))
 }
 
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2,fma,f16c")]
 fn hsum(v: __m256) -> f32 {
     let lo = _mm256_castps256_ps128(v);
     let hi = _mm256_extractf128_ps::<1>(v);
@@ -149,7 +216,7 @@ fn hsum(v: __m256) -> f32 {
     _mm_cvtss_f32(s)
 }
 
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2,fma,f16c")]
 fn hmax(v: __m256) -> f32 {
     let lo = _mm256_castps256_ps128(v);
     let hi = _mm256_extractf128_ps::<1>(v);
@@ -159,7 +226,7 @@ fn hmax(v: __m256) -> f32 {
     _mm_cvtss_f32(s)
 }
 
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn store(
     acc: &[f32],
     c: &mut [f32],
@@ -207,7 +274,7 @@ unsafe fn store(
     }
 }
 
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn layer_norm(x: &[f32], out: &mut [f32], gamma: &[f32], beta: &[f32], eps: f32) {
     let n = x.len();
     let body = n / 8 * 8;
@@ -251,7 +318,7 @@ unsafe fn layer_norm(x: &[f32], out: &mut [f32], gamma: &[f32], beta: &[f32], ep
     }
 }
 
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn softmax(x: &mut [f32]) {
     let n = x.len();
     let body = n / 8 * 8;
@@ -293,7 +360,7 @@ unsafe fn softmax(x: &mut [f32]) {
     }
 }
 
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn glu(a: &[f32], b: &[f32], out: &mut [f32]) {
     let n = out.len();
     assert!(a.len() >= n && b.len() >= n);
@@ -317,7 +384,7 @@ unsafe fn glu(a: &[f32], b: &[f32], out: &mut [f32]) {
     }
 }
 
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn silu(x: &mut [f32]) {
     let n = x.len();
     let mut i = 0;
@@ -339,7 +406,7 @@ unsafe fn silu(x: &mut [f32]) {
 
 /// The scalar loop, compiled with AVX2 so it vectorizes over channels. Each output sums its
 /// taps in the same order, so the results equal the scalar kernel's.
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn dwconv1d_frame(
     input: &[f32],
     channels: usize,
@@ -354,7 +421,7 @@ unsafe fn dwconv1d_frame(
 }
 
 /// The scalar loop, compiled with AVX2 so it vectorizes over channels, with the same results.
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn conv3x3s2_row(
     input: &[f32],
     in_t: usize,

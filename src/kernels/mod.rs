@@ -13,6 +13,8 @@ use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
+use crate::quant::{self, Precision, Q8_BLOCK, Rows};
+use crate::region::{Bytes, Region, Vector};
 use crate::threads::{Pool, SharedMut};
 
 #[cfg(target_arch = "x86_64")]
@@ -21,7 +23,8 @@ pub(crate) mod scalar;
 
 /// Output columns per weight panel, the width of the matrix product's register tile.
 pub const PANEL: usize = 16;
-/// Rows of the matrix product's register tile.
+/// Rows of the matrix product's register tile on AVX2 and in the scalar kernels. Other
+/// instruction sets may use more (see [`Kernels::tile_rows`]).
 pub const TILE_ROWS: usize = 6;
 /// Inputs per block of the matrix product (a 16 KB block of a weight panel).
 const KC: usize = 256;
@@ -30,7 +33,7 @@ const KC: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Isa {
     Scalar,
-    /// AVX2 with FMA, on x86-64.
+    /// AVX2 with FMA and F16C, on x86-64.
     Avx2,
 }
 
@@ -38,7 +41,9 @@ impl Isa {
     /// The best instruction set this CPU supports.
     pub fn detect() -> Isa {
         #[cfg(target_arch = "x86_64")]
-        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("fma")
+            && std::arch::is_x86_feature_detected!("f16c")
         {
             return Isa::Avx2;
         }
@@ -56,7 +61,7 @@ impl Isa {
     pub fn name(self) -> &'static str {
         match self {
             Isa::Scalar => "scalar",
-            Isa::Avx2 => "avx2+fma",
+            Isa::Avx2 => "avx2+fma+f16c",
         }
     }
 }
@@ -114,28 +119,70 @@ impl Drop for AlignedBuf {
     }
 }
 
-/// A weight matrix of `n` outputs and `k` inputs, stored as panels of 16 outputs with the
-/// inputs running inside each panel. Outputs past `n` in the last panel are zero.
+/// A weight matrix of `n` outputs and `k` inputs in the panel layout of [`crate::quant`]: panels
+/// of 16 outputs with the inputs running inside each panel, in any [`Precision`]. The values
+/// live in shared bytes, which may be a mapped pack.
+#[derive(Clone)]
 pub struct PackedWeights {
     n: usize,
     k: usize,
-    data: AlignedBuf,
+    precision: Precision,
+    values: Bytes,
+    scales: Option<Vector>,
 }
 
 impl PackedWeights {
-    /// Packs a row-major `[n, k]` matrix, the layout of a PyTorch `Linear` weight.
+    /// Packs a row-major `[n, k]` matrix in f32, the layout of a PyTorch `Linear` weight.
     pub fn from_rows(w: &[f32], n: usize, k: usize) -> PackedWeights {
-        assert_eq!(w.len(), n * k);
-        let panels = n.div_ceil(PANEL);
-        let mut data = AlignedBuf::zeroed(panels * k * PANEL);
-        for (o, row) in w.chunks_exact(k).enumerate() {
-            let (p, j) = (o / PANEL, o % PANEL);
-            let panel = &mut data[p * k * PANEL..(p + 1) * k * PANEL];
-            for (i, &v) in row.iter().enumerate() {
-                panel[i * PANEL + j] = v;
-            }
+        PackedWeights::encode(&Rows::F32(w), n, k, Precision::F32)
+    }
+
+    /// Packs a matrix in `precision`, quantizing or rounding it as needed.
+    pub fn encode(rows: &Rows, n: usize, k: usize, precision: Precision) -> PackedWeights {
+        let mut values = Region::zeroed(precision.panel_bytes(n, k));
+        let mut scales = Region::zeroed(precision.scale_count(n, k) * 4);
+        quant::encode(
+            rows,
+            n,
+            k,
+            precision,
+            values.as_mut_slice(),
+            scales.as_mut_f32(),
+        );
+        let scales = (!scales.is_empty()).then(|| Vector::new(scales.share()));
+        PackedWeights {
+            n,
+            k,
+            precision,
+            values: values.share(),
+            scales,
         }
-        PackedWeights { n, k, data }
+    }
+
+    /// Weights already in the panel layout, as a pack stores them.
+    pub fn from_parts(
+        n: usize,
+        k: usize,
+        precision: Precision,
+        values: Bytes,
+        scales: Option<Vector>,
+    ) -> Option<PackedWeights> {
+        let scale_count = precision.scale_count(n, k);
+        let scales_fit = match &scales {
+            None => scale_count == 0,
+            Some(s) => s.len() == scale_count,
+        };
+        (precision.fits(k)
+            && values.len() == precision.panel_bytes(n, k)
+            && values.as_ptr().align_offset(4) == 0
+            && scales_fit)
+            .then_some(PackedWeights {
+                n,
+                k,
+                precision,
+                values,
+                scales,
+            })
     }
 
     pub fn n(&self) -> usize {
@@ -146,9 +193,35 @@ impl PackedWeights {
         self.k
     }
 
+    pub fn precision(&self) -> Precision {
+        self.precision
+    }
+
+    pub fn values(&self) -> &Bytes {
+        &self.values
+    }
+
+    pub fn scales(&self) -> Option<&Vector> {
+        self.scales.as_ref()
+    }
+
+    /// The row-major `[n, k]` values the weights stand for.
+    pub fn to_rows(&self) -> Vec<f32> {
+        let scales = self.scales.as_deref().unwrap_or(&[]);
+        quant::decode(
+            self.values.as_slice(),
+            scales,
+            self.n,
+            self.k,
+            self.precision,
+        )
+    }
+
     pub fn view(&self) -> BView<'_> {
         BView {
-            data: &self.data,
+            data: self.values.as_slice(),
+            precision: self.precision,
+            scales: self.scales.as_deref().unwrap_or(&[]),
             n: self.n,
             k: self.k,
             panel_stride: self.k * PANEL,
@@ -156,17 +229,20 @@ impl PackedWeights {
         }
     }
 
-    /// Bytes of weight data.
+    /// Bytes of weight data, scales included.
     pub fn bytes(&self) -> usize {
-        self.data.len() * 4
+        self.values.len() + self.scales.as_ref().map_or(0, |s| s.len() * 4)
     }
 }
 
 /// The right-hand side of a matrix product, `[k, n]`, as a set of 16-column panels: column
-/// block `p` at input `i` is the 16 floats at `p * panel_stride + i * k_stride`.
+/// block `p` at input `i` is the 16 values at element `p * panel_stride + i * k_stride`.
+/// Activations are f32. Packed weights may be narrower, and are then contiguous panels.
 #[derive(Clone, Copy)]
 pub struct BView<'a> {
-    data: &'a [f32],
+    data: &'a [u8],
+    precision: Precision,
+    scales: &'a [f32],
     n: usize,
     k: usize,
     panel_stride: usize,
@@ -178,8 +254,13 @@ impl<'a> BView<'a> {
     /// next multiple of 16 are read but their results are dropped, and the buffer must hold
     /// them (`data.len() >= (k - 1) * ld + n.next_multiple_of(16)`).
     pub fn row_major(data: &'a [f32], k: usize, n: usize, ld: usize) -> BView<'a> {
+        // SAFETY: the bytes of an f32 slice, which u8 may alias.
+        let bytes =
+            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
         let view = BView {
-            data,
+            data: bytes,
+            precision: Precision::F32,
+            scales: &[],
             n,
             k,
             panel_stride: PANEL,
@@ -196,7 +277,7 @@ impl<'a> BView<'a> {
         let last =
             (self.n.div_ceil(PANEL) - 1) * self.panel_stride + (self.k - 1) * self.k_stride + PANEL;
         assert!(
-            last <= self.data.len(),
+            last * self.precision.value_bytes() <= self.data.len(),
             "the matrix view reads past its buffer"
         );
     }
@@ -253,7 +334,9 @@ impl Epilogue<'_> {
 #[derive(Clone, Copy)]
 pub struct Kernels {
     isa: Isa,
-    /// Computes a `rows x 16` tile (rows <= 6) of `a * b` into `out` (row stride 16), adding
+    /// The most rows `tile` takes.
+    tile_rows: usize,
+    /// Computes a `rows x 16` tile (rows <= tile_rows) of `a * b` into `out` (row stride 16), adding
     /// to what `out` holds when `load` is set. `a` rows are `lda` apart, `b` steps `k_stride`
     /// per input.
     tile: unsafe fn(
@@ -265,6 +348,17 @@ pub struct Kernels {
         k_stride: usize,
         out: *mut f32,
         load: bool,
+    ),
+    /// Widens `k` inputs of one panel in a narrow precision (not f32) to f32, `k * 16` values
+    /// into `out`. `scales` points at the panel's 16 scales for int8, or at the 16 scales of
+    /// the first block of 32 inputs for Q8_0 (blocks follow each other), and is unused
+    /// otherwise. Every instruction set must give exactly the values of [`quant::decode`].
+    widen: unsafe fn(
+        precision: Precision,
+        k: usize,
+        src: *const u8,
+        scales: *const f32,
+        out: *mut f32,
     ),
     /// Applies the epilogue to one tile row and stores `cols` values.
     store: fn(
@@ -331,6 +425,11 @@ impl Kernels {
         self.isa
     }
 
+    /// Rows of the matrix product's register tile.
+    pub fn tile_rows(&self) -> usize {
+        self.tile_rows
+    }
+
     /// `c[m, n] = epilogue(a[m, k] * b[k, n])` on one thread, for the panels in `panels`.
     ///
     /// # Safety
@@ -348,6 +447,21 @@ impl Kernels {
         epi: &Epilogue,
     ) {
         let k = b.k;
+        let narrow = b.precision != Precision::F32;
+        if narrow {
+            debug_assert!(b.k_stride == PANEL && b.panel_stride == k * PANEL);
+        }
+        let vb = b.precision.value_bytes();
+        let blocks = k.div_ceil(Q8_BLOCK);
+        // Narrow weights are widened a block of KC inputs at a time into this buffer, which
+        // stays in L1 while every row passes over it. Widening is exact (or, for int8, the same
+        // rounded product on every instruction set), so the sums equal those of f32 weights
+        // holding the widened values.
+        let mut wide = if narrow {
+            vec![0f32; KC * PANEL]
+        } else {
+            Vec::new()
+        };
         // Running sums of one panel for every row. The inputs are taken in blocks of KC so a
         // block of the panel stays in L1 while all rows pass over it. Each block continues from
         // the stored sums, so every output is summed in the same order as without blocking.
@@ -359,11 +473,34 @@ impl Kernels {
             let mut k0 = 0;
             while k0 < k {
                 let kc = (k - k0).min(KC);
-                // SAFETY: `BView::check` keeps the panel's reads inside `b.data`.
-                let bp = unsafe { b.data.as_ptr().add(p * b.panel_stride + k0 * b.k_stride) };
+                let (bp, k_stride) = if narrow {
+                    let scales = match b.precision {
+                        Precision::Int8 => &b.scales[p * PANEL..(p + 1) * PANEL],
+                        Precision::Q8_0 => &b.scales[(p * blocks + k0 / Q8_BLOCK) * PANEL..],
+                        _ => &[],
+                    };
+                    // SAFETY: `PackedWeights` holds `k` runs of 16 values per panel, and the
+                    // scales indexed above. `wide` holds KC runs.
+                    unsafe {
+                        (self.widen)(
+                            b.precision,
+                            kc,
+                            b.data.as_ptr().add((p * k + k0) * PANEL * vb),
+                            scales.as_ptr(),
+                            wide.as_mut_ptr(),
+                        )
+                    };
+                    (wide.as_ptr(), PANEL)
+                } else {
+                    // SAFETY: `BView::check` keeps the panel's reads inside `b.data`.
+                    let bp = unsafe {
+                        (b.data.as_ptr() as *const f32).add(p * b.panel_stride + k0 * b.k_stride)
+                    };
+                    (bp, b.k_stride)
+                };
                 let mut row = 0;
                 while row < m {
-                    let rows = (m - row).min(TILE_ROWS);
+                    let rows = (m - row).min(self.tile_rows);
                     // SAFETY: rows `row..row + rows` of `a` hold `k` values each, checked by the
                     // caller, and `partial` holds `m` rows of 16.
                     unsafe {
@@ -373,7 +510,7 @@ impl Kernels {
                             lda,
                             rows,
                             bp,
-                            b.k_stride,
+                            k_stride,
                             partial.as_mut_ptr().add(row * PANEL),
                             k0 > 0,
                         )
@@ -694,6 +831,58 @@ mod tests {
                         f.iter().zip(&c).all(|(x, y)| x.to_bits() == y.to_bits()),
                         "{threads} threads differ"
                     ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_weights_give_the_sums_of_their_widened_values() {
+        let pool = Pool::new(3);
+        for kernels in all_kernels() {
+            for &(m, k, n) in &[(1, 64, 20), (7, 288, 33), (13, 544, 16), (6, 32, 5)] {
+                let a = random(m * k, 21);
+                let w: Vec<f32> = random(n * k, 22)
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| v * (1 + i / k) as f32 * 0.1)
+                    .collect();
+                let bias = random(n, 23);
+                let epi = Epilogue {
+                    bias: Some(&bias),
+                    act: Act::Silu,
+                    scale: 0.5,
+                    accumulate: false,
+                };
+                for precision in [
+                    Precision::F16,
+                    Precision::Bf16,
+                    Precision::Int8,
+                    Precision::Q8_0,
+                ] {
+                    let narrow = PackedWeights::encode(&Rows::F32(&w), n, k, precision);
+                    let wide = PackedWeights::from_rows(&narrow.to_rows(), n, k);
+                    let (mut c1, mut c2) = (vec![0f32; m * n], vec![0f32; m * n]);
+                    kernels.linear(&pool, &a, m, &narrow, &mut c1, &epi);
+                    kernels.linear(&pool, &a, m, &wide, &mut c2, &epi);
+                    assert!(
+                        c1.iter().zip(&c2).all(|(x, y)| x.to_bits() == y.to_bits()),
+                        "{:?} {precision} m={m} k={k} n={n}",
+                        kernels.isa()
+                    );
+                    let want = reference(&a, m, k, &w, n, &epi, &[]);
+                    // Rounding errors of the weights add up over the k inputs.
+                    let tol = match precision {
+                        Precision::F16 => 2e-3,
+                        Precision::Bf16 => 2e-2,
+                        _ => 0.01 * (k as f32).sqrt(),
+                    };
+                    for (g, w) in c1.iter().zip(&want) {
+                        assert!(
+                            (g - w).abs() <= tol * (1.0 + w.abs()),
+                            "{precision}: {g} vs {w}"
+                        );
+                    }
                 }
             }
         }
