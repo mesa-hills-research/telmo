@@ -227,7 +227,7 @@ def main() -> None:
             "license": "CC-BY-4.0",
             "archives_md5": {"test-clean.tar.gz": "32fa31d27d2e1cad72775fee3f4849a9",
                              "test-other.tar.gz": "fb5a50374b501bb3bac4815ee91d3135"},
-            "note": "Phase 0 has no recordings of the owner's dictation, so all six clips are LibriSpeech.",
+            "note": "All six clips come from LibriSpeech. Clips of recorded technical dictation are to follow.",
             "format": "16 kHz mono 16-bit PCM WAV, the FLAC's samples unchanged. The model input is int16/32768 as float32. "
             "The joined clip is a plain concatenation of the source utterances with no gaps.",
         },
