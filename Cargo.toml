@@ -21,3 +21,7 @@ debug = "line-tables-only"
 [profile.test]
 opt-level = 3
 debug = "line-tables-only"
+
+[[bench]]
+name = "matmul"
+harness = false

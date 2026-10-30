@@ -18,8 +18,8 @@ pub(crate) fn kernels() -> Kernels {
 }
 
 /// # Safety
-/// `a` must hold `rows` rows of `k` values `lda` apart, and `b` must hold `k` runs of 16 values
-/// `k_stride` apart.
+/// `a` must hold `rows` rows of `k` values `lda` apart, `b` must hold `k` runs of 16 values
+/// `k_stride` apart, and `out` must hold `rows` rows of 16.
 unsafe fn tile(
     k: usize,
     a: *const f32,
@@ -27,13 +27,16 @@ unsafe fn tile(
     rows: usize,
     b: *const f32,
     k_stride: usize,
-    out: &mut [f32; 96],
+    out: *mut f32,
+    load: bool,
 ) {
-    out.fill(0.0);
     for r in 0..rows {
-        let acc = &mut out[r * PANEL..(r + 1) * PANEL];
+        // SAFETY: in bounds by the function's contract.
+        let acc = unsafe { std::slice::from_raw_parts_mut(out.add(r * PANEL), PANEL) };
+        if !load {
+            acc.fill(0.0);
+        }
         for i in 0..k {
-            // SAFETY: in bounds by the function's contract.
             let (av, bp) = unsafe { (*a.add(r * lda + i), b.add(i * k_stride)) };
             for (j, slot) in acc.iter_mut().enumerate() {
                 *slot += av * unsafe { *bp.add(j) };

@@ -38,16 +38,17 @@ unsafe fn tile(
     rows: usize,
     b: *const f32,
     k_stride: usize,
-    out: &mut [f32; 96],
+    out: *mut f32,
+    load: bool,
 ) {
     unsafe {
         match rows {
-            6 => tile_rows::<6>(k, a, lda, b, k_stride, out),
-            5 => tile_rows::<5>(k, a, lda, b, k_stride, out),
-            4 => tile_rows::<4>(k, a, lda, b, k_stride, out),
-            3 => tile_rows::<3>(k, a, lda, b, k_stride, out),
-            2 => tile_rows::<2>(k, a, lda, b, k_stride, out),
-            1 => tile_rows::<1>(k, a, lda, b, k_stride, out),
+            6 => tile_rows::<6>(k, a, lda, b, k_stride, out, load),
+            5 => tile_rows::<5>(k, a, lda, b, k_stride, out, load),
+            4 => tile_rows::<4>(k, a, lda, b, k_stride, out, load),
+            3 => tile_rows::<3>(k, a, lda, b, k_stride, out, load),
+            2 => tile_rows::<2>(k, a, lda, b, k_stride, out, load),
+            1 => tile_rows::<1>(k, a, lda, b, k_stride, out, load),
             _ => unreachable!("tiles have 1 to 6 rows"),
         }
     }
@@ -62,10 +63,20 @@ unsafe fn tile_rows<const R: usize>(
     lda: usize,
     b: *const f32,
     k_stride: usize,
-    out: &mut [f32; 96],
+    out: *mut f32,
+    load: bool,
 ) {
     let mut acc0 = [_mm256_setzero_ps(); R];
     let mut acc1 = [_mm256_setzero_ps(); R];
+    if load {
+        for r in 0..R {
+            // SAFETY: `out` holds R rows of 16.
+            unsafe {
+                acc0[r] = _mm256_loadu_ps(out.add(r * PANEL));
+                acc1[r] = _mm256_loadu_ps(out.add(r * PANEL + 8));
+            }
+        }
+    }
     let mut rows = [a; R];
     for (r, row) in rows.iter_mut().enumerate() {
         *row = unsafe { a.add(r * lda) };
@@ -86,8 +97,8 @@ unsafe fn tile_rows<const R: usize>(
     }
     for r in 0..R {
         unsafe {
-            _mm256_storeu_ps(out.as_mut_ptr().add(r * PANEL), acc0[r]);
-            _mm256_storeu_ps(out.as_mut_ptr().add(r * PANEL + 8), acc1[r]);
+            _mm256_storeu_ps(out.add(r * PANEL), acc0[r]);
+            _mm256_storeu_ps(out.add(r * PANEL + 8), acc1[r]);
         }
     }
 }

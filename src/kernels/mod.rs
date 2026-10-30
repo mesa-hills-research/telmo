@@ -23,6 +23,8 @@ pub(crate) mod scalar;
 pub const PANEL: usize = 16;
 /// Rows of the matrix product's register tile.
 pub const TILE_ROWS: usize = 6;
+/// Inputs per block of the matrix product (a 16 KB block of a weight panel).
+const KC: usize = 256;
 
 /// The instruction set the kernels use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,8 +253,9 @@ impl Epilogue<'_> {
 #[derive(Clone, Copy)]
 pub struct Kernels {
     isa: Isa,
-    /// Computes a `rows x 16` tile (rows <= 6) of `a * b` into `out` (row stride 16).
-    /// `a` rows are `lda` apart, `b` steps `k_stride` per input.
+    /// Computes a `rows x 16` tile (rows <= 6) of `a * b` into `out` (row stride 16), adding
+    /// to what `out` holds when `load` is set. `a` rows are `lda` apart, `b` steps `k_stride`
+    /// per input.
     tile: unsafe fn(
         k: usize,
         a: *const f32,
@@ -260,7 +263,8 @@ pub struct Kernels {
         rows: usize,
         b: *const f32,
         k_stride: usize,
-        out: &mut [f32; 96],
+        out: *mut f32,
+        load: bool,
     ),
     /// Applies the epilogue to one tile row and stores `cols` values.
     store: fn(
@@ -346,43 +350,52 @@ impl Kernels {
         epi: &Epilogue,
     ) {
         let k = b.k;
-        let mut acc = [0f32; 96];
+        // Running sums of one panel for every row. The inputs are taken in blocks of KC so a
+        // block of the panel stays in L1 while all rows pass over it. Each block continues from
+        // the stored sums, so every output is summed in the same order as without blocking.
+        let mut partial = vec![0f32; m * PANEL];
         for p in panels {
             let col = p * PANEL;
             let cols = (b.n - col).min(PANEL);
             let bias = epi.bias.map(|bias| &bias[col..col + cols]);
-            // SAFETY: `BView::check` keeps the panel's reads inside `b.data`.
-            let bp = unsafe { b.data.as_ptr().add(p * b.panel_stride) };
-            let mut row = 0;
-            while row < m {
-                let rows = (m - row).min(TILE_ROWS);
-                // SAFETY: rows `row..row + rows` of `a` hold `k` values each, checked by the caller.
-                unsafe {
-                    (self.tile)(
-                        k,
-                        a.as_ptr().add(row * lda),
-                        lda,
-                        rows,
-                        bp,
-                        b.k_stride,
-                        &mut acc,
-                    )
-                };
-                for r in 0..rows {
-                    // SAFETY: the caller hands this call the columns of these panels alone.
-                    let c_row = unsafe {
-                        std::slice::from_raw_parts_mut(c.get().add((row + r) * ldc + col), cols)
+            let mut k0 = 0;
+            while k0 < k {
+                let kc = (k - k0).min(KC);
+                // SAFETY: `BView::check` keeps the panel's reads inside `b.data`.
+                let bp = unsafe { b.data.as_ptr().add(p * b.panel_stride + k0 * b.k_stride) };
+                let mut row = 0;
+                while row < m {
+                    let rows = (m - row).min(TILE_ROWS);
+                    // SAFETY: rows `row..row + rows` of `a` hold `k` values each, checked by the
+                    // caller, and `partial` holds `m` rows of 16.
+                    unsafe {
+                        (self.tile)(
+                            kc,
+                            a.as_ptr().add(row * lda + k0),
+                            lda,
+                            rows,
+                            bp,
+                            b.k_stride,
+                            partial.as_mut_ptr().add(row * PANEL),
+                            k0 > 0,
+                        )
                     };
-                    (self.store)(
-                        &acc[r * PANEL..r * PANEL + cols],
-                        c_row,
-                        bias,
-                        epi.act,
-                        epi.scale,
-                        epi.accumulate,
-                    );
+                    row += rows;
                 }
-                row += rows;
+                k0 += kc;
+            }
+            for (r, sums) in partial.chunks_exact(PANEL).enumerate() {
+                // SAFETY: the caller hands this call the columns of these panels alone.
+                let c_row =
+                    unsafe { std::slice::from_raw_parts_mut(c.get().add(r * ldc + col), cols) };
+                (self.store)(
+                    &sums[..cols],
+                    c_row,
+                    bias,
+                    epi.act,
+                    epi.scale,
+                    epi.accumulate,
+                );
             }
         }
     }
