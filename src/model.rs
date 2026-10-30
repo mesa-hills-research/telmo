@@ -60,8 +60,23 @@ impl ModelType {
         }
     }
 
+    /// The 8-bit precision that keeps the model's word error rate on LibriSpeech within a paired
+    /// bootstrap's 95% interval of its full weights, q8_0 for Parakeet and int8 for Granite.
+    /// Packs in it take about a quarter of f32's memory.
+    pub fn recommended_precision(self) -> Precision {
+        match self {
+            ModelType::Parakeet => Precision::Q8_0,
+            ModelType::Granite => Precision::Int8,
+        }
+    }
+
     /// Converts the checkpoint at `path` into pack entries in `precision`.
-    pub fn convert_path(self, path: &Path, precision: Precision, sink: &mut dyn Sink) -> Result<()> {
+    pub fn convert_path(
+        self,
+        path: &Path,
+        precision: Precision,
+        sink: &mut dyn Sink,
+    ) -> Result<()> {
         match self {
             ModelType::Parakeet => parakeet::convert_path(path, precision, sink),
             ModelType::Granite => granite::convert_path(path, precision, sink),
@@ -139,6 +154,20 @@ impl Model {
         match self {
             Model::Parakeet(m) => m.weight_bytes(),
             Model::Granite(m) => m.weight_bytes(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_model_recommends_an_8_bit_precision_its_packs_can_hold() {
+        assert_eq!(ModelType::Parakeet.recommended_precision(), Precision::Q8_0);
+        assert_eq!(ModelType::Granite.recommended_precision(), Precision::Int8);
+        for model in [ModelType::Parakeet, ModelType::Granite] {
+            assert_eq!(model.recommended_precision().value_bytes(), 1);
         }
     }
 }

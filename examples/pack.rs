@@ -7,8 +7,9 @@
 //!
 //! MODEL is a directory holding `model.safetensors`, `config.json` and `tokenizer.json` of
 //! Parakeet TDT or Granite Speech, or NVIDIA's Parakeet GGUF file with `tokenizer.json` beside
-//! it. `--precision` is f32, f16, bf16,
-//! int8 or q8_0 (int8 by default). `--list` prints a pack's metadata and entries.
+//! it. `--precision` is f32, f16, bf16, int8 or q8_0. By default it is the model's recommended
+//! 8-bit precision, q8_0 for Parakeet (which keeps a GGUF file's blocks as they are) and int8 for
+//! Granite. `--list` prints a pack's metadata and entries.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -30,17 +31,18 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
-    let mut precision = Precision::Int8;
+    let mut precision = None;
     let mut list = false;
     let mut paths: Vec<PathBuf> = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--precision" => {
-                precision = args
-                    .next()
-                    .as_deref()
-                    .and_then(Precision::from_name)
-                    .ok_or("--precision takes f32, f16, bf16, int8 or q8_0")?
+                precision = Some(
+                    args.next()
+                        .as_deref()
+                        .and_then(Precision::from_name)
+                        .ok_or("--precision takes f32, f16, bf16, int8 or q8_0")?,
+                )
             }
             "--list" => list = true,
             _ => paths.push(arg.into()),
@@ -70,6 +72,7 @@ fn run() -> Result<(), String> {
     };
     let start = Instant::now();
     let model = ModelType::detect(input).map_err(|e| e.to_string())?;
+    let precision = precision.unwrap_or(model.recommended_precision());
     let mut sink = FileSink::create(
         output,
         model.pack_model(),
