@@ -127,6 +127,16 @@ impl Tokenizer {
     /// decodes on its own, and a run that isn't valid UTF-8 becomes one U+FFFD per byte. Without
     /// it, the bytes of all pieces decode together and each invalid sequence becomes one U+FFFD.
     pub fn decode(&self, ids: &[u32]) -> String {
+        let text = self.decode_raw(ids);
+        match text.strip_prefix(' ') {
+            Some(rest) => rest.to_string(),
+            None => text,
+        }
+    }
+
+    /// Like [`Tokenizer::decode`], but keeps the space a first word's `▁` stands for, so the
+    /// text of later words can be appended to earlier text.
+    pub fn decode_raw(&self, ids: &[u32]) -> String {
         let mut bytes = Vec::new();
         let mut text = String::new();
         for &id in ids {
@@ -145,11 +155,38 @@ impl Tokenizer {
         } else {
             text = String::from_utf8_lossy(&bytes).into_owned();
         }
-        match text.strip_prefix(' ') {
-            Some(rest) => rest.to_string(),
-            None => text,
-        }
+        text
     }
+
+    /// Whether text may be split before token `id`, which follows `prev`: where a word starts
+    /// (a `▁` piece), or next to a CJK character, since Japanese and Chinese have no spaces.
+    /// Never inside the bytes of one character.
+    pub fn may_split_before(&self, prev: Option<u32>, id: u32) -> bool {
+        let piece = |id: u32| self.pieces.get(id as usize);
+        match piece(id) {
+            Some(Piece::Text(t)) if t.starts_with(' ') => return true,
+            Some(Piece::Byte(b)) if (0x80..0xc0).contains(b) => return false,
+            None | Some(Piece::Control) => return true,
+            _ => {}
+        }
+        let first_cjk = match piece(id) {
+            Some(Piece::Text(t)) => t.chars().next().is_some_and(is_cjk),
+            Some(Piece::Byte(b)) => *b >= 0xe3,
+            _ => false,
+        };
+        let prev_cjk = match prev.and_then(piece) {
+            Some(Piece::Text(t)) => t.chars().last().is_some_and(is_cjk),
+            Some(Piece::Byte(_)) => first_cjk,
+            None => true,
+            Some(Piece::Control) => true,
+        };
+        first_cjk || prev_cjk
+    }
+}
+
+/// Characters of the scripts written without spaces between words, and their punctuation.
+fn is_cjk(c: char) -> bool {
+    matches!(c, '\u{3000}'..='\u{30ff}' | '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{ff00}'..='\u{ffef}')
 }
 
 /// Appends a run of byte pieces as `ByteFallback` decodes it.
@@ -187,6 +224,10 @@ mod tests {
         assert_eq!(tok.decode(&[]), "");
         assert_eq!(tok.decode(&[99]), "");
         assert!(tok.has_pieces(&["<unk>", "▁hel", "lo"]));
+        assert_eq!(tok.decode_raw(&[3, 4]), " world,");
+        assert!(tok.may_split_before(Some(2), 3));
+        assert!(!tok.may_split_before(Some(1), 2));
+        assert!(!tok.may_split_before(Some(6), 7));
         assert!(!tok.has_pieces(&["<unk>", "▁hel", "la"]));
     }
 

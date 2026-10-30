@@ -15,6 +15,7 @@ pub mod quant;
 pub mod region;
 pub mod safetensors;
 pub mod source;
+pub mod stream;
 pub mod threads;
 pub mod tokenizer;
 pub mod wav;

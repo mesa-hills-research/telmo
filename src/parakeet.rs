@@ -189,7 +189,8 @@ impl Timings {
         self.steps.iter().map(|(_, d)| *d).sum()
     }
 
-    fn time<T>(&mut self, name: &'static str, f: impl FnOnce() -> T) -> T {
+    /// Runs `f`, adding its time to step `name`.
+    pub fn time<T>(&mut self, name: &'static str, f: impl FnOnce() -> T) -> T {
         let start = Instant::now();
         let out = f();
         self.add(name, start.elapsed());
@@ -232,6 +233,18 @@ pub struct DecodeTrace {
     pub preds: Vec<Vec<f32>>,
     /// The joint's logits of the first steps, with the frame of each.
     pub joints: Vec<(usize, Vec<f32>)>,
+}
+
+/// Where greedy decoding stands after a token: the prediction network's state and output, and
+/// the encoder frame (counted from the utterance's start) decoding continues at.
+#[derive(Debug, Clone)]
+pub struct DecoderState {
+    lstm: Vec<f32>,
+    pred: Vec<f32>,
+    /// The frame the next joint step reads.
+    pub frame: usize,
+    /// Tokens already emitted at `frame`, toward the limit per frame.
+    on_frame: usize,
 }
 
 struct Subsampling {
@@ -1260,31 +1273,88 @@ impl Parakeet {
         &self,
         encoded: &Encoded,
         timings: &mut Timings,
-        mut trace: Option<&mut DecodeTrace>,
+        trace: Option<&mut DecodeTrace>,
     ) -> Vec<Token> {
+        let start = self.initial_decoder_state(timings);
+        let mut tokens = Vec::new();
+        self.decode_inner(encoded, 0, start, timings, trace, &mut |token, _| {
+            tokens.push(token)
+        });
+        tokens
+    }
+
+    /// The decoder's state before any token, as NeMo starts it (the blank token's input).
+    pub fn initial_decoder_state(&self, timings: &mut Timings) -> DecoderState {
+        let c = &self.config;
+        let h = c.pred_hidden;
+        let mut lstm = vec![0f32; c.pred_layers * 2 * h];
+        let mut pred = vec![0f32; h];
+        timings.time("predict", || self.predict(c.blank, &mut lstm, &mut pred));
+        DecoderState {
+            lstm,
+            pred,
+            frame: 0,
+            on_frame: 0,
+        }
+    }
+
+    /// Greedy TDT decoding of `encoded`, whose first frame is the utterance's frame `offset`,
+    /// continuing from `state` (taken from an earlier pass, at a frame inside `encoded`).
+    /// Returns each token with frames counted from the utterance's start, and the decoder's
+    /// state just after it, from which a later pass can continue.
+    pub fn decode_from(
+        &self,
+        encoded: &Encoded,
+        offset: usize,
+        state: &DecoderState,
+        timings: &mut Timings,
+    ) -> Vec<(Token, DecoderState)> {
+        let mut out = Vec::new();
+        self.decode_inner(encoded, offset, state.clone(), timings, None, &mut |token, after| {
+            out.push((token, after.clone()))
+        });
+        out
+    }
+
+    fn decode_inner(
+        &self,
+        encoded: &Encoded,
+        offset: usize,
+        start: DecoderState,
+        timings: &mut Timings,
+        mut trace: Option<&mut DecodeTrace>,
+        on_token: &mut dyn FnMut(Token, &DecoderState),
+    ) {
         let c = &self.config;
         let dec = &self.decoder;
         let k = &self.kernels;
         let pool = &self.pool;
         let h = c.pred_hidden;
         let frames = encoded.frames;
-
-        let mut enc_proj = vec![0f32; frames * h];
+        let DecoderState {
+            lstm: mut state,
+            mut pred,
+            frame,
+            mut on_frame,
+        } = start;
+        let mut t = frame.saturating_sub(offset);
+        if t >= frames {
+            return;
+        }
+        // Only the frames from the start state on are needed.
+        let first = t;
+        let rows = frames - first;
+        let mut enc_proj = vec![0f32; rows * h];
         timings.time("enc_proj", || {
             k.linear(
                 pool,
-                &encoded.data,
-                frames,
+                &encoded.data[first * encoded.width..],
+                rows,
                 &dec.enc_proj,
                 &mut enc_proj,
                 &Epilogue::bias(&dec.enc_proj_b),
             )
         });
-
-        let mut state = vec![0f32; c.pred_layers * 2 * h];
-        let mut pred = vec![0f32; h];
-        // The start state is the blank token's input, as in NeMo.
-        timings.time("predict", || self.predict(c.blank, &mut state, &mut pred));
         if let Some(trace) = trace.as_deref_mut() {
             trace.enc_proj = enc_proj.clone();
             trace.preds.push(pred.clone());
@@ -1293,12 +1363,10 @@ impl Parakeet {
         let outputs = c.vocab + c.durations.len();
         let mut z = vec![0f32; h];
         let mut logits = vec![0f32; outputs];
-        let mut tokens = Vec::new();
-        let mut t = 0;
-        let mut on_frame = 0;
         while t < frames {
+            let row = &enc_proj[(t - first) * h..(t - first + 1) * h];
             timings.time("joint", || {
-                for ((zi, &e), &p) in z.iter_mut().zip(&enc_proj[t * h..(t + 1) * h]).zip(&pred) {
+                for ((zi, &e), &p) in z.iter_mut().zip(row).zip(&pred) {
                     *zi = (e + p).max(0.0);
                 }
                 k.linear(
@@ -1322,11 +1390,11 @@ impl Parakeet {
                 on_frame = 0;
                 continue;
             }
-            tokens.push(Token {
+            let emitted = Token {
                 id: token as u32,
-                frame: t as u32,
+                frame: (offset + t) as u32,
                 duration: duration as u32,
-            });
+            };
             timings.time("predict", || self.predict(token, &mut state, &mut pred));
             if let Some(trace) = trace.as_deref_mut() {
                 trace.preds.push(pred.clone());
@@ -1341,8 +1409,14 @@ impl Parakeet {
                     on_frame = 0;
                 }
             }
+            let after = DecoderState {
+                lstm: state.clone(),
+                pred: pred.clone(),
+                frame: offset + t,
+                on_frame,
+            };
+            on_token(emitted, &after);
         }
-        tokens
     }
 
     /// Runs the prediction network on one token, updating the LSTM state and writing the
