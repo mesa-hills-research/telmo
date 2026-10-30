@@ -15,8 +15,10 @@
 //! raw hypotheses to `DIR/<list name>.tsv` as `id<TAB>text` and resumes from that file if it
 //! exists. `--hyp` scores a hypothesis file of that format without running a model. With
 //! `--compare DIR`, either form also reports how often the transcripts equal those in
-//! `DIR/<list name>.tsv`.
+//! `DIR/<list name>.tsv`, and a paired bootstrap of the difference in WER (10,000 resamples of
+//! the utterances both have).
 
+mod bootstrap;
 mod normalize;
 mod score;
 #[cfg(test)]
@@ -302,5 +304,34 @@ fn agreement(pairs: &[(&Utterance, &str)], other: &HashMap<String, String>) {
     }
     println!(
         "Compared with {both} transcripts of the other system, {same} are identical and {same_normalized} identical after normalization."
+    );
+    let paired: Vec<bootstrap::Paired> = pairs
+        .iter()
+        .filter_map(|(u, hyp)| {
+            let theirs = other.get(&u.id)?;
+            let reference = normalize::normalize(&u.reference);
+            if !score::is_scored(&reference) {
+                return None;
+            }
+            let mine = score::count_errors(&reference, &normalize::normalize(hyp));
+            let theirs = score::count_errors(&reference, &normalize::normalize(theirs));
+            Some(bootstrap::Paired {
+                errors_a: theirs.total(),
+                errors_b: mine.total(),
+                words: mine.reference_words,
+            })
+        })
+        .collect();
+    if paired.is_empty() {
+        return;
+    }
+    let r = bootstrap::paired(&paired, 10_000, 0x5eed);
+    println!(
+        "WER difference from the other system {:+.3} points, 95% interval {:+.3} to {:+.3} over {} resamples. This system is better in {:.1}% of them.",
+        r.difference,
+        r.low,
+        r.high,
+        r.resamples,
+        100.0 * r.b_better
     );
 }
