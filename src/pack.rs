@@ -5,10 +5,10 @@
 //! f32 tensors, and raw bytes (the model's `config.json` and `tokenizer.json`). The file is
 //!
 //! ```text
-//! 0      "NOTATEPK", then the format version as a little-endian u32, then 4 zero bytes
+//! 0      "TELMOPAK", then the format version as a little-endian u32, then 4 zero bytes
 //! 16     the entries' data, each starting at a multiple of 64 bytes
 //! I      the index, a JSON object listing the model, its metadata and every entry
-//! end-24 the index's offset and length as little-endian u64s, then "NOTATEIX"
+//! end-24 the index's offset and length as little-endian u64s, then "TELMOIDX"
 //! ```
 //!
 //! The index is checked as a whole before any view is made. Every entry needs a known kind, a
@@ -26,8 +26,8 @@ use crate::kernels::PackedWeights;
 use crate::quant::{Precision, Rows};
 use crate::region::{ALIGN, Bytes, Region, Vector};
 
-pub const MAGIC: [u8; 8] = *b"NOTATEPK";
-const INDEX_MAGIC: [u8; 8] = *b"NOTATEIX";
+pub const MAGIC: [u8; 8] = *b"TELMOPAK";
+const INDEX_MAGIC: [u8; 8] = *b"TELMOIDX";
 /// The format version this crate writes and reads.
 pub const VERSION: u32 = 1;
 const PREFIX: usize = 16;
@@ -364,7 +364,7 @@ pub fn metadata_for(path: &Path, precision: Precision) -> Vec<(String, String)> 
         ),
         (
             "engine".into(),
-            format!("notate {}", env!("CARGO_PKG_VERSION")),
+            format!("telmo {}", env!("CARGO_PKG_VERSION")),
         ),
     ]
 }
@@ -639,7 +639,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn sample_file() -> Vec<u8> {
-        let dir = std::env::temp_dir().join(format!("notate-pack-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("telmo-pack-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sample.pack");
         let mut sink =
@@ -656,7 +656,7 @@ pub(crate) mod tests {
         let mut memory = MemorySink::new("test", vec![]);
         sample(&mut memory);
         let memory = memory.finish().unwrap();
-        let dir = std::env::temp_dir().join(format!("notate-pack-rt-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("telmo-pack-rt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("model.pack");
         let mut sink =

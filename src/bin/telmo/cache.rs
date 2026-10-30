@@ -4,8 +4,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// The cache directory for an operating system, as `std::env::consts::OS` names it, given its
-/// environment variables. `%LOCALAPPDATA%\notate` on Windows, `~/Library/Caches/notate` on macOS
-/// and `$XDG_CACHE_HOME/notate` or `~/.cache/notate` elsewhere. Empty variables count as unset.
+/// environment variables. `%LOCALAPPDATA%\telmo` on Windows, `~/Library/Caches/telmo` on macOS
+/// and `$XDG_CACHE_HOME/telmo` or `~/.cache/telmo` elsewhere. Empty variables count as unset.
 pub fn dir_for(os: &str, var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     let var = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
     let base = match os {
@@ -17,7 +17,7 @@ pub fn dir_for(os: &str, var: impl Fn(&str) -> Option<OsString>) -> Option<PathB
             None => var("HOME")?.join(".cache"),
         },
     };
-    Some(base.join("notate"))
+    Some(base.join("telmo"))
 }
 
 /// This system's cache directory.
@@ -49,7 +49,7 @@ mod tests {
         let local = r"C:\Users\Ada\AppData\Local";
         assert_eq!(
             dir("windows", &[("LOCALAPPDATA", local), ("HOME", "/home/ada")]),
-            Some(PathBuf::from(local).join("notate"))
+            Some(PathBuf::from(local).join("telmo"))
         );
         assert_eq!(dir("windows", &[("HOME", "/home/ada")]), None);
         assert_eq!(dir("windows", &[("LOCALAPPDATA", "")]), None);
@@ -62,7 +62,7 @@ mod tests {
                 "macos",
                 &[("HOME", "/Users/ada"), ("XDG_CACHE_HOME", "/tmp/xdg")]
             ),
-            Some(PathBuf::from("/Users/ada/Library/Caches/notate"))
+            Some(PathBuf::from("/Users/ada/Library/Caches/telmo"))
         );
         assert_eq!(dir("macos", &[]), None);
     }
@@ -75,16 +75,16 @@ mod tests {
                     os,
                     &[("HOME", "/home/ada"), ("XDG_CACHE_HOME", "/data/cache")]
                 ),
-                Some(PathBuf::from("/data/cache/notate"))
+                Some(PathBuf::from("/data/cache/telmo"))
             );
             assert_eq!(
                 dir(os, &[("HOME", "/home/ada")]),
-                Some(PathBuf::from("/home/ada/.cache/notate"))
+                Some(PathBuf::from("/home/ada/.cache/telmo"))
             );
             for ignored in ["", "relative/cache"] {
                 assert_eq!(
                     dir(os, &[("HOME", "/home/ada"), ("XDG_CACHE_HOME", ignored)]),
-                    Some(PathBuf::from("/home/ada/.cache/notate"))
+                    Some(PathBuf::from("/home/ada/.cache/telmo"))
                 );
             }
             assert_eq!(dir(os, &[]), None);

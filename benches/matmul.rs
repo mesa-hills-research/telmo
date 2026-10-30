@@ -6,8 +6,8 @@
 
 use std::time::Instant;
 
-use notate::kernels::{Epilogue, Isa, Kernels, PackedWeights};
-use notate::threads::Pool;
+use telmo::kernels::{Epilogue, Isa, Kernels, PackedWeights};
+use telmo::threads::Pool;
 
 fn main() {
     let mut threads = vec![1, 6];

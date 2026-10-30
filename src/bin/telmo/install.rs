@@ -1,4 +1,4 @@
-//! The models `notate` downloads by name, and how they get into the cache.
+//! The models `telmo` downloads by name, and how they get into the cache.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -6,7 +6,7 @@ use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use notate::model::ModelType;
+use telmo::model::ModelType;
 
 use crate::sha256;
 
@@ -170,7 +170,7 @@ pub fn manual_steps(model: &KnownModel, cache: &Path) -> String {
     };
     let _ = write!(
         steps,
-        "  notate pack {source} \"{}\"\n\nThe downloaded files can go once the pack is written.",
+        "  telmo pack {source} \"{}\"\n\nThe downloaded files can go once the pack is written.",
         cache.join(model.pack_file).display()
     );
     steps
@@ -203,7 +203,7 @@ pub fn install(model: &KnownModel, cache: &Path, yes: bool) -> Result<PathBuf, S
             steps
         } else {
             format!(
-                "{} isn't installed. Run notate again with --yes to download it, or install it by hand.\n\n{steps}",
+                "{} isn't installed. Run telmo again with --yes to download it, or install it by hand.\n\n{steps}",
                 model.title
             )
         });
@@ -237,7 +237,7 @@ fn download_and_pack(model: &KnownModel, cache: &Path) -> Result<PathBuf, String
             }
             download(&model.url(file.name), &path).map_err(|e| match e {
                 Download::NoCurl => format!(
-                    "Notate downloads models with curl, which isn't installed. Install curl, or install the model by hand.\n\n{}",
+                    "Telmo downloads models with curl, which isn't installed. Install curl, or install the model by hand.\n\n{}",
                     manual_steps(model, cache)
                 ),
                 Download::Failed => format!(
@@ -251,7 +251,7 @@ fn download_and_pack(model: &KnownModel, cache: &Path) -> Result<PathBuf, String
         if digest != file.sha256 {
             let _ = fs::remove_file(&path);
             return Err(format!(
-                "{} didn't match its SHA-256 checksum, so Notate deleted it. Run the command again to download it.",
+                "{} didn't match its SHA-256 checksum, so Telmo deleted it. Run the command again to download it.",
                 file.name
             ));
         }
@@ -372,7 +372,7 @@ mod tests {
         }
         let pack = cache.join("granite-speech-5.0-int8.pack");
         assert!(steps.contains(&format!(
-            "\n  notate pack granite-speech-5.0-470m-turboctc \"{}\"\n",
+            "\n  telmo pack granite-speech-5.0-470m-turboctc \"{}\"\n",
             pack.display()
         )));
 
@@ -380,7 +380,7 @@ mod tests {
         assert!(steps.contains("https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/541d1f99c6b0c3cd0b11a95167540bb8edefd82b/parakeet-tdt-0.6b-v3.q8_0.gguf\n"));
         assert!(steps.contains("https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/541d1f99c6b0c3cd0b11a95167540bb8edefd82b/tokenizer.json\n"));
         assert!(
-            steps.contains("notate pack parakeet-tdt-0.6b-v3/parakeet-tdt-0.6b-v3.q8_0.gguf \"")
+            steps.contains("telmo pack parakeet-tdt-0.6b-v3/parakeet-tdt-0.6b-v3.q8_0.gguf \"")
         );
     }
 

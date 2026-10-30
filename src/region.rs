@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn a_mapped_file_reads_the_same_as_its_bytes() {
-        let dir = std::env::temp_dir().join(format!("notate-region-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("telmo-region-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("data.bin");
         let data: Vec<u8> = (0..10_000u32).map(|i| (i * 31 % 251) as u8).collect();

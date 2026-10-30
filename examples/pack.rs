@@ -15,9 +15,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use notate::Precision;
-use notate::model::ModelType;
-use notate::pack::{self, FileSink, Kind, Pack};
+use telmo::Precision;
+use telmo::model::ModelType;
+use telmo::pack::{self, FileSink, Kind, Pack};
 
 fn main() -> ExitCode {
     match run() {

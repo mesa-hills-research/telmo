@@ -68,7 +68,7 @@ The two don't differ measurably from each other.
 
 ### Choosing a model
 
-Granite with int8 weights is Notate's default (`ModelType::DEFAULT`). It has the smallest pack and
+Granite with int8 weights is Telmo's default (`ModelType::DEFAULT`). It has the smallest pack and
 the lowest WER on both LibriSpeech sets, within the bootstrap interval of bf16. `ModelType::for_language`
 falls back to Parakeet with q8_0 weights for the 19 European languages Granite doesn't know. In the
 FLEURS table below Parakeet makes fewer errors in every language the two share, most of all in
@@ -80,7 +80,7 @@ two despite its larger pack.
 NVIDIA NeMo 3.0.0 and transformers 5.22.0 transcribed a fixed random subset of 500 utterances of
 each set on the same machine, in f32.
 
-| Model | Subset | Reference | Notate | Identical transcripts |
+| Model | Subset | Reference | Telmo | Identical transcripts |
 |---|---|---:|---:|---:|
 | Parakeet (NeMo) | test-clean, 500 | 1.89% | 1.89% | 500 |
 | Parakeet (NeMo) | test-other, 500 | 3.45% | 3.45% | 499 |
@@ -89,7 +89,7 @@ each set on the same machine, in f32.
 
 The one Parakeet transcript that differs reads "authority - that is" where NeMo's reads
 "authority- that is", the same after normalization. Granite's card reports 1.03% and 2.26% from
-IBM's own GPU run in bf16. Notate's transcripts equal transformers' on every utterance here, and
+IBM's own GPU run in bf16. Telmo's transcripts equal transformers' on every utterance here, and
 the 2026 normalizer only brings the full sets to 1.28% and 2.55%, so the gap lies outside both.
 
 On the full sets Granite's WER is lower than Parakeet's by 0.61 points on test-clean (95%
@@ -119,7 +119,7 @@ Granite's transcripts equal transformers' on all 700.
 ## Agreement layer by layer
 
 `tests/goldens.rs` and `tests/granite_goldens.rs` compare each stage with tensors that NeMo and
-transformers computed on the CPU in f32. Errors are relative L2 (‖Notate − reference‖ /
+transformers computed on the CPU in f32. Errors are relative L2 (‖Telmo − reference‖ /
 ‖reference‖) except for the features, which are absolute.
 
 | Parakeet clip | Features, max | Features, mean | Subsampling | Layer 0 | Layer 12 | Layer 23 | Joint logits | Tokens |

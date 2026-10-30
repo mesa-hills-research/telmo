@@ -36,8 +36,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use notate::{Model, Options, Precision};
 use score::Errors;
+use telmo::{Model, Options, Precision};
 
 /// How texts are normalized and split before they're compared.
 #[derive(Clone, Copy, Default)]
@@ -209,7 +209,7 @@ fn run() -> Result<(), String> {
             .filter(|u| !hyps.contains_key(&u.id))
             .collect();
         for (done, u) in todo.iter().enumerate() {
-            let audio = notate::wav::read(&u.path).map_err(|e| e.to_string())?;
+            let audio = telmo::wav::read(&u.path).map_err(|e| e.to_string())?;
             if audio.sample_rate != 16000 {
                 return Err(format!(
                     "{} is {} Hz, not 16 kHz.",

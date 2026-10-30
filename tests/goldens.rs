@@ -13,12 +13,12 @@
 
 use std::path::{Path, PathBuf};
 
-use notate::features::{FrontEnd, FrontEndConfig};
-use notate::json::{self, Value};
-use notate::kernels::Isa;
-use notate::parakeet::{DecodeTrace, Timings};
-use notate::safetensors::SafeTensors;
-use notate::{Options, Parakeet, Precision};
+use telmo::features::{FrontEnd, FrontEndConfig};
+use telmo::json::{self, Value};
+use telmo::kernels::Isa;
+use telmo::parakeet::{DecodeTrace, Timings};
+use telmo::safetensors::SafeTensors;
+use telmo::{Options, Parakeet, Precision};
 
 /// Features may differ by this much (after normalization to unit variance). The reference
 /// computes its STFT in f32, and the rounding shows most in the lowest mel filters, which sum
@@ -61,7 +61,7 @@ fn clips() -> Vec<Clip> {
                     .to_string()
             };
             let id = field("id");
-            let audio = notate::wav::read(&dir.join(field("wav"))).expect("the clip's WAV");
+            let audio = telmo::wav::read(&dir.join(field("wav"))).expect("the clip's WAV");
             assert_eq!(audio.sample_rate, 16000);
             let tensors = SafeTensors::from_bytes(
                 std::fs::read(dir.join(field("tensors"))).expect("the clip's tensors"),

@@ -1,12 +1,12 @@
 //! The readers must return an error, never panic, on damaged input. Each test mutates a valid
 //! file in many random ways (flipped bits, overwritten bytes, truncation, inserted junk).
 
-use notate::gguf::{self, Gguf, TensorType};
-use notate::pack::{FileSink, Kind, Pack, Sink};
-use notate::quant::{Precision, Rows};
-use notate::safetensors::SafeTensors;
-use notate::tokenizer::Tokenizer;
-use notate::{json, wav};
+use telmo::gguf::{self, Gguf, TensorType};
+use telmo::pack::{FileSink, Kind, Pack, Sink};
+use telmo::quant::{Precision, Rows};
+use telmo::safetensors::SafeTensors;
+use telmo::tokenizer::Tokenizer;
+use telmo::{json, wav};
 
 struct Rng(u64);
 
@@ -154,7 +154,7 @@ fn damaged_gguf_files_are_refused_without_panicking() {
 }
 
 fn pack_file() -> Vec<u8> {
-    let dir = std::env::temp_dir().join(format!("notate-corrupt-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("telmo-corrupt-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("small.pack");
     let mut sink = FileSink::create(&path, "test", vec![("source".into(), "x".into())]).unwrap();

@@ -1,12 +1,12 @@
-Notate
+Telmo
 Copyright (c) 2026 Mesa Hills Research
 
-Notate is licensed under the MIT License or the Apache License, Version 2.0, at your option
+Telmo is licensed under the MIT License or the Apache License, Version 2.0, at your option
 (LICENSE-MIT, LICENSE-APACHE).
 
 Model weights
 
-Notate's code and packages contain no model weights. The `notate` command downloads them from
+Telmo's code and packages contain no model weights. The `telmo` command downloads them from
 Hugging Face when asked, under their own licences.
 
 - Granite Speech 5.0 470M TurboCTC by IBM,
@@ -19,7 +19,7 @@ Hugging Face when asked, under their own licences.
 Test data in the repository
 
 The repository's tests/goldens directory (left out of the published package) holds audio and
-model outputs used to check Notate against the reference implementations.
+model outputs used to check Telmo against the reference implementations.
 
 - Audio from the LibriSpeech ASR corpus, (c) 2014 Vassil Panayotov, https://www.openslr.org/12,
   CC BY 4.0.

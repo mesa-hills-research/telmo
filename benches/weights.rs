@@ -12,10 +12,10 @@
 
 use std::time::Instant;
 
-use notate::Precision;
-use notate::kernels::{Epilogue, Kernels, PackedWeights};
-use notate::quant::Rows;
-use notate::threads::Pool;
+use telmo::Precision;
+use telmo::kernels::{Epilogue, Kernels, PackedWeights};
+use telmo::quant::Rows;
+use telmo::threads::Pool;
 
 fn main() {
     let mut threads = vec![1, 6];

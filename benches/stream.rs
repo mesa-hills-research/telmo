@@ -14,9 +14,9 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use notate::granite::Granite;
-use notate::parakeet::Timings;
-use notate::{GraniteStream, Options, Precision};
+use telmo::granite::Granite;
+use telmo::parakeet::Timings;
+use telmo::{GraniteStream, Options, Precision};
 
 fn list<T: std::str::FromStr>(v: &str) -> Vec<T> {
     v.split(',')
@@ -61,7 +61,7 @@ fn main() {
             break;
         }
         let path = PathBuf::from(line.split('\t').nth(1).expect("a WAV path"));
-        let wav = notate::wav::read(&path).expect("a WAV file");
+        let wav = telmo::wav::read(&path).expect("a WAV file");
         assert_eq!(wav.sample_rate, 16000);
         audio.extend_from_slice(&wav.samples);
     }

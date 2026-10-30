@@ -7,9 +7,9 @@
 
 use std::time::Instant;
 
-use notate::features::{FrontEnd, FrontEndConfig};
-use notate::resample::Resampler;
-use notate::vad::{Vad, VadConfig};
+use telmo::features::{FrontEnd, FrontEndConfig};
+use telmo::resample::Resampler;
+use telmo::vad::{Vad, VadConfig};
 
 const SECONDS: usize = 60;
 const RUNS: usize = 3;

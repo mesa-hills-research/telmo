@@ -7,8 +7,8 @@ experimental, so its API and behaviour may change in any release.
 
 ```rust
 use std::sync::Arc;
-use notate::stream::{Event, Stream, StreamConfig};
-use notate::{Model, Options};
+use telmo::stream::{Event, Stream, StreamConfig};
+use telmo::{Model, Options};
 
 let model = Arc::new(Model::load("granite-int8.pack".as_ref(), &Options::default())?);
 let config = StreamConfig { input_rate: 48000, ..StreamConfig::default() };

@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use notate::kernels::Isa;
-use notate::{Model, Options, Precision};
+use telmo::kernels::Isa;
+use telmo::{Model, Options, Precision};
 
 fn main() -> ExitCode {
     match run() {
@@ -85,7 +85,7 @@ fn run() -> Result<(), String> {
     );
 
     for path in &paths {
-        let audio = notate::wav::read(path).map_err(|e| e.to_string())?;
+        let audio = telmo::wav::read(path).map_err(|e| e.to_string())?;
         if audio.sample_rate != 16000 {
             return Err(format!(
                 "{} is {} Hz. Resample it to 16 kHz first.",
@@ -93,7 +93,7 @@ fn run() -> Result<(), String> {
                 audio.sample_rate
             ));
         }
-        let mut best: Option<(Duration, notate::Transcript)> = None;
+        let mut best: Option<(Duration, telmo::Transcript)> = None;
         for _ in 0..repeat {
             let start = Instant::now();
             let transcript = model

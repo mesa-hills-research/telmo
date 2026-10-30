@@ -1,4 +1,4 @@
-//! The `notate` command, which transcribes WAV files, packs models and downloads Granite Speech
+//! The `telmo` command, which transcribes WAV files, packs models and downloads Granite Speech
 //! or Parakeet TDT on first use.
 
 mod cache;
@@ -9,21 +9,21 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use notate::kernels::Isa;
-use notate::model::ModelType;
-use notate::pack::{self, FileSink};
-use notate::{Model, Options, Precision};
+use telmo::kernels::Isa;
+use telmo::model::ModelType;
+use telmo::pack::{self, FileSink};
+use telmo::{Model, Options, Precision};
 
 use install::KnownModel;
 
 const HELP: &str = "\
-Notate transcribes speech on the CPU.
+Telmo transcribes speech on the CPU.
 
 Usage
-  notate transcribe [OPTIONS] FILE.wav...
-  notate pack MODEL OUT.pack [--precision P]
-  notate models
-  notate help
+  telmo transcribe [OPTIONS] FILE.wav...
+  telmo pack MODEL OUT.pack [--precision P]
+  telmo models
+  telmo help
 
 Commands
   transcribe   Prints each file's text, after its name when there are several,
@@ -35,7 +35,7 @@ Options
   --model M        granite (the default), parakeet, or the path of a pack, a
                    model directory or a GGUF file
   --threads N      Threads to use (default all cores)
-  --isa I          scalar, avx2, avx512 or neon (default NOTATE_ISA if set,
+  --isa I          scalar, avx2, avx512 or neon (default TELMO_ISA if set,
                    else avx2 where the CPU has it, else scalar). AVX-512 and
                    NEON are untested on real hardware, so they run only when
                    asked for.
@@ -45,7 +45,7 @@ Options
   --yes            Downloads a missing model without asking
 
 Granite and Parakeet download on first use, after asking, into the cache
-directory that notate models shows. A model directory holds model.safetensors,
+directory that telmo models shows. A model directory holds model.safetensors,
 config.json and tokenizer.json, and Parakeet's GGUF file needs tokenizer.json
 beside it. WAV files may have any sample rate.
 ";
@@ -83,7 +83,7 @@ fn main() -> ExitCode {
     let command = match parse(&args) {
         Ok(command) => command,
         Err(message) => {
-            eprintln!("{message} Run notate help to see the commands and options.");
+            eprintln!("{message} Run telmo help to see the commands and options.");
             return ExitCode::from(2);
         }
     };
@@ -258,8 +258,8 @@ fn transcribe(args: &Transcribe) -> Result<(), String> {
 
 /// Prints a file's text, after its name if `named`, and the time it took on stderr.
 fn transcribe_file(model: &Model, file: &Path, named: bool) -> Result<(), String> {
-    let audio = notate::wav::read(file).map_err(|e| e.to_string())?;
-    let samples = notate::resample::resample(&audio.samples, audio.sample_rate, 16000);
+    let audio = telmo::wav::read(file).map_err(|e| e.to_string())?;
+    let samples = telmo::resample::resample(&audio.samples, audio.sample_rate, 16000);
     let start = Instant::now();
     let transcript = model.transcribe(&samples).map_err(|e| e.to_string())?;
     let elapsed = start.elapsed().as_secs_f64();
@@ -312,7 +312,7 @@ mod tests {
 
     /// A new, empty directory for a test's files.
     pub fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("notate-cli-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("telmo-cli-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

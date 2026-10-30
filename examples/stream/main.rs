@@ -35,8 +35,8 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use notate::stream::{Event, SAMPLE_RATE, Stream, StreamConfig, Streamer};
-use notate::{Model, Options, Precision};
+use telmo::stream::{Event, SAMPLE_RATE, Stream, StreamConfig, Streamer};
+use telmo::{Model, Options, Precision};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -128,7 +128,7 @@ fn sessions(args: &[String]) -> Result<(), String> {
         pause(&mut audio, 1.0);
         for &i in group {
             let (_, wav, reference) = &rows[i];
-            let clip = notate::wav::read(wav).map_err(|e| e.to_string())?;
+            let clip = telmo::wav::read(wav).map_err(|e| e.to_string())?;
             if clip.sample_rate != SAMPLE_RATE as u32 {
                 return Err(format!("{} isn't 16 kHz", wav.display()));
             }
@@ -148,7 +148,7 @@ fn sessions(args: &[String]) -> Result<(), String> {
         }
         let id = format!("session-{made:02}");
         let path = out_dir.join(format!("{id}.wav"));
-        std::fs::write(&path, notate::wav::encode_pcm16(&audio, SAMPLE_RATE as u32))
+        std::fs::write(&path, telmo::wav::encode_pcm16(&audio, SAMPLE_RATE as u32))
             .map_err(|e| e.to_string())?;
         index.push_str(&format!(
             "{id}\t{}\t{}\t{}\n",
@@ -308,8 +308,8 @@ fn run(args: &[String]) -> Result<(), String> {
     };
     let mut totals = Totals::default();
     for session in read_sessions(list)?.into_iter().take(limit) {
-        let clip = notate::wav::read(&session.wav).map_err(|e| e.to_string())?;
-        let audio = notate::resample::resample(&clip.samples, clip.sample_rate, input_rate);
+        let clip = telmo::wav::read(&session.wav).map_err(|e| e.to_string())?;
+        let audio = telmo::resample::resample(&clip.samples, clip.sample_rate, input_rate);
         let seconds = audio.len() as f64 / input_rate as f64;
         let piece = (input_rate as u64 * piece_ms / 1000) as usize;
         let cpu0 = cpu_seconds();
@@ -324,7 +324,7 @@ fn run(args: &[String]) -> Result<(), String> {
         // Offline transcription of the same audio, utterance by utterance as recorded.
         let mut offline = Vec::new();
         for source in &session.sources {
-            let a = notate::wav::read(source).map_err(|e| e.to_string())?;
+            let a = telmo::wav::read(source).map_err(|e| e.to_string())?;
             offline.push(
                 model
                     .transcribe(&a.samples)

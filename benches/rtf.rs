@@ -13,9 +13,9 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use notate::kernels::Isa;
-use notate::parakeet::Timings;
-use notate::{Model, Options, Precision};
+use telmo::kernels::Isa;
+use telmo::parakeet::Timings;
+use telmo::{Model, Options, Precision};
 
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
@@ -73,7 +73,7 @@ fn main() {
             break;
         }
         let path = PathBuf::from(line.split('\t').nth(1).expect("a WAV path"));
-        let wav = notate::wav::read(&path).expect("a WAV file");
+        let wav = telmo::wav::read(&path).expect("a WAV file");
         assert_eq!(wav.sample_rate, 16000);
         audio.extend_from_slice(&wav.samples);
     }

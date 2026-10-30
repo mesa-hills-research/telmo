@@ -11,14 +11,14 @@
 
 use std::path::{Path, PathBuf};
 
-use notate::granite::{Granite, ctc_tokens};
-use notate::granite_features::GraniteFrontEnd;
-use notate::json::{self, Value};
-use notate::kernels::Isa;
-use notate::parakeet::Timings;
-use notate::safetensors::SafeTensors;
-use notate::tokenizer::Tokenizer;
-use notate::{Options, Precision};
+use telmo::granite::{Granite, ctc_tokens};
+use telmo::granite_features::GraniteFrontEnd;
+use telmo::json::{self, Value};
+use telmo::kernels::Isa;
+use telmo::parakeet::Timings;
+use telmo::safetensors::SafeTensors;
+use telmo::tokenizer::Tokenizer;
+use telmo::{Options, Precision};
 
 /// Features may differ by this much. The reference computes its STFT and mel sums in f32.
 const FEATURES_MAX_ABS: f32 = 5e-5;
@@ -68,7 +68,7 @@ fn clips() -> Vec<Clip> {
                     .unwrap_or_else(|| panic!("a clip has no {key}"))
                     .to_string()
             };
-            let audio = notate::wav::read(&dir.join(field("wav"))).expect("the clip's WAV");
+            let audio = telmo::wav::read(&dir.join(field("wav"))).expect("the clip's WAV");
             assert_eq!(audio.sample_rate, 16000);
             let tensors = SafeTensors::from_bytes(
                 std::fs::read(dir.join(field("tensors"))).expect("the clip's tensors"),

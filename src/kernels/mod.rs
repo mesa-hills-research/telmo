@@ -48,17 +48,17 @@ pub enum Isa {
 impl Isa {
     pub const ALL: [Isa; 4] = [Isa::Scalar, Isa::Avx2, Isa::Avx512, Isa::Neon];
 
-    /// The instruction set used unless a caller names one: the one the `NOTATE_ISA`
+    /// The instruction set used unless a caller names one: the one the `TELMO_ISA`
     /// environment variable names (`scalar`, `avx2`, `avx512` or `neon`) if this CPU runs it,
     /// otherwise AVX2 where the CPU has it and the scalar kernels elsewhere.
     ///
     /// The AVX-512 and NEON kernels are compared with the scalar ones by the tests but haven't
     /// run on real hardware yet, so they are used only when named, here or in `Options::isa`.
     pub fn detect() -> Isa {
-        Isa::choose(std::env::var("NOTATE_ISA").ok().as_deref())
+        Isa::choose(std::env::var("TELMO_ISA").ok().as_deref())
     }
 
-    /// The default for a value of `NOTATE_ISA`.
+    /// The default for a value of `TELMO_ISA`.
     fn choose(requested: Option<&str>) -> Isa {
         if let Some(isa) = requested.and_then(Isa::from_name)
             && isa.is_supported()

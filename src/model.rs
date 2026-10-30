@@ -10,7 +10,7 @@ use crate::pack::{Pack, Sink};
 use crate::parakeet::{self, Options, Parakeet, Transcript};
 use crate::quant::Precision;
 
-/// The models Notate runs.
+/// The models Telmo runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelType {
     /// NVIDIA's Parakeet TDT, `model_type` `parakeet_tdt`.
@@ -31,7 +31,7 @@ impl ModelType {
                 Some("parakeet_tdt") => Ok(ModelType::Parakeet),
                 Some("granite_speech5_ctc") => Ok(ModelType::Granite),
                 other => Err(Error::Model(format!(
-                    "config.json names a model type Notate doesn't run ({}).",
+                    "config.json names a model type Telmo doesn't run ({}).",
                     other.unwrap_or("none")
                 ))),
             };
@@ -47,7 +47,7 @@ impl ModelType {
             parakeet::PACK_MODEL => Ok(ModelType::Parakeet),
             granite::PACK_MODEL => Ok(ModelType::Granite),
             other => Err(Error::Model(format!(
-                "The pack holds a model Notate doesn't run ({other})."
+                "The pack holds a model Telmo doesn't run ({other})."
             ))),
         }
     }
@@ -60,7 +60,7 @@ impl ModelType {
         }
     }
 
-    /// The model Notate uses unless a language asks for the other, Granite Speech. Its int8
+    /// The model Telmo uses unless a language asks for the other, Granite Speech. Its int8
     /// pack (477 MB) transcribes LibriSpeech more accurately than Parakeet does in f32.
     pub const DEFAULT: ModelType = ModelType::Granite;
 

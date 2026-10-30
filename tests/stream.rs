@@ -8,11 +8,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use notate::json::{self, Value};
-use notate::stream::{
+use telmo::json::{self, Value};
+use telmo::stream::{
     Event, PassConfig, PassMode, SAMPLE_RATE, Stream, StreamConfig, Streamer, UtteranceStream,
 };
-use notate::{Model, Options};
+use telmo::{Model, Options};
 
 fn clips() -> Vec<(String, Vec<f32>)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/parakeet-tdt-0.6b-v3");
@@ -24,7 +24,7 @@ fn clips() -> Vec<(String, Vec<f32>)> {
         .iter()
         .map(|c| {
             let field = |k: &str| c.get(k).and_then(Value::as_str).unwrap().to_string();
-            let audio = notate::wav::read(&dir.join(field("wav"))).unwrap();
+            let audio = telmo::wav::read(&dir.join(field("wav"))).unwrap();
             (field("id"), audio.samples)
         })
         .collect()
@@ -158,7 +158,7 @@ fn session() -> (Vec<f32>, Vec<Vec<f32>>) {
         seed ^= seed << 17;
         *s += ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.002;
     }
-    (notate::resample::resample(&audio, 16000, 48000), clips)
+    (telmo::resample::resample(&audio, 16000, 48000), clips)
 }
 
 /// The settled text and the number of utterances in a stream's events.

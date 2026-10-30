@@ -12,10 +12,10 @@
 
 use std::path::{Path, PathBuf};
 
-use notate::granite::Granite;
-use notate::json::{self, Value};
-use notate::parakeet::Timings;
-use notate::{GraniteStream, Options, Precision};
+use telmo::granite::Granite;
+use telmo::json::{self, Value};
+use telmo::parakeet::Timings;
+use telmo::{GraniteStream, Options, Precision};
 
 fn golden_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/granite-speech-5.0-470m-turboctc")
@@ -45,7 +45,7 @@ fn clips() -> Vec<(String, Vec<f32>)> {
     list.iter()
         .map(|clip| {
             let field = |key: &str| clip.get(key).and_then(Value::as_str).unwrap().to_string();
-            let audio = notate::wav::read(&dir.join(field("wav"))).expect("the clip's WAV");
+            let audio = telmo::wav::read(&dir.join(field("wav"))).expect("the clip's WAV");
             assert_eq!(audio.sample_rate, 16000);
             (field("id"), audio.samples)
         })
@@ -86,7 +86,7 @@ fn offline_from_features(model: &Granite, features: &[f32]) -> Offline {
         )
         .unwrap();
     let ids = model.frame_ids(&encoded);
-    let tokens = notate::granite::ctc_tokens(&ids, model.config().blank);
+    let tokens = telmo::granite::ctc_tokens(&ids, model.config().blank);
     let text = model
         .tokenizer()
         .decode(&tokens.iter().map(|t| t.id).collect::<Vec<_>>());
@@ -319,7 +319,7 @@ fn long_joined_audio_streams_close_to_offline() {
     for (n, &seconds) in lengths.iter().enumerate() {
         let mut samples = Vec::new();
         while samples.len() < seconds * 16000 {
-            let audio = notate::wav::read(Path::new(rows[next].1)).unwrap();
+            let audio = telmo::wav::read(Path::new(rows[next].1)).unwrap();
             samples.extend_from_slice(&audio.samples);
             next += 1;
         }
