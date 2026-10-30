@@ -5,8 +5,9 @@
 //! cargo run --release --example pack -- --list FILE.pack
 //! ```
 //!
-//! MODEL is a directory holding `model.safetensors`, `config.json` and `tokenizer.json`, or
-//! NVIDIA's Parakeet GGUF file with `tokenizer.json` beside it. `--precision` is f32, f16, bf16,
+//! MODEL is a directory holding `model.safetensors`, `config.json` and `tokenizer.json` of
+//! Parakeet TDT or Granite Speech, or NVIDIA's Parakeet GGUF file with `tokenizer.json` beside
+//! it. `--precision` is f32, f16, bf16,
 //! int8 or q8_0 (int8 by default). `--list` prints a pack's metadata and entries.
 
 use std::path::PathBuf;
@@ -14,6 +15,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use notate::Precision;
+use notate::model::ModelType;
 use notate::pack::{FileSink, Kind, Pack};
 use notate::parakeet;
 
@@ -68,13 +70,16 @@ fn run() -> Result<(), String> {
         return Err("Usage: pack MODEL OUT.pack [--precision P], or pack --list FILE.pack".into());
     };
     let start = Instant::now();
+    let model = ModelType::detect(input).map_err(|e| e.to_string())?;
     let mut sink = FileSink::create(
         output,
-        parakeet::PACK_MODEL,
+        model.pack_model(),
         parakeet::pack_metadata(input, precision),
     )
     .map_err(|e| e.to_string())?;
-    parakeet::convert_path(input, precision, &mut sink).map_err(|e| e.to_string())?;
+    model
+        .convert_path(input, precision, &mut sink)
+        .map_err(|e| e.to_string())?;
     sink.finish().map_err(|e| e.to_string())?;
     let bytes = std::fs::metadata(output).map_err(|e| e.to_string())?.len();
     eprintln!(

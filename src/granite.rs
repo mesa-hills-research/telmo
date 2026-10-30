@@ -1,9 +1,9 @@
 //! IBM's Granite Speech 5.0 TurboCTC: a Conformer encoder with attention inside blocks of
 //! frames and a CTC head, run with greedy decoding.
 //!
-//! Weights are read from the Hugging Face `model.safetensors` (the `GraniteSpeech5ForCTC`
-//! layout, whose bf16 values widen to f32 exactly), with `config.json` and `tokenizer.json`
-//! beside it.
+//! Weights come from a pack, or from the Hugging Face `model.safetensors` (the
+//! `GraniteSpeech5ForCTC` layout) with `config.json` and `tokenizer.json` beside it, converted
+//! to a pack in memory.
 //!
 //! The encoder takes rows of two stacked 10 ms frames (50 a second). Its first blocks halve the
 //! frame rate twice, with a stride-2 depthwise convolution added to the input averaged over pairs
@@ -19,10 +19,17 @@ use crate::error::{Error, Result};
 use crate::granite_features::GraniteFrontEnd;
 use crate::json;
 use crate::kernels::{Act, BView, Epilogue, Isa, Kernels, PackedWeights, for_rows};
-use crate::parakeet::{Options, Timings, Token, Transcript};
+use crate::pack::{MemorySink, Pack, Sink};
+use crate::parakeet::{Options, Timings, Token, Transcript, pack_metadata};
+use crate::quant::{Precision, Rows};
+use crate::region::Vector;
 use crate::safetensors::SafeTensors;
+use crate::source::{Matrix, Source};
 use crate::threads::{Pool, SharedMut};
 use crate::tokenizer::Tokenizer;
+
+/// The model name packs of Granite Speech carry.
+pub const PACK_MODEL: &str = "granite-speech-ctc";
 
 /// The architecture, read from `config.json`.
 #[derive(Debug, Clone, PartialEq)]
@@ -164,13 +171,13 @@ pub struct Encoded {
 }
 
 struct Norm {
-    gamma: Vec<f32>,
-    beta: Vec<f32>,
+    gamma: Vector,
+    beta: Vector,
 }
 
 struct Linear {
     w: PackedWeights,
-    b: Vec<f32>,
+    b: Vector,
 }
 
 /// A feed-forward module and the norm before it.
@@ -187,14 +194,14 @@ struct Block {
     /// q, k and v stacked, `[3 * d_model, d_model]`, without biases.
     qkv: PackedWeights,
     /// The rows of the relative position table that distances inside a block reach, from
-    /// `context - 1` down to `1 - context`, times the attention's scale.
+    /// `context - 1` down to `1 - context`.
     rel: PackedWeights,
     out: Linear,
     norm_conv: Norm,
     pw1: Linear,
     /// Depthwise weights `[kernel, conv_channels]` with the BatchNorm folded in.
-    dw_w: Vec<f32>,
-    dw_b: Vec<f32>,
+    dw_w: Vector,
+    dw_b: Vector,
     pw2: Linear,
     ff2: FeedForward,
     norm_out: Norm,
@@ -209,72 +216,93 @@ struct Weights {
     mid: Linear,
 }
 
-/// Reads tensors by name, widened to f32.
-struct Loader {
-    st: SafeTensors,
-}
-
-impl Loader {
-    fn take(&mut self, name: &str, shape: &[usize]) -> Result<Vec<f32>> {
-        self.st.read_f32_widened(name, Some(shape))
+/// Converts Granite's weights from `src` (named as in the Hugging Face checkpoint) into pack
+/// entries in `precision`. Every linear layer, the stacked q, k and v and the rows of each
+/// relative position table that a block reaches become matrices, and BatchNorm is folded into
+/// the depthwise convolutions. Biases, norms and the convolutions stay f32.
+pub fn convert(
+    src: &mut dyn Source,
+    config_json: &[u8],
+    tokenizer_json: &[u8],
+    precision: Precision,
+    sink: &mut dyn Sink,
+) -> Result<()> {
+    let config = Config::from_json(config_json)?;
+    let tokenizer = Tokenizer::from_json(tokenizer_json)?;
+    if tokenizer.len() != config.vocab {
+        return Err(Error::Model(format!(
+            "The tokenizer has {} tokens but the model {}.",
+            tokenizer.len(),
+            config.vocab
+        )));
     }
-}
-
-/// Reads every weight the model uses and puts it in the kernels' layout.
-fn load_weights(ld: &mut Loader, c: &Config) -> Result<Weights> {
-    let linear = |ld: &mut Loader, prefix: &str, n: usize, k: usize| -> Result<Linear> {
-        let w = ld.take(&format!("{prefix}.weight"), &[n, k])?;
-        Ok(Linear {
-            w: PackedWeights::from_rows(&w, n, k),
-            b: ld.take(&format!("{prefix}.bias"), &[n])?,
-        })
+    sink.bytes("config.json", config_json)?;
+    sink.bytes("tokenizer.json", tokenizer_json)?;
+    let c = &config;
+    let (d, cc, k, hd) = (c.d_model, c.conv_channels, c.conv_kernel, c.head_dim);
+    let linear = |src: &mut dyn Source,
+                  sink: &mut dyn Sink,
+                  from: &str,
+                  to: &str,
+                  n: usize,
+                  k: usize|
+     -> Result<()> {
+        let w = src.matrix(&format!("{from}.weight"), &[n, k])?;
+        sink.matrix(to, &w.rows(), n, k, precision)?;
+        let b = src.tensor(&format!("{from}.bias"), &[n])?;
+        sink.f32(&format!("{to}.b"), &[n], &b)
     };
-    let norm = |ld: &mut Loader, prefix: &str, d: usize| -> Result<Norm> {
-        Ok(Norm {
-            gamma: ld.take(&format!("{prefix}.weight"), &[d])?,
-            beta: ld.take(&format!("{prefix}.bias"), &[d])?,
-        })
-    };
-    let feed_forward = |ld: &mut Loader, block: &str, n: usize| -> Result<FeedForward> {
-        Ok(FeedForward {
-            norm: norm(ld, &format!("{block}.norm_feed_forward{n}"), c.d_model)?,
-            up: linear(ld, &format!("{block}.feed_forward{n}.linear1"), c.ff, c.d_model)?,
-            down: linear(ld, &format!("{block}.feed_forward{n}.linear2"), c.d_model, c.ff)?,
-        })
-    };
-    let (d, cc, k) = (c.d_model, c.conv_channels, c.conv_kernel);
-    let input = linear(ld, "encoder.input_linear", d, 4 * c.n_mels)?;
-    let mut blocks = Vec::with_capacity(c.layers);
-    for i in 0..c.layers {
-        let p = format!("encoder.layers.{i}");
-        let mut qkv = ld.take(&format!("{p}.self_attn.q_proj.weight"), &[d, d])?;
-        qkv.extend(ld.take(&format!("{p}.self_attn.k_proj.weight"), &[d, d])?);
-        qkv.extend(ld.take(&format!("{p}.self_attn.v_proj.weight"), &[d, d])?);
-
-        let table = ld.take(
-            &format!("{p}.self_attn.rel_pos_emb.weight"),
-            &[2 * c.max_relative + 1, c.head_dim],
+    let norm = |src: &mut dyn Source, sink: &mut dyn Sink, from: &str, to: &str| -> Result<()> {
+        sink.f32(
+            &format!("{to}.w"),
+            &[d],
+            &src.tensor(&format!("{from}.weight"), &[d])?,
         )?;
+        sink.f32(
+            &format!("{to}.b"),
+            &[d],
+            &src.tensor(&format!("{from}.bias"), &[d])?,
+        )
+    };
+
+    linear(src, sink, "encoder.input_linear", "input", d, 4 * c.n_mels)?;
+    for i in 0..c.layers {
+        let (p, o) = (format!("encoder.layers.{i}"), format!("blocks.{i}"));
+        for n in [1, 2] {
+            let f = format!("{o}.ff{n}");
+            norm(src, sink, &format!("{p}.norm_feed_forward{n}"), &format!("{f}.norm"))?;
+            let ff = format!("{p}.feed_forward{n}");
+            linear(src, sink, &format!("{ff}.linear1"), &format!("{f}.up"), c.ff, d)?;
+            linear(src, sink, &format!("{ff}.linear2"), &format!("{f}.down"), d, c.ff)?;
+        }
+        norm(src, sink, &format!("{p}.norm_self_att"), &format!("{o}.norm_att"))?;
+        let qkv = ["q", "k", "v"]
+            .iter()
+            .map(|x| src.matrix(&format!("{p}.self_attn.{x}_proj.weight"), &[d, d]))
+            .collect::<Result<Vec<_>>>()?;
+        sink.matrix(&format!("{o}.qkv"), &Matrix::stack(qkv).rows(), 3 * d, d, precision)?;
         // Distance i - j inside a block reads row max_relative + i - j. Keep the rows from
-        // distance context - 1 down to 1 - context, so column m is distance context - 1 - m,
-        // scaled in f32 as the reference scales the looked-up rows.
-        let scale = c.scale();
+        // distance context - 1 down to 1 - context, so column m is distance context - 1 - m.
+        let table = src.tensor(
+            &format!("{p}.self_attn.rel_pos_emb.weight"),
+            &[2 * c.max_relative + 1, hd],
+        )?;
         let rows = 2 * c.context - 1;
-        let mut rel = Vec::with_capacity(rows * c.head_dim);
+        let mut rel = Vec::with_capacity(rows * hd);
         for m in 0..rows {
             let r = c.max_relative + c.context - 1 - m;
-            rel.extend(
-                table[r * c.head_dim..(r + 1) * c.head_dim]
-                    .iter()
-                    .map(|&v| v * scale),
-            );
+            rel.extend_from_slice(&table[r * hd..(r + 1) * hd]);
         }
-
-        let gamma = ld.take(&format!("{p}.conv.norm.weight"), &[cc])?;
-        let beta = ld.take(&format!("{p}.conv.norm.bias"), &[cc])?;
-        let mean = ld.take(&format!("{p}.conv.norm.running_mean"), &[cc])?;
-        let var = ld.take(&format!("{p}.conv.norm.running_var"), &[cc])?;
-        let dw = ld.take(&format!("{p}.conv.depthwise_conv.weight"), &[cc, 1, k])?;
+        sink.matrix(&format!("{o}.rel"), &Rows::F32(&rel), rows, hd, precision)?;
+        linear(src, sink, &format!("{p}.self_attn.o_proj"), &format!("{o}.out"), d, d)?;
+        norm(src, sink, &format!("{p}.norm_conv"), &format!("{o}.norm_conv"))?;
+        let pw1 = format!("{p}.conv.pointwise_lin1");
+        linear(src, sink, &pw1, &format!("{o}.pw1"), 2 * cc, d)?;
+        let gamma = src.tensor(&format!("{p}.conv.norm.weight"), &[cc])?;
+        let beta = src.tensor(&format!("{p}.conv.norm.bias"), &[cc])?;
+        let mean = src.tensor(&format!("{p}.conv.norm.running_mean"), &[cc])?;
+        let var = src.tensor(&format!("{p}.conv.norm.running_var"), &[cc])?;
+        let dw = src.tensor(&format!("{p}.conv.depthwise_conv.weight"), &[cc, 1, k])?;
         let mut dw_w = vec![0f32; k * cc];
         let mut dw_b = vec![0f32; cc];
         for ch in 0..cc {
@@ -284,29 +312,41 @@ fn load_weights(ld: &mut Loader, c: &Config) -> Result<Weights> {
             }
             dw_b[ch] = (beta[ch] as f64 - mean[ch] as f64 * s) as f32;
         }
-
-        blocks.push(Block {
-            strided: c.subsample_layers.contains(&i),
-            ff1: feed_forward(ld, &p, 1)?,
-            norm_att: norm(ld, &format!("{p}.norm_self_att"), d)?,
-            qkv: PackedWeights::from_rows(&qkv, 3 * d, d),
-            rel: PackedWeights::from_rows(&rel, rows, c.head_dim),
-            out: linear(ld, &format!("{p}.self_attn.o_proj"), d, d)?,
-            norm_conv: norm(ld, &format!("{p}.norm_conv"), d)?,
-            pw1: linear(ld, &format!("{p}.conv.pointwise_lin1"), 2 * cc, d)?,
-            dw_w,
-            dw_b,
-            pw2: linear(ld, &format!("{p}.conv.pointwise_lin2"), d, cc)?,
-            ff2: feed_forward(ld, &p, 2)?,
-            norm_out: norm(ld, &format!("{p}.norm_out"), d)?,
-        });
+        sink.f32(&format!("{o}.dw.w"), &[k, cc], &dw_w)?;
+        sink.f32(&format!("{o}.dw.b"), &[cc], &dw_b)?;
+        let pw2 = format!("{p}.conv.pointwise_lin2");
+        linear(src, sink, &pw2, &format!("{o}.pw2"), d, cc)?;
+        norm(src, sink, &format!("{p}.norm_out"), &format!("{o}.norm_out"))?;
     }
-    Ok(Weights {
-        input,
-        blocks,
-        head: linear(ld, "encoder.out", c.vocab, d)?,
-        mid: linear(ld, "encoder.out_mid", d, c.vocab)?,
-    })
+    linear(src, sink, "encoder.out", "head", c.vocab, d)?;
+    linear(src, sink, "encoder.out_mid", "mid", d, c.vocab)
+}
+
+/// Converts a Hugging Face checkpoint directory (`model.safetensors`, `config.json` and
+/// `tokenizer.json`) into pack entries.
+pub fn convert_path(path: &Path, precision: Precision, sink: &mut dyn Sink) -> Result<()> {
+    let read = |name: &str| {
+        let p = path.join(name);
+        std::fs::read(&p).map_err(|e| Error::io(&p, e))
+    };
+    let (config, tokenizer) = (read("config.json")?, read("tokenizer.json")?);
+    let mut st = SafeTensors::open(&path.join("model.safetensors"))?;
+    convert(&mut st, &config, &tokenizer, precision, sink)
+}
+
+/// The precision a pack's weight matrices are in, if they share one.
+fn pack_precision(pack: &Pack) -> Option<Precision> {
+    let mut found = None;
+    for entry in pack.entries() {
+        if let crate::pack::Kind::Matrix { precision, .. } = entry.kind {
+            match found {
+                None => found = Some(precision),
+                Some(p) if p != precision => return None,
+                _ => {}
+            }
+        }
+    }
+    found
 }
 
 /// A loaded Granite Speech CTC model.
@@ -317,6 +357,7 @@ pub struct Granite {
     tokenizer: Tokenizer,
     kernels: Kernels,
     pool: Pool,
+    precision: Option<Precision>,
 }
 
 /// Rows of CTC logits computed at once, which bounds the memory they take.
@@ -330,17 +371,33 @@ fn timed<T>(timings: &mut Timings, name: &'static str, f: impl FnOnce() -> T) ->
 }
 
 impl Granite {
-    /// Loads `model.safetensors`, `config.json` and `tokenizer.json` from a directory.
-    pub fn load(dir: &Path, options: &Options) -> Result<Granite> {
+    /// Loads a model from a pack file or a Hugging Face checkpoint directory
+    /// (`model.safetensors`, `config.json` and `tokenizer.json`). A pack is mapped as it is, and
+    /// a checkpoint is converted in memory to `options.precision`. The checkpoint's bf16 weights
+    /// widen exactly, so f32 and bf16 give the same results.
+    pub fn load(path: &Path, options: &Options) -> Result<Granite> {
+        if path.is_file() {
+            return Granite::from_pack(&Pack::open(path)?, options);
+        }
+        let mut sink = MemorySink::new(PACK_MODEL, pack_metadata(path, options.precision));
+        convert_path(path, options.precision, &mut sink)?;
+        Granite::from_pack(&sink.finish()?, options)
+    }
+
+    /// Builds the model from a pack's entries, which it keeps views of.
+    pub fn from_pack(pack: &Pack, options: &Options) -> Result<Granite> {
+        if pack.model() != PACK_MODEL {
+            return Err(Error::Model(format!(
+                "The pack holds {}, not Granite Speech.",
+                pack.model()
+            )));
+        }
         let isa = options.isa.unwrap_or_else(Isa::detect);
         let kernels = Kernels::new(isa).ok_or_else(|| {
             Error::Model(format!("This CPU can't run the {} kernels.", isa.name()))
         })?;
-        let config_path = dir.join("config.json");
-        let config = Config::from_json(
-            &std::fs::read(&config_path).map_err(|e| Error::io(&config_path, e))?,
-        )?;
-        let tokenizer = Tokenizer::load(&dir.join("tokenizer.json"))?;
+        let config = Config::from_json(pack.bytes("config.json")?)?;
+        let tokenizer = Tokenizer::from_json(pack.bytes("tokenizer.json")?)?;
         if tokenizer.len() != config.vocab {
             return Err(Error::Model(format!(
                 "The tokenizer has {} tokens but the model {}.",
@@ -348,18 +405,67 @@ impl Granite {
                 config.vocab
             )));
         }
-        let mut ld = Loader {
-            st: SafeTensors::open(&dir.join("model.safetensors"))?,
+        let c = &config;
+        let (d, cc) = (c.d_model, c.conv_channels);
+        let v = |name: &str, shape: &[usize]| pack.vector(name, shape);
+        let linear = |name: &str, n: usize, k: usize| -> Result<Linear> {
+            Ok(Linear {
+                w: pack.matrix(name, n, k)?,
+                b: v(&format!("{name}.b"), &[n])?,
+            })
         };
-        let weights = load_weights(&mut ld, &config)?;
+        let norm = |name: &str| -> Result<Norm> {
+            Ok(Norm {
+                gamma: v(&format!("{name}.w"), &[d])?,
+                beta: v(&format!("{name}.b"), &[d])?,
+            })
+        };
+        let feed_forward = |name: &str| -> Result<FeedForward> {
+            Ok(FeedForward {
+                norm: norm(&format!("{name}.norm"))?,
+                up: linear(&format!("{name}.up"), c.ff, d)?,
+                down: linear(&format!("{name}.down"), d, c.ff)?,
+            })
+        };
+        let mut blocks = Vec::with_capacity(c.layers);
+        for i in 0..c.layers {
+            let o = format!("blocks.{i}");
+            blocks.push(Block {
+                strided: c.subsample_layers.contains(&i),
+                ff1: feed_forward(&format!("{o}.ff1"))?,
+                norm_att: norm(&format!("{o}.norm_att"))?,
+                qkv: pack.matrix(&format!("{o}.qkv"), 3 * d, d)?,
+                rel: pack.matrix(&format!("{o}.rel"), 2 * c.context - 1, c.head_dim)?,
+                out: linear(&format!("{o}.out"), d, d)?,
+                norm_conv: norm(&format!("{o}.norm_conv"))?,
+                pw1: linear(&format!("{o}.pw1"), 2 * cc, d)?,
+                dw_w: v(&format!("{o}.dw.w"), &[c.conv_kernel, cc])?,
+                dw_b: v(&format!("{o}.dw.b"), &[cc])?,
+                pw2: linear(&format!("{o}.pw2"), d, cc)?,
+                ff2: feed_forward(&format!("{o}.ff2"))?,
+                norm_out: norm(&format!("{o}.norm_out"))?,
+            });
+        }
+        let weights = Weights {
+            input: linear("input", d, 4 * c.n_mels)?,
+            blocks,
+            head: linear("head", c.vocab, d)?,
+            mid: linear("mid", d, c.vocab)?,
+        };
         Ok(Granite {
-            front_end: GraniteFrontEnd::new(config.n_mels),
+            front_end: GraniteFrontEnd::new(c.n_mels),
             config,
             weights,
             tokenizer,
             kernels,
             pool: Pool::new(options.threads),
+            precision: pack_precision(pack),
         })
+    }
+
+    /// The precision of the weight matrices, if they share one.
+    pub fn precision(&self) -> Option<Precision> {
+        self.precision
     }
 
     pub fn config(&self) -> &Config {
@@ -738,7 +844,10 @@ impl Granite {
                 &b.rel.view(),
                 &mut pos,
                 positions,
-                &Epilogue::PLAIN,
+                &Epilogue {
+                    scale,
+                    ..Epilogue::PLAIN
+                },
             );
             for i in 0..len {
                 let row = &mut scores[i * len..(i + 1) * len];

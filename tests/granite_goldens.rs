@@ -18,7 +18,7 @@ use notate::kernels::Isa;
 use notate::parakeet::Timings;
 use notate::safetensors::SafeTensors;
 use notate::tokenizer::Tokenizer;
-use notate::Options;
+use notate::{Options, Precision};
 
 /// Features may differ by this much. The reference computes its STFT and mel sums in f32.
 const FEATURES_MAX_ABS: f32 = 5e-5;
@@ -91,6 +91,17 @@ fn model(isa: Option<Isa>, threads: usize) -> Granite {
         ..Options::default()
     };
     Granite::load(&model_dir(), &options).expect("the model loads")
+}
+
+fn model_in(precision: Precision) -> Granite {
+    let options = Options {
+        threads: 6,
+        isa: None,
+        precision,
+    };
+    let model = Granite::load(&model_dir(), &options).expect("the model loads");
+    assert_eq!(model.precision(), Some(precision));
+    model
 }
 
 /// ||got - want|| / ||want||.
@@ -336,4 +347,31 @@ fn the_scalar_kernels_give_the_same_text() {
         let transcript = model.transcribe(&clip.samples).unwrap();
         assert_eq!(transcript.text, clip.text, "{}", clip.id);
     }
+}
+
+#[test]
+#[ignore = "needs the model files, see the top of this file"]
+fn bf16_weights_give_the_same_output_as_f32() {
+    // The checkpoint is bf16, so every weight matrix keeps its exact values in bf16.
+    let clip = clips()
+        .into_iter()
+        .max_by_key(|c| c.samples.len())
+        .unwrap();
+    let outputs: Vec<Vec<f32>> = [Precision::F32, Precision::Bf16]
+        .into_iter()
+        .map(|precision| {
+            let model = model_in(precision);
+            let features = model.features(&clip.samples).unwrap();
+            let mut timings = Timings::default();
+            model
+                .encode(&features.data, features.frames, &mut timings, &mut |_, _, _| {})
+                .unwrap()
+                .data
+        })
+        .collect();
+    let same = outputs[0]
+        .iter()
+        .zip(&outputs[1])
+        .all(|(a, b)| a.to_bits() == b.to_bits());
+    assert!(same, "bf16 weights give a different encoder output");
 }
