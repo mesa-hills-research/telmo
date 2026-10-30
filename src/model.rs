@@ -60,6 +60,35 @@ impl ModelType {
         }
     }
 
+    /// The model Notate uses unless a language asks for the other, Granite Speech. Its int8
+    /// pack (477 MB) transcribes LibriSpeech more accurately than Parakeet does in f32.
+    pub const DEFAULT: ModelType = ModelType::Granite;
+
+    /// The languages the model transcribes, as ISO 639-1 codes.
+    pub fn languages(self) -> &'static [&'static str] {
+        match self {
+            ModelType::Granite => &["en", "fr", "de", "es", "pt", "it", "ja"],
+            ModelType::Parakeet => &[
+                "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv",
+                "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
+            ],
+        }
+    }
+
+    /// The model for a language, given as an ISO 639-1 code with or without a region (`fr`,
+    /// `pt-BR`, `de_de`). That's the default model where it covers the language, Parakeet for
+    /// the other European languages it covers, and none for languages neither knows.
+    pub fn for_language(code: &str) -> Option<ModelType> {
+        let language = code
+            .split(['-', '_'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        [ModelType::DEFAULT, ModelType::Parakeet]
+            .into_iter()
+            .find(|m| m.languages().contains(&language.as_str()))
+    }
+
     /// The 8-bit precision that keeps the model's word error rate on LibriSpeech within a paired
     /// bootstrap's 95% interval of its full weights, q8_0 for Parakeet and int8 for Granite.
     /// Packs in it take about a quarter of f32's memory.
@@ -161,6 +190,18 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn granite_is_the_default_and_parakeet_takes_the_languages_granite_lacks() {
+        assert_eq!(ModelType::DEFAULT, ModelType::Granite);
+        assert_eq!(ModelType::for_language("en"), Some(ModelType::Granite));
+        assert_eq!(ModelType::for_language("pt-BR"), Some(ModelType::Granite));
+        assert_eq!(ModelType::for_language("ja_jp"), Some(ModelType::Granite));
+        assert_eq!(ModelType::for_language("pl"), Some(ModelType::Parakeet));
+        assert_eq!(ModelType::for_language("UK"), Some(ModelType::Parakeet));
+        assert_eq!(ModelType::for_language("zh"), None);
+        assert_eq!(ModelType::for_language(""), None);
+    }
 
     #[test]
     fn each_model_recommends_an_8_bit_precision_its_packs_can_hold() {

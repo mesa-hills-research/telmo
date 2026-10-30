@@ -3,10 +3,15 @@
 Notate is a speech recognition engine in pure Rust that runs on the CPU. It transcribes with
 two models, both with punctuation and capitals.
 
+- IBM's [Granite Speech 5.0 470M TurboCTC](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc),
+  for English, French, German, Spanish, Portuguese, Italian and Japanese. It's the default, with
+  8-bit weights in a 477 MB pack.
 - NVIDIA's [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), for
   English and 24 other European languages, with a timestamp for every token.
-- IBM's [Granite Speech 5.0 470M TurboCTC](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc),
-  for English, French, German, Spanish, Portuguese, Italian and Japanese.
+  `ModelType::for_language` picks it for the 18 languages Granite doesn't know.
+
+On short FLEURS samples Parakeet makes fewer errors than Granite in French (6.3% of words against
+9.3%) and Portuguese (7.7% against 11.1%), so it can be the better choice there too.
 
 It has no dependencies. The core uses only the standard library and brings its own
 safetensors, GGUF and JSON readers, FFT, matrix kernels and thread pool.
@@ -22,11 +27,10 @@ safetensors, GGUF and JSON readers, FFT, matrix kernels and thread pool.
 
 | Model | Weights | Pack | LibriSpeech clean | LibriSpeech other |
 |---|---|---:|---:|---:|
-| Parakeet TDT 0.6B v3 | f32 | 2,509 MB | 1.93% | 3.60% |
-| Parakeet TDT 0.6B v3 | int8 | 647 MB | 1.94% | 3.60% |
-| Parakeet TDT 0.6B v3 | NVIDIA's q8_0 | 723 MB | 1.92% | 3.59% |
+| Granite Speech 5.0 TurboCTC | int8 (default) | 477 MB | 1.33% | 2.57% |
 | Granite Speech 5.0 TurboCTC | bf16 | 946 MB | 1.32% | 2.56% |
-| Granite Speech 5.0 TurboCTC | int8 | 477 MB | 1.33% | 2.57% |
+| Parakeet TDT 0.6B v3 | NVIDIA's q8_0 | 723 MB | 1.92% | 3.59% |
+| Parakeet TDT 0.6B v3 | f32 | 2,509 MB | 1.93% | 3.60% |
 
 The numbers are word error rates. Parakeet's equal its model card's. Granite's are about 0.3
 points above the card's, which come from IBM's own GPU run, and Notate's transcripts equal those of

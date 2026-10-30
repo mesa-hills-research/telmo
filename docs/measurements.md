@@ -65,6 +65,15 @@ The two don't differ measurably from each other.
 `ModelType::recommended_precision` is q8_0 for Parakeet (723 MB) and int8 for Granite (477 MB,
 534 MB in q8_0), and the pack example converts to it unless told otherwise.
 
+### Choosing a model
+
+Granite with int8 weights is Notate's default (`ModelType::DEFAULT`). It has the smallest pack and
+the lowest WER on both LibriSpeech sets, within the bootstrap interval of bf16. `ModelType::for_language`
+falls back to Parakeet with q8_0 weights for the 18 European languages Granite doesn't know. In the
+FLEURS table below Parakeet makes fewer errors in every language the two share, most of all in
+French (6.31% against 9.30%) and Portuguese (7.65% against 11.08%), so it's worth choosing for those
+two despite its larger pack.
+
 ### Agreement with the reference implementations
 
 NVIDIA NeMo 3.0.0 and transformers 5.22.0 transcribed a fixed random subset of 500 utterances of
