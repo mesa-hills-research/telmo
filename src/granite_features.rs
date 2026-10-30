@@ -68,6 +68,92 @@ impl GraniteFrontEnd {
         (samples / HOP).div_ceil(STACK)
     }
 
+    /// The number of 10 ms frames for `samples` samples, two for each row.
+    pub fn frames_for(&self, samples: usize) -> usize {
+        STACK * self.rows_for(samples)
+    }
+
+    /// The length the signal is padded to at the end, with zeros, so the last frame's center
+    /// lies inside it.
+    pub(crate) fn padded_len(&self, samples: usize) -> usize {
+        samples.max((self.frames_for(samples).max(1) - 1) * HOP + 1)
+    }
+
+    /// The number of frames whose window lies inside the first `samples` samples, so later audio
+    /// can't change them.
+    pub(crate) fn complete_frames(&self, samples: usize) -> usize {
+        // Frame f reads samples f * 160 - 256 to f * 160 + 255, and frame 0 reflects up to 256.
+        if samples <= N_FFT / 2 {
+            0
+        } else {
+            (samples - N_FFT / 2) / HOP + 1
+        }
+    }
+
+    /// The log10 mel energies of frame `f`, clamped at 1e-10, before the floor. The signal is
+    /// `samples` padded with zeros to `len`, reflected at both ends.
+    pub(crate) fn log_frame(
+        &self,
+        samples: &[f32],
+        len: usize,
+        f: usize,
+        buffers: &mut FrameBuffers,
+        out: &mut [f32],
+    ) {
+        let pad = (N_FFT / 2) as isize;
+        let start = (f * HOP) as isize - pad;
+        for (i, s) in buffers.segment.iter_mut().enumerate() {
+            let j = start + i as isize;
+            let j = if j < 0 {
+                -j as usize
+            } else if j as usize >= len {
+                2 * (len - 1) - j as usize
+            } else {
+                j as usize
+            };
+            *s = samples.get(j).map_or(0.0, |&v| v as f64) * self.window[i];
+        }
+        self.fft
+            .forward(&buffers.segment, &mut buffers.spectrum, &mut buffers.scratch);
+        for (p, s) in buffers.power.iter_mut().zip(&buffers.spectrum) {
+            *p = s.norm_sqr();
+        }
+        for (m, filter) in self.filters.iter().enumerate() {
+            let mut acc = 0.0;
+            for (k, &w) in filter.weights.iter().enumerate() {
+                acc += w as f64 * buffers.power[filter.first_bin + k];
+            }
+            // The reference keeps the mel energies in f32 and clamps them at 1e-10.
+            let energy = (acc as f32).max(1e-10);
+            out[m] = (energy as f64).log10() as f32;
+        }
+    }
+
+    /// Writes rows `first..last` of the features from the log10 frames in `logs`: each value
+    /// floored 8 below `peak`, divided by 4 plus 1, with its delta over three frames (the first
+    /// and the last frame of `logs` repeat at the edges), two frames to a row.
+    pub(crate) fn stack_rows(
+        &self,
+        logs: &[f32],
+        peak: f32,
+        first: usize,
+        last: usize,
+        out: &mut [f32],
+    ) {
+        let n_mels = self.n_mels;
+        let frames = logs.len() / n_mels;
+        let floor = peak - FLOOR;
+        let value = |f: usize, m: usize| logs[f * n_mels + m].max(floor) / 4.0 + 1.0;
+        for f in STACK * first..STACK * last {
+            let row = &mut out[(f - STACK * first) * 2 * n_mels..][..2 * n_mels];
+            let (before, after) = (f.saturating_sub(1), (f + 1).min(frames - 1));
+            for m in 0..n_mels {
+                row[m] = value(f, m);
+                row[n_mels + m] = (value(after, m) - value(before, m)) / 2.0;
+            }
+        }
+    }
+
     /// Computes the stacked features of 16 kHz mono samples, `[rows, width]`.
     pub fn compute(&self, samples: &[f32]) -> Result<Features> {
         let rows = self.rows_for(samples.len());
@@ -79,71 +165,40 @@ impl GraniteFrontEnd {
             )));
         }
         let frames = STACK * rows;
-        // Zeros at the end, so the last frame's center lies inside the signal.
-        let len = samples.len().max((frames - 1) * HOP + 1);
-        let signal = |i: usize| samples.get(i).map_or(0.0, |&s| s as f64);
-        // Centered reflect padding of the zero-padded signal.
-        let pad = N_FFT / 2;
-        let padded: Vec<f64> = (0..len + 2 * pad)
-            .map(|i| {
-                let j = i as isize - pad as isize;
-                let j = if j < 0 {
-                    -j as usize
-                } else if j as usize >= len {
-                    2 * (len - 1) - j as usize
-                } else {
-                    j as usize
-                };
-                signal(j)
-            })
-            .collect();
-
+        let len = self.padded_len(samples.len());
         let n_mels = self.n_mels;
-        let bins = N_FFT / 2 + 1;
-        let mut segment = vec![0.0f64; N_FFT];
-        let mut spectrum = vec![Complex::default(); bins];
-        let mut scratch = vec![Complex::default(); N_FFT / 2];
-        let mut power = vec![0.0f64; bins];
+        let mut buffers = FrameBuffers::new();
         let mut logs = vec![0f32; frames * n_mels];
-        for f in 0..frames {
-            let start = f * HOP;
-            for (i, s) in segment.iter_mut().enumerate() {
-                *s = padded[start + i] * self.window[i];
-            }
-            self.fft.forward(&segment, &mut spectrum, &mut scratch);
-            for (p, s) in power.iter_mut().zip(&spectrum) {
-                *p = s.norm_sqr();
-            }
-            for (m, filter) in self.filters.iter().enumerate() {
-                let mut acc = 0.0;
-                for (k, &w) in filter.weights.iter().enumerate() {
-                    acc += w as f64 * power[filter.first_bin + k];
-                }
-                // The reference keeps the mel energies in f32 and clamps them at 1e-10.
-                let energy = (acc as f32).max(1e-10);
-                logs[f * n_mels + m] = (energy as f64).log10() as f32;
-            }
+        for (f, out) in logs.chunks_exact_mut(n_mels).enumerate() {
+            self.log_frame(samples, len, f, &mut buffers, out);
         }
-        let floor = logs.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v)) - FLOOR;
-        for v in &mut logs {
-            *v = v.max(floor) / 4.0 + 1.0;
-        }
-
-        let width = self.width();
-        let mut data = vec![0f32; rows * width];
-        for f in 0..frames {
-            let out = &mut data[f * 2 * n_mels..(f + 1) * 2 * n_mels];
-            let (before, after) = (f.saturating_sub(1), (f + 1).min(frames - 1));
-            for m in 0..n_mels {
-                out[m] = logs[f * n_mels + m];
-                out[n_mels + m] = (logs[after * n_mels + m] - logs[before * n_mels + m]) / 2.0;
-            }
-        }
+        let peak = logs.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v));
+        let mut data = vec![0f32; rows * self.width()];
+        self.stack_rows(&logs, peak, 0, rows, &mut data);
         Ok(Features {
             frames: rows,
-            n_mels: width,
+            n_mels: self.width(),
             data,
         })
+    }
+}
+
+/// Buffers for computing one frame's spectrum.
+pub(crate) struct FrameBuffers {
+    segment: Vec<f64>,
+    spectrum: Vec<Complex>,
+    scratch: Vec<Complex>,
+    power: Vec<f64>,
+}
+
+impl FrameBuffers {
+    pub(crate) fn new() -> FrameBuffers {
+        FrameBuffers {
+            segment: vec![0.0; N_FFT],
+            spectrum: vec![Complex::default(); N_FFT / 2 + 1],
+            scratch: vec![Complex::default(); N_FFT / 2],
+            power: vec![0.0; N_FFT / 2 + 1],
+        }
     }
 }
 
@@ -238,6 +293,38 @@ mod tests {
         // The lowest filters are narrower than one FFT bin and may miss every bin.
         let last = filters.last().unwrap();
         assert!(last.first_bin + last.weights.len() <= 257);
+    }
+
+    #[test]
+    fn frames_complete_in_a_prefix_equal_those_of_the_whole_signal() {
+        let fe = GraniteFrontEnd::new(80);
+        let samples: Vec<f32> = (0..16123)
+            .map(|i| (i as f32 * 0.031).sin() * 0.2 + ((i * 7919) % 97) as f32 / 2000.0)
+            .collect();
+        let n = samples.len();
+        let (len, frames) = (fe.padded_len(n), fe.frames_for(n));
+        let mut buffers = FrameBuffers::new();
+        let mut whole = vec![0f32; frames * 80];
+        for (f, out) in whole.chunks_exact_mut(80).enumerate() {
+            fe.log_frame(&samples, len, f, &mut buffers, out);
+        }
+        assert_eq!(fe.complete_frames(256), 0);
+        assert_eq!(fe.complete_frames(257), 1);
+        for prefix in [257, 416, 417, 3000, 9999, n] {
+            let complete = fe.complete_frames(prefix);
+            assert!(complete <= frames);
+            let mut out = vec![0f32; 80];
+            for f in 0..complete {
+                fe.log_frame(&samples[..prefix], prefix, f, &mut buffers, &mut out);
+                assert_eq!(out, whole[f * 80..(f + 1) * 80], "frame {f} of {prefix}");
+            }
+        }
+        // Stacking all rows at once equals compute().
+        let peak = whole.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v));
+        let rows = fe.rows_for(n);
+        let mut data = vec![0f32; rows * 320];
+        fe.stack_rows(&whole, peak, 0, rows, &mut data);
+        assert_eq!(data, fe.compute(&samples).unwrap().data);
     }
 
     #[test]

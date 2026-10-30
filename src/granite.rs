@@ -187,8 +187,8 @@ struct FeedForward {
     down: Linear,
 }
 
-struct Block {
-    strided: bool,
+pub(crate) struct Block {
+    pub(crate) strided: bool,
     ff1: FeedForward,
     norm_att: Norm,
     /// q, k and v stacked, `[3 * d_model, d_model]`, without biases.
@@ -395,7 +395,7 @@ pub struct Granite {
 /// Rows of CTC logits computed at once, which bounds the memory they take.
 const LOGIT_ROWS: usize = 256;
 
-fn timed<T>(timings: &mut Timings, name: &'static str, f: impl FnOnce() -> T) -> T {
+pub(crate) fn timed<T>(timings: &mut Timings, name: &'static str, f: impl FnOnce() -> T) -> T {
     let start = Instant::now();
     let out = f();
     timings.add(name, start.elapsed());
@@ -592,32 +592,28 @@ impl Granite {
         assert_eq!(features.len(), rows * 4 * c.n_mels);
         let mut x = vec![0f32; rows * d];
         timed(timings, "input_linear", || {
-            self.kernels.linear(
-                &self.pool,
-                features,
-                rows,
-                &self.weights.input.w,
-                &mut x,
-                &Epilogue::bias(&self.weights.input.b),
-            )
+            self.input_projection(features, rows, &mut x)
         });
         tap("input_linear", rows, &x);
         let mut s = Scratch::new(rows, c);
         let mut t = rows;
         for (i, block) in self.weights.blocks.iter().enumerate() {
-            t = self.block(block, &mut x, t, &mut s, timings);
-            tap(&format!("layer.{i}"), t, &x[..t * d]);
+            let out_t = if block.strided { t / 2 } else { t };
+            let mut out = vec![0f32; out_t * d];
+            self.block_span(block, &mut x, 0, t, &[], 0, &mut out, &mut s, timings);
+            x = out;
+            t = out_t;
+            tap(&format!("layer.{i}"), t, &x);
             if i == c.self_conditioning_layer() {
                 timed(timings, "self_conditioning", || {
-                    self.self_conditioning(&x[..t * d], t, &mut s)
+                    self.self_conditioning(&x, t, &mut s.att)
                 });
                 tap("selfcond_injection", t, &s.att[..t * d]);
-                for (v, &a) in x[..t * d].iter_mut().zip(&s.att[..t * d]) {
+                for (v, &a) in x.iter_mut().zip(&s.att[..t * d]) {
                     *v += a;
                 }
             }
         }
-        x.truncate(t * d);
         Ok(Encoded {
             frames: t,
             width: d,
@@ -628,10 +624,15 @@ impl Granite {
     /// The CTC logits of frames `first..first + rows`, `[rows, vocab]`.
     pub fn ctc_logits(&self, encoded: &Encoded, first: usize, rows: usize) -> Vec<f32> {
         let d = self.config.d_model;
+        self.logits_of(&encoded.data[first * d..(first + rows) * d], rows)
+    }
+
+    /// The CTC logits of `rows` frames of encoder output, `[rows, vocab]`.
+    pub(crate) fn logits_of(&self, x: &[f32], rows: usize) -> Vec<f32> {
         let mut logits = vec![0f32; rows * self.config.vocab];
         self.kernels.linear(
             &self.pool,
-            &encoded.data[first * d..(first + rows) * d],
+            x,
             rows,
             &self.weights.head.w,
             &mut logits,
@@ -642,14 +643,37 @@ impl Granite {
 
     /// The most likely token of every frame, the first one where several tie.
     pub fn frame_ids(&self, encoded: &Encoded) -> Vec<u32> {
-        let vocab = self.config.vocab;
-        let mut ids = Vec::with_capacity(encoded.frames);
-        for first in (0..encoded.frames).step_by(LOGIT_ROWS) {
-            let rows = (encoded.frames - first).min(LOGIT_ROWS);
-            let logits = self.ctc_logits(encoded, first, rows);
+        self.ids_of(&encoded.data, encoded.frames)
+    }
+
+    /// The most likely token of each of `frames` frames of encoder output, computed a chunk of
+    /// frames at a time.
+    pub(crate) fn ids_of(&self, x: &[f32], frames: usize) -> Vec<u32> {
+        let (d, vocab) = (self.config.d_model, self.config.vocab);
+        let mut ids = Vec::with_capacity(frames);
+        for first in (0..frames).step_by(LOGIT_ROWS) {
+            let rows = (frames - first).min(LOGIT_ROWS);
+            let logits = self.logits_of(&x[first * d..(first + rows) * d], rows);
             ids.extend(logits.chunks_exact(vocab).map(|row| argmax(row) as u32));
         }
         ids
+    }
+
+    /// The encoder's blocks.
+    pub(crate) fn blocks(&self) -> &[Block] {
+        &self.weights.blocks
+    }
+
+    /// Projects `rows` rows of features to the encoder's width, the first block's input.
+    pub(crate) fn input_projection(&self, features: &[f32], rows: usize, out: &mut [f32]) {
+        self.kernels.linear(
+            &self.pool,
+            features,
+            rows,
+            &self.weights.input.w,
+            out,
+            &Epilogue::bias(&self.weights.input.b),
+        )
     }
 
     fn norm(&self, norm: &Norm, x: &[f32], out: &mut [f32], t: usize) {
@@ -712,19 +736,30 @@ impl Granite {
         });
     }
 
-    /// Runs one block over `t` frames of `x` and returns the frames it leaves, `t / 2` for a
-    /// strided block.
-    fn block(
+    /// Runs one block over input frames `start..end`, whose input `x` holds (`[end - start,
+    /// d_model]`, rewritten in place), and writes the outputs of frames `out_start` up to the
+    /// last one to `out` (`end / 2` frames for a strided block, `end` otherwise). `start` begins
+    /// an attention block. `left` holds the post-attention states of input frames `lo..start`,
+    /// where `lo` is what [`Granite::conv_context`] gives, which the convolution reads at the left
+    /// edge. Afterwards `x` holds the post-attention states of `start..end`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn block_span(
         &self,
         b: &Block,
         x: &mut [f32],
-        t: usize,
+        start: usize,
+        end: usize,
+        left: &[f32],
+        out_start: usize,
+        out: &mut [f32],
         s: &mut Scratch,
         timings: &mut Timings,
-    ) -> usize {
+    ) {
         let c = &self.config;
         let (d, cc) = (c.d_model, c.conv_channels);
         let (k, pool) = (&self.kernels, &self.pool);
+        let t = end - start;
+        debug_assert_eq!(start % c.context, 0);
 
         self.feed_forward(&b.ff1, x, t, s, timings);
 
@@ -759,26 +794,47 @@ impl Granite {
             )
         });
 
-        // Convolution module. A strided block keeps every second frame of the convolution and
-        // adds it to the input averaged over pairs of frames, dropping a last odd frame.
-        let out_t = if b.strided { t / 2 } else { t };
-        let stride = if b.strided { 2 } else { 1 };
+        // Convolution module over the post-attention states of lo..end. A strided block keeps
+        // every second frame of the convolution and adds it to the input averaged over pairs of
+        // frames, dropping a last odd frame.
+        let lo = self.conv_context(b, out_start);
+        assert_eq!(left.len(), (start - lo) * d);
+        let m = end - lo;
+        let state = |f: usize| {
+            if f < start {
+                &left[(f - lo) * d..(f - lo + 1) * d]
+            } else {
+                &x[(f - start) * d..(f - start + 1) * d]
+            }
+        };
+        let (stride, out_end) = if b.strided { (2, end / 2) } else { (1, end) };
+        let n = out_end - out_start;
         timed(timings, "layer_norm", || {
-            self.norm(&b.norm_conv, x, &mut s.h, t)
+            for_rows(pool, &mut s.h, d, m, 16, &|first, part| {
+                for (r, row) in part.chunks_exact_mut(d).enumerate() {
+                    (k.layer_norm)(
+                        state(lo + first + r),
+                        row,
+                        &b.norm_conv.gamma,
+                        &b.norm_conv.beta,
+                        1e-5,
+                    );
+                }
+            });
         });
         timed(timings, "conv_pw1", || {
             k.linear(
                 pool,
-                &s.h[..t * d],
-                t,
+                &s.h[..m * d],
+                m,
                 &b.pw1.w,
-                &mut s.big[..t * 2 * cc],
+                &mut s.big[..m * 2 * cc],
                 &Epilogue::bias(&b.pw1.b),
             )
         });
         timed(timings, "glu", || {
             let big = &s.big;
-            for_rows(pool, &mut s.glu, cc, t, 16, &|first, part| {
+            for_rows(pool, &mut s.glu, cc, m, 16, &|first, part| {
                 for (r, row) in part.chunks_exact_mut(cc).enumerate() {
                     let g = &big[(first + r) * 2 * cc..(first + r + 1) * 2 * cc];
                     (k.glu)(&g[..cc], &g[cc..], row);
@@ -786,14 +842,14 @@ impl Granite {
             });
         });
         timed(timings, "depthwise_conv", || {
-            let input = &s.glu[..t * cc];
-            for_rows(pool, &mut s.big, cc, out_t, 8, &|first, part| {
+            let input = &s.glu[..m * cc];
+            for_rows(pool, &mut s.big, cc, n, 8, &|first, part| {
                 for (r, row) in part.chunks_exact_mut(cc).enumerate() {
                     (k.dwconv1d_frame)(
                         input,
                         cc,
-                        t,
-                        stride * (first + r),
+                        m,
+                        stride * (out_start + first + r) - lo,
                         &b.dw_w,
                         c.conv_kernel,
                         &b.dw_b,
@@ -803,25 +859,26 @@ impl Granite {
                 }
             });
         });
-        if b.strided {
-            timed(timings, "pool", || {
-                for (r, row) in s.h[..out_t * d].chunks_exact_mut(d).enumerate() {
-                    let pair = &x[2 * r * d..(2 * r + 2) * d];
-                    for ((o, &p), &q) in row.iter_mut().zip(&pair[..d]).zip(&pair[d..]) {
+        let out = &mut out[..n * d];
+        timed(timings, "pool", || {
+            for (r, row) in out.chunks_exact_mut(d).enumerate() {
+                let f = stride * (out_start + r);
+                if b.strided {
+                    for ((o, &p), &q) in row.iter_mut().zip(state(f)).zip(state(f + 1)) {
                         *o = (p + q) / 2.0;
                     }
+                } else {
+                    row.copy_from_slice(state(f));
                 }
-                x[..out_t * d].copy_from_slice(&s.h[..out_t * d]);
-            });
-        }
-        let t = out_t;
+            }
+        });
         timed(timings, "conv_pw2", || {
             k.linear(
                 pool,
-                &s.big[..t * cc],
-                t,
+                &s.big[..n * cc],
+                n,
                 &b.pw2.w,
-                &mut x[..t * d],
+                out,
                 &Epilogue {
                     bias: Some(&b.pw2.b),
                     accumulate: true,
@@ -830,13 +887,20 @@ impl Granite {
             )
         });
 
-        self.feed_forward(&b.ff2, x, t, s, timings);
+        self.feed_forward(&b.ff2, out, n, s, timings);
 
         timed(timings, "layer_norm", || {
-            self.norm(&b.norm_out, x, &mut s.h, t);
-            x[..t * d].copy_from_slice(&s.h[..t * d]);
+            self.norm(&b.norm_out, out, &mut s.h, n);
+            out.copy_from_slice(&s.h[..n * d]);
         });
-        t
+    }
+
+    /// The first input frame the convolution of a block reads to compute output frames from
+    /// `out_start` on.
+    pub(crate) fn conv_context(&self, b: &Block, out_start: usize) -> usize {
+        let half = self.config.conv_kernel / 2;
+        let first = if b.strided { 2 * out_start } else { out_start };
+        first.saturating_sub(half)
     }
 
     /// Attention inside blocks of `context` frames with Shaw's relative positions. Reads q, k
@@ -915,8 +979,9 @@ impl Granite {
         });
     }
 
-    /// Writes `out_mid(softmax(out(x)))` to `s.att`, a chunk of frames at a time.
-    fn self_conditioning(&self, x: &[f32], t: usize, s: &mut Scratch) {
+    /// Writes `out_mid(softmax(out(x)))` for `t` frames to `injection`, a chunk of frames at a
+    /// time.
+    pub(crate) fn self_conditioning(&self, x: &[f32], t: usize, injection: &mut [f32]) {
         let (d, vocab) = (self.config.d_model, self.config.vocab);
         let (k, pool, w) = (&self.kernels, &self.pool, &self.weights);
         let mut logits = vec![0f32; t.min(LOGIT_ROWS) * vocab];
@@ -941,7 +1006,7 @@ impl Granite {
                 logits,
                 rows,
                 &w.mid.w,
-                &mut s.att[first * d..(first + rows) * d],
+                &mut injection[first * d..(first + rows) * d],
                 &Epilogue::bias(&w.mid.b),
             );
         }
@@ -972,8 +1037,8 @@ pub fn ctc_tokens(ids: &[u32], blank: usize) -> Vec<Token> {
     tokens
 }
 
-/// Buffers reused across blocks, sized for the first block's frames.
-struct Scratch {
+/// Buffers reused across blocks, sized for the most frames a block reads.
+pub(crate) struct Scratch {
     h: Vec<f32>,
     big: Vec<f32>,
     att: Vec<f32>,
@@ -981,7 +1046,7 @@ struct Scratch {
 }
 
 impl Scratch {
-    fn new(t: usize, c: &Config) -> Scratch {
+    pub(crate) fn new(t: usize, c: &Config) -> Scratch {
         let d = c.d_model;
         Scratch {
             h: vec![0f32; t * d],
