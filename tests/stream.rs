@@ -6,9 +6,12 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use notate::json::{self, Value};
-use notate::stream::{PassConfig, SAMPLE_RATE, UtteranceStream};
+use notate::stream::{
+    Event, PassConfig, PassMode, SAMPLE_RATE, Stream, StreamConfig, Streamer, UtteranceStream,
+};
 use notate::{Model, Options};
 
 fn clips() -> Vec<(String, Vec<f32>)> {
@@ -45,7 +48,7 @@ fn stream(model: &Model, samples: &[f32], step: f64) -> (String, usize, usize) {
     let mut changed = 0;
     for chunk in samples.chunks(step) {
         s.push(chunk);
-        let out = s.pass(model, &config, false).unwrap();
+        let out = s.pass(model, &config, PassMode::Tentative).unwrap();
         if std::env::var_os("STREAM_TRACE").is_some() {
             eprintln!(
                 "  {:5.2} s, frame {}: settled [{}] tentative [{}]",
@@ -70,7 +73,7 @@ fn stream(model: &Model, samples: &[f32], step: f64) -> (String, usize, usize) {
             .count();
         tentative = out.tentative;
     }
-    let out = s.pass(model, &config, true).unwrap();
+    let out = s.pass(model, &config, PassMode::Final).unwrap();
     settled.push_str(&out.settled);
     (settled.trim_start().to_string(), changed, s.passes())
 }
@@ -134,4 +137,108 @@ fn parakeet_streams_the_golden_clips_like_offline() {
 #[ignore = "needs the model files"]
 fn granite_streams_the_golden_clips_like_offline() {
     check("GRANITE_SPEECH_DIR");
+}
+
+/// The golden clips under 10 s, joined with 1.5 s pauses over quiet noise, at 48 kHz.
+fn session() -> (Vec<f32>, Vec<Vec<f32>>) {
+    let clips: Vec<Vec<f32>> = clips()
+        .into_iter()
+        .map(|(_, s)| s)
+        .filter(|s| s.len() < 10 * SAMPLE_RATE)
+        .collect();
+    let mut audio = vec![0f32; SAMPLE_RATE];
+    for clip in &clips {
+        audio.extend_from_slice(clip);
+        audio.extend(std::iter::repeat_n(0.0, 3 * SAMPLE_RATE / 2));
+    }
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    for s in &mut audio {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        *s += ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.002;
+    }
+    (notate::resample::resample(&audio, 16000, 48000), clips)
+}
+
+/// The settled text and the number of utterances in a stream's events.
+fn settled(events: &[Event]) -> (String, usize) {
+    let mut text = String::new();
+    let mut ends = 0;
+    for e in events {
+        match e {
+            Event::Settled { text: t } => text.push_str(t),
+            Event::UtteranceEnd { .. } => ends += 1,
+            _ => {}
+        }
+    }
+    (text, ends)
+}
+
+fn check_session(var: &str) {
+    let model = Arc::new(model(var));
+    let (audio, clips) = session();
+    let offline: Vec<String> = clips
+        .iter()
+        .map(|c| model.transcribe(c).unwrap().text)
+        .collect();
+    let offline = words(&offline.join(" "));
+    let config = StreamConfig {
+        input_rate: 48000,
+        ..StreamConfig::default()
+    };
+
+    // The synchronous core, with a pass after every half second of audio.
+    let mut streamer = Streamer::new(model.clone(), config.clone());
+    let mut events = Vec::new();
+    for piece in audio.chunks(24000) {
+        events.extend(streamer.push(piece));
+        while streamer.wants_final() || streamer.has_new_audio() {
+            events.extend(streamer.pass().unwrap());
+            if !streamer.wants_final() {
+                break;
+            }
+        }
+    }
+    events.extend(streamer.finish().unwrap());
+    let (text, ends) = settled(&events);
+    let e = distance(&offline, &words(&text));
+    eprintln!(
+        "{ends} utterances, {e} of {} words differ\n  {text}",
+        offline.len()
+    );
+    assert_eq!(ends, clips.len(), "one utterance per clip");
+    // The streamed audio carries noise, a round trip through 48 kHz and the quiet around each
+    // utterance, so a few words come out differently from the clean clips. A lost or repeated
+    // sentence would differ by far more.
+    assert!(e * 8 <= offline.len());
+
+    // The same audio through a stream on its own thread, as fast as it takes it.
+    let log: Arc<Mutex<Vec<Event>>> = Arc::default();
+    let sink = log.clone();
+    let stream = Stream::start(model, config, move |e| sink.lock().unwrap().push(e));
+    for piece in audio.chunks(960) {
+        stream.push(piece);
+    }
+    let stats = stream.finish().unwrap();
+    let (text, ends) = settled(&log.lock().unwrap());
+    let e = distance(&offline, &words(&text));
+    eprintln!(
+        "threaded: {} passes, {ends} utterances, {e} words differ",
+        stats.passes
+    );
+    assert_eq!(ends, clips.len());
+    assert!(e * 8 <= offline.len());
+}
+
+#[test]
+#[ignore = "needs the model files"]
+fn parakeet_streams_a_session_of_utterances() {
+    check_session("PARAKEET_TDT_DIR");
+}
+
+#[test]
+#[ignore = "needs the model files"]
+fn granite_streams_a_session_of_utterances() {
+    check_session("GRANITE_SPEECH_DIR");
 }
