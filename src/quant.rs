@@ -130,7 +130,8 @@ pub fn f32_to_f16(x: f32) -> u16 {
     sign | h as u16
 }
 
-/// IEEE half precision to f32, exactly.
+/// IEEE half precision to f32, exactly. A signalling NaN becomes a quiet one with the same
+/// payload, as in the conversion instructions of x86-64 and aarch64 CPUs.
 pub fn f16_to_f32(h: u16) -> f32 {
     let sign = ((h & 0x8000) as u32) << 16;
     let exp = ((h >> 10) & 0x1f) as u32;
@@ -141,7 +142,8 @@ pub fn f16_to_f32(h: u16) -> f32 {
             let v = man as f32 * (1.0 / (1u32 << 24) as f32);
             return if sign != 0 { -v } else { v };
         }
-        0x1f => sign | 0x7f80_0000 | (man << 13),
+        0x1f if man != 0 => sign | 0x7fc0_0000 | (man << 13),
+        0x1f => sign | 0x7f80_0000,
         _ => sign | ((exp + 112) << 23) | (man << 13),
     };
     f32::from_bits(bits)

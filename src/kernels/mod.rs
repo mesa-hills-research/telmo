@@ -888,6 +888,61 @@ mod tests {
         }
     }
 
+    /// Widens one panel of `k` inputs and compares every value with `quant::decode`, bit for bit.
+    fn assert_widens_exactly(
+        kernels: &Kernels,
+        precision: Precision,
+        k: usize,
+        values: &[u8],
+        scales: &[f32],
+    ) {
+        let mut region = Region::zeroed(values.len());
+        region.as_mut_slice().copy_from_slice(values);
+        let scales = (!scales.is_empty()).then(|| Vector::from_slice(scales));
+        let w = PackedWeights::from_parts(PANEL, k, precision, region.share(), scales).unwrap();
+        let want = w.to_rows();
+        let mut got = vec![0f32; k * PANEL];
+        let scales = w.scales().map_or([].as_ptr(), |s| s.as_ptr());
+        // SAFETY: the panel holds `k` runs of 16 values and the scales its precision needs.
+        unsafe { (kernels.widen)(precision, k, w.values().as_ptr(), scales, got.as_mut_ptr()) };
+        for i in 0..k {
+            for j in 0..PANEL {
+                let (g, e) = (got[i * PANEL + j], want[j * k + i]);
+                assert!(
+                    g.to_bits() == e.to_bits(),
+                    "{:?} {precision} input {i} output {j}: {g:e} vs {e:e}",
+                    kernels.isa()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn widening_gives_the_decoded_values_bit_for_bit() {
+        // Every f16 and bf16 bit pattern, with subnormals, infinities and NaNs.
+        let halves: Vec<u8> = (0..=u16::MAX).flat_map(u16::to_le_bytes).collect();
+        // Every int8 value, then random ones.
+        let bytes: Vec<u8> = (0..=255u8)
+            .chain(random(256 * 15, 30).iter().map(|v| (v * 128.0) as i8 as u8))
+            .collect();
+        // Scales of every exponent from subnormal to large enough that products overflow.
+        let scales: Vec<f32> = random(8 * PANEL, 31)
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let exponent = (i as u32 * 37) % 255;
+                f32::from_bits((v.to_bits() & 0x807f_ffff) | (exponent << 23))
+            })
+            .collect();
+        for kernels in all_kernels() {
+            for precision in [Precision::F16, Precision::Bf16] {
+                assert_widens_exactly(&kernels, precision, halves.len() / 32, &halves, &[]);
+            }
+            assert_widens_exactly(&kernels, Precision::Int8, 256, &bytes, &scales[..PANEL]);
+            assert_widens_exactly(&kernels, Precision::Q8_0, 256, &bytes, &scales);
+        }
+    }
+
     #[test]
     fn row_kernels_agree_across_instruction_sets() {
         let scalar = Kernels::new(Isa::Scalar).unwrap();
