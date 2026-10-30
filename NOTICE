@@ -1,0 +1,37 @@
+Notate
+Copyright (c) 2026 Mesa Hills Research
+
+Notate is licensed under the MIT License or the Apache License, Version 2.0, at your option
+(LICENSE-MIT, LICENSE-APACHE).
+
+Model weights
+
+Notate's code and packages contain no model weights. The `notate` command downloads them from
+Hugging Face when asked, under their own licences.
+
+- Granite Speech 5.0 470M TurboCTC by IBM,
+  https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc,
+  Apache License, Version 2.0.
+- Parakeet TDT 0.6B v3 by NVIDIA, https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3,
+  Creative Commons Attribution 4.0 International (https://creativecommons.org/licenses/by/4.0/).
+  Packs converted from it are adaptations of NVIDIA's work under the same licence.
+
+Test data in the repository
+
+The repository's tests/goldens directory (left out of the published package) holds audio and
+model outputs used to check Notate against the reference implementations.
+
+- Audio from the LibriSpeech ASR corpus, (c) 2014 Vassil Panayotov, https://www.openslr.org/12,
+  CC BY 4.0.
+- Audio from FLEURS by Google, https://huggingface.co/datasets/google/fleurs, CC BY 4.0.
+- Tensors that Parakeet TDT 0.6B v3 computed on those clips, CC BY 4.0, and tensors that
+  Granite Speech 5.0 470M TurboCTC computed on them, under the Apache License, Version 2.0.
+
+The README in each directory under tests/goldens gives the details.
+
+Text normalization
+
+examples/wer ports the English and multilingual text normalizers of OpenAI's Whisper
+(https://github.com/openai/whisper, MIT License, Copyright (c) 2022 OpenAI) and the Open ASR
+Leaderboard's changes to them (https://github.com/huggingface/open_asr_leaderboard, Apache
+License, Version 2.0), with tables generated from them.

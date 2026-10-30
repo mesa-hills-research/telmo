@@ -141,6 +141,11 @@ fn f32s(st: &mut SafeTensors, name: &str) -> (Vec<usize>, Vec<f32>) {
 
 #[test]
 fn features_match_the_reference() {
+    // The published package leaves the golden files out.
+    if !golden_dir().exists() {
+        eprintln!("The golden files aren't in this copy of the source, so this test is skipped.");
+        return;
+    }
     let front_end = GraniteFrontEnd::new(80);
     let mut checked = 0;
     for mut clip in clips() {
@@ -247,9 +252,18 @@ fn check_clip(model: &Granite, clip: &mut Clip) {
             },
         )
         .unwrap();
-    let saved = ["layer.0", "layer.1", "layer.7", "selfcond_injection", "layer.15"];
+    let saved = [
+        "layer.0",
+        "layer.1",
+        "layer.7",
+        "selfcond_injection",
+        "layer.15",
+    ];
     for name in saved.iter().filter(|n| st.info(n).is_some()) {
-        assert!(compared.iter().any(|c| c == name), "{id}: {name} wasn't reached");
+        assert!(
+            compared.iter().any(|c| c == name),
+            "{id}: {name} wasn't reached"
+        );
     }
 
     let vocab = model.config().vocab;
@@ -259,7 +273,10 @@ fn check_clip(model: &Granite, clip: &mut Clip) {
             .enumerate()
             .fold(0, |best, (i, &v)| if v > row[best] { i } else { best })
     };
-    let ids: Vec<u32> = logits.chunks_exact(vocab).map(|r| argmax(r) as u32).collect();
+    let ids: Vec<u32> = logits
+        .chunks_exact(vocab)
+        .map(|r| argmax(r) as u32)
+        .collect();
     let want_ids = i64s(st, "ctc_ids");
     let (_, margins) = f32s(st, "logit_margin");
     let differ: Vec<(usize, f32)> = (0..want_ids.len())
@@ -320,10 +337,7 @@ fn every_tensor_matches_the_reference() {
 #[ignore = "needs the model files, see the top of this file"]
 fn encoder_output_is_bit_identical_at_every_thread_count() {
     // The 40 s clip spans several attention blocks in every layer.
-    let clip = clips()
-        .into_iter()
-        .max_by_key(|c| c.samples.len())
-        .unwrap();
+    let clip = clips().into_iter().max_by_key(|c| c.samples.len()).unwrap();
     let mut first: Option<Vec<f32>> = None;
     for threads in [1, 2, 3, 6] {
         let model = model(None, threads);
@@ -414,10 +428,7 @@ fn check_narrow(label: &str, model: &Granite) -> (f64, usize, usize) {
 #[ignore = "needs the model files, see the top of this file"]
 fn bf16_weights_give_the_same_output_as_f32() {
     // The checkpoint is bf16, so every weight matrix keeps its exact values in bf16.
-    let clip = clips()
-        .into_iter()
-        .max_by_key(|c| c.samples.len())
-        .unwrap();
+    let clip = clips().into_iter().max_by_key(|c| c.samples.len()).unwrap();
     let outputs: Vec<Vec<f32>> = [Precision::F32, Precision::Bf16]
         .into_iter()
         .map(|precision| {
@@ -425,7 +436,12 @@ fn bf16_weights_give_the_same_output_as_f32() {
             let features = model.features(&clip.samples).unwrap();
             let mut timings = Timings::default();
             model
-                .encode(&features.data, features.frames, &mut timings, &mut |_, _, _| {})
+                .encode(
+                    &features.data,
+                    features.frames,
+                    &mut timings,
+                    &mut |_, _, _| {},
+                )
                 .unwrap()
                 .data
         })

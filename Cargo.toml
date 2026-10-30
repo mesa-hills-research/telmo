@@ -2,12 +2,17 @@
 name = "notate"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97"
 license = "MIT OR Apache-2.0"
-description = "Speech recognition on the CPU in pure Rust"
+description = "Speech recognition on the CPU in pure Rust, with no dependencies. Runs Granite Speech and Parakeet."
+repository = "https://github.com/mesa-hills-research/notate"
+documentation = "https://docs.rs/notate"
 readme = "README.md"
-keywords = ["speech", "asr", "transcription", "parakeet"]
-categories = ["multimedia::audio", "science"]
-publish = false
+keywords = ["speech-recognition", "speech-to-text", "asr", "transcription", "offline"]
+categories = ["multimedia::audio", "science", "command-line-utilities"]
+# The golden tensors and clips are for checking against the reference implementations from a
+# clone of the repository. Tests that read them skip when they're absent.
+exclude = ["tests/goldens/", "examples/wer/scripts/"]
 
 [lib]
 name = "notate"

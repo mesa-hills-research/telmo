@@ -131,6 +131,11 @@ fn f32s(st: &mut SafeTensors, name: &str) -> (Vec<usize>, Vec<f32>) {
 
 #[test]
 fn features_match_the_reference() {
+    // The published package leaves the golden files out.
+    if !golden_dir().exists() {
+        eprintln!("The golden files aren't in this copy of the source, so this test is skipped.");
+        return;
+    }
     let front_end = FrontEnd::new(FrontEndConfig::parakeet());
     for mut clip in clips() {
         let got = front_end.compute(&clip.samples).unwrap();

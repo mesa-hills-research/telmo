@@ -462,9 +462,15 @@ mod tests {
         assert!(fe.compute(&samples[..300]).is_err());
     }
 
+    /// The golden WAVs, or none where this copy of the source doesn't have them (the published
+    /// package leaves them out).
     fn golden_wavs() -> Vec<(String, Vec<f32>)> {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/goldens/parakeet-tdt-0.6b-v3");
+        if !dir.exists() {
+            eprintln!("The golden files aren't in this copy of the source, so they're skipped.");
+            return Vec::new();
+        }
         let mut names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
