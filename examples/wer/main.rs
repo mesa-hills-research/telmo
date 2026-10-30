@@ -3,22 +3,27 @@
 //! divided by the reference words.
 //!
 //! ```text
-//! cargo run --release --example wer -- MODEL_DIR LIST.tsv... [--threads N] [--limit N] [--seed S] [--out DIR] [--compare DIR] [--basic] [--cer]
+//! cargo run --release --example wer -- MODEL LIST.tsv... [--threads N] [--precision P] [--limit N] [--seed S] [--out DIR] [--compare DIR] [--basic] [--cer]
 //! cargo run --release --example wer -- --hyp HYP.tsv LIST.tsv [--compare DIR] [--basic] [--cer]
 //! ```
+//!
+//! MODEL is what `Model::load` takes: a pack, a checkpoint directory or a GGUF file, the
+//! latter two converted in memory to `--precision`.
 //!
 //! A list has one utterance per line, `id<TAB>path to a 16 kHz WAV<TAB>reference text`.
 //! `--limit` scores a fixed random subset of each list (`--seed` picks it). `--out` writes the
 //! raw hypotheses to `DIR/<list name>.tsv` as `id<TAB>text` and resumes from that file if it
 //! exists. `--hyp` scores a hypothesis file of that format without running a model. With
 //! `--compare DIR`, either form also reports how often the transcripts equal those in
-//! `DIR/<list name>.tsv`.
+//! `DIR/<list name>.tsv`, and a paired bootstrap of the difference in WER (10,000 resamples of
+//! the utterances both have).
 //!
 //! `--basic` normalizes with Whisper's multilingual normalizer instead, for languages other than
 //! English. `--cer` counts character errors over reference characters, with whitespace left out,
 //! for languages written without spaces such as Japanese.
 
 mod basic;
+mod bootstrap;
 mod normalize;
 mod score;
 #[cfg(test)]
@@ -30,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use notate::{Model, Options};
+use notate::{Model, Options, Precision};
 use score::Errors;
 
 /// How texts are normalized and split before they're compared.
@@ -113,6 +118,10 @@ fn run() -> Result<(), String> {
                     .parse()
                     .map_err(|_| "--seed takes a number")?
             }
+            "--precision" => {
+                options.precision = Precision::from_name(&value("--precision")?)
+                    .ok_or("--precision takes f32, f16, bf16, int8 or q8_0")?
+            }
             "--out" => out = Some(PathBuf::from(value("--out")?)),
             "--hyp" => hyp = Some(PathBuf::from(value("--hyp")?)),
             "--compare" => compare = Some(PathBuf::from(value("--compare")?)),
@@ -148,17 +157,18 @@ fn run() -> Result<(), String> {
     }
 
     if positional.len() < 2 {
-        return Err("Usage: wer MODEL_DIR LIST.tsv... [--threads N] [--limit N] [--seed S] [--out DIR] [--compare DIR], or wer --hyp HYP.tsv LIST.tsv".into());
+        return Err("Usage: wer MODEL LIST.tsv... [--threads N] [--precision P] [--limit N] [--seed S] [--out DIR] [--compare DIR], or wer --hyp HYP.tsv LIST.tsv".into());
     }
     let model_dir = positional.remove(0);
     let start = Instant::now();
     let model = Model::load(&model_dir, &options).map_err(|e| e.to_string())?;
     eprintln!(
-        "Loaded {} in {:.1} s, {} threads, {} kernels.",
+        "Loaded {} in {:.1} s, {} threads, {} kernels, {} weights.",
         model.name(),
         start.elapsed().as_secs_f64(),
         model.threads(),
-        model.isa().name()
+        model.isa().name(),
+        model.precision().map_or("mixed", |p| p.name())
     );
 
     for list in &positional {
@@ -347,6 +357,36 @@ fn agreement(pairs: &[(&Utterance, &str)], other: &HashMap<String, String>, scor
     }
     println!(
         "Compared with {both} transcripts of the other system, {same} are identical and {same_normalized} identical after normalization."
+    );
+    let paired: Vec<bootstrap::Paired> = pairs
+        .iter()
+        .filter_map(|(u, hyp)| {
+            let theirs = other.get(&u.id)?;
+            let reference = scoring.units(&u.reference);
+            if !score::is_scored(&reference) {
+                return None;
+            }
+            let mine = score::count_errors(&reference, &scoring.units(hyp));
+            let theirs = score::count_errors(&reference, &scoring.units(theirs));
+            Some(bootstrap::Paired {
+                errors_a: theirs.total(),
+                errors_b: mine.total(),
+                words: mine.reference_words,
+            })
+        })
+        .collect();
+    if paired.is_empty() {
+        return;
+    }
+    let r = bootstrap::paired(&paired, 10_000, 0x5eed);
+    println!(
+        "{} difference from the other system {:+.3} points, 95% interval {:+.3} to {:+.3} over {} resamples. This system is better in {:.1}% of them.",
+        if scoring.characters { "CER" } else { "WER" },
+        r.difference,
+        r.low,
+        r.high,
+        r.resamples,
+        100.0 * r.b_better
     );
 }
 

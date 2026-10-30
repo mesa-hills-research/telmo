@@ -1,11 +1,15 @@
 //! Plain Rust kernels. They run on any CPU and are the reference the others are tested against.
 
-use super::{Act, Isa, Kernels, PANEL};
+use super::{Act, Isa, Kernels, PANEL, TILE_ROWS};
+use crate::quant::{Precision, Q8_BLOCK, bf16_to_f32, f16_to_f32};
 
 pub(crate) fn kernels() -> Kernels {
     Kernels {
         isa: Isa::Scalar,
+        tile_rows: TILE_ROWS,
         tile,
+        widen,
+        tile_narrow: None,
         store,
         layer_norm,
         softmax,
@@ -39,6 +43,64 @@ unsafe fn tile(
             let (av, bp) = unsafe { (*a.add(r * lda + i), b.add(i * k_stride)) };
             for (j, slot) in acc.iter_mut().enumerate() {
                 *slot += av * unsafe { *bp.add(j) };
+            }
+        }
+    }
+}
+
+/// # Safety
+/// `src` must hold `k` runs of 16 values in `precision`, `scales` the scales the kernel table
+/// describes, and `out` room for `k * 16` floats.
+pub(crate) unsafe fn widen(
+    precision: Precision,
+    k: usize,
+    src: *const u8,
+    scales: *const f32,
+    out: *mut f32,
+) {
+    // SAFETY: in bounds by the function's contract.
+    let out = unsafe { std::slice::from_raw_parts_mut(out, k * PANEL) };
+    let n = k * PANEL;
+    match precision {
+        Precision::F32 => {
+            let src = unsafe { std::slice::from_raw_parts(src, n * 4) };
+            for (o, b) in out.iter_mut().zip(src.chunks_exact(4)) {
+                *o = f32::from_le_bytes(b.try_into().unwrap());
+            }
+        }
+        Precision::F16 | Precision::Bf16 => {
+            let src = unsafe { std::slice::from_raw_parts(src, n * 2) };
+            let convert = if precision == Precision::F16 {
+                f16_to_f32
+            } else {
+                bf16_to_f32
+            };
+            for (o, b) in out.iter_mut().zip(src.chunks_exact(2)) {
+                *o = convert(u16::from_le_bytes([b[0], b[1]]));
+            }
+        }
+        Precision::Int8 => {
+            let src = unsafe { std::slice::from_raw_parts(src as *const i8, n) };
+            let scales = unsafe { std::slice::from_raw_parts(scales, PANEL) };
+            for (o, q) in out.chunks_exact_mut(PANEL).zip(src.chunks_exact(PANEL)) {
+                for j in 0..PANEL {
+                    o[j] = q[j] as f32 * scales[j];
+                }
+            }
+        }
+        Precision::Q8_0 => {
+            let src = unsafe { std::slice::from_raw_parts(src as *const i8, n) };
+            let scales =
+                unsafe { std::slice::from_raw_parts(scales, k.div_ceil(Q8_BLOCK) * PANEL) };
+            for (i, (o, q)) in out
+                .chunks_exact_mut(PANEL)
+                .zip(src.chunks_exact(PANEL))
+                .enumerate()
+            {
+                let s = &scales[i / Q8_BLOCK * PANEL..][..PANEL];
+                for j in 0..PANEL {
+                    o[j] = q[j] as f32 * s[j];
+                }
             }
         }
     }

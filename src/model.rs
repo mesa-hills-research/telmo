@@ -7,6 +7,7 @@ use crate::granite::Granite;
 use crate::json;
 use crate::kernels::Isa;
 use crate::parakeet::{Options, Parakeet, Transcript};
+use crate::quant::Precision;
 
 /// A loaded model of either kind.
 pub enum Model {
@@ -58,6 +59,14 @@ impl Model {
         match self {
             Model::Parakeet(m) => m.threads(),
             Model::Granite(m) => m.threads(),
+        }
+    }
+
+    /// The precision of the weight matrices, if they share one.
+    pub fn precision(&self) -> Option<Precision> {
+        match self {
+            Model::Parakeet(m) => m.precision(),
+            Model::Granite(_) => Some(Precision::F32),
         }
     }
 

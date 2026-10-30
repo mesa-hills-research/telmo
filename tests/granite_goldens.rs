@@ -85,7 +85,12 @@ fn clips() -> Vec<Clip> {
 }
 
 fn model(isa: Option<Isa>, threads: usize) -> Granite {
-    Granite::load(&model_dir(), &Options { threads, isa }).expect("the model loads")
+    let options = Options {
+        threads,
+        isa,
+        ..Options::default()
+    };
+    Granite::load(&model_dir(), &options).expect("the model loads")
 }
 
 /// ||got - want|| / ||want||.

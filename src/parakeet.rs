@@ -9,13 +9,21 @@ use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use crate::features::{FrontEnd, FrontEndConfig};
-use crate::json;
+use crate::gguf::{self, Gguf};
+use crate::json::{self, Value};
 use crate::kernels::{
     Act, AlignedBuf, BView, Epilogue, Isa, Kernels, PackedWeights, TILE_ROWS, for_rows,
 };
+use crate::pack::{MemorySink, Pack, Sink};
+use crate::quant::Precision;
+use crate::region::Vector;
 use crate::safetensors::SafeTensors;
+use crate::source::{GgufSource, Matrix, Source};
 use crate::threads::{Pool, SharedMut};
 use crate::tokenizer::Tokenizer;
+
+/// The model name packs of Parakeet carry.
+pub const PACK_MODEL: &str = "parakeet-tdt";
 
 /// How a model runs.
 #[derive(Debug, Clone)]
@@ -24,6 +32,9 @@ pub struct Options {
     pub threads: usize,
     /// The instruction set, or `None` for the best this CPU has.
     pub isa: Option<Isa>,
+    /// The precision weights are converted to when a model is loaded from its downloaded
+    /// files. A pack keeps the precision it was made in.
+    pub precision: Precision,
 }
 
 impl Default for Options {
@@ -31,6 +42,7 @@ impl Default for Options {
         Options {
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
             isa: None,
+            precision: Precision::F32,
         }
     }
 }
@@ -137,14 +149,32 @@ impl Config {
 #[derive(Debug, Clone, Default)]
 pub struct Timings {
     pub steps: Vec<(&'static str, Duration)>,
+    /// How many times each step ran, in the order of `steps`.
+    pub calls: Vec<usize>,
 }
 
 impl Timings {
     pub fn add(&mut self, name: &'static str, d: Duration) {
-        match self.steps.iter_mut().find(|(n, _)| *n == name) {
-            Some((_, total)) => *total += d,
-            None => self.steps.push((name, d)),
+        match self.steps.iter().position(|(n, _)| *n == name) {
+            Some(i) => {
+                self.steps[i].1 += d;
+                self.calls[i] += 1;
+            }
+            None => {
+                self.steps.push((name, d));
+                self.calls.push(1);
+            }
         }
+    }
+
+    /// How many times a step ran.
+    pub fn count(&self, name: &str) -> usize {
+        self.steps
+            .iter()
+            .zip(&self.calls)
+            .filter(|((n, _), _)| *n == name)
+            .map(|(_, c)| c)
+            .sum()
     }
 
     pub fn get(&self, name: &str) -> Duration {
@@ -205,24 +235,25 @@ pub struct DecodeTrace {
 }
 
 struct Subsampling {
-    conv0_w: Vec<f32>,
-    conv0_b: Vec<f32>,
-    dw1_w: Vec<f32>,
-    dw1_b: Vec<f32>,
+    /// `[9, channels]`, tap first.
+    conv0_w: Vector,
+    conv0_b: Vector,
+    dw1_w: Vector,
+    dw1_b: Vector,
     pw1: PackedWeights,
-    pw1_b: Vec<f32>,
-    dw2_w: Vec<f32>,
-    dw2_b: Vec<f32>,
+    pw1_b: Vector,
+    dw2_w: Vector,
+    dw2_b: Vector,
     pw2: PackedWeights,
-    pw2_b: Vec<f32>,
-    /// Inputs reordered to frequency-major (`f * channels + c`) to match the channels-last layout.
+    pw2_b: Vector,
+    /// Reads the last convolution's output channel-major (`c * freqs + f`), as PyTorch flattens it.
     linear: PackedWeights,
-    linear_b: Vec<f32>,
+    linear_b: Vector,
 }
 
 struct Norm {
-    gamma: Vec<f32>,
-    beta: Vec<f32>,
+    gamma: Vector,
+    beta: Vector,
 }
 
 struct Layer {
@@ -233,14 +264,14 @@ struct Layer {
     /// q, k and v stacked, `[3 * d_model, d_model]`.
     qkv: PackedWeights,
     pos: PackedWeights,
-    bias_u: Vec<f32>,
-    bias_v: Vec<f32>,
+    bias_u: Vector,
+    bias_v: Vector,
     out: PackedWeights,
     norm_conv: Norm,
     pw1: PackedWeights,
     /// Depthwise weights `[kernel, d_model]` with the BatchNorm folded in.
-    dw_w: Vec<f32>,
-    dw_b: Vec<f32>,
+    dw_w: Vector,
+    dw_b: Vector,
     pw2: PackedWeights,
     norm_ff2: Norm,
     ff2_in: PackedWeights,
@@ -252,18 +283,18 @@ struct LstmLayer {
     /// `[W_ih | W_hh]`, `[4 * hidden, 2 * hidden]`, gates in PyTorch's order i, f, g, o.
     w: PackedWeights,
     /// `b_ih + b_hh`.
-    b: Vec<f32>,
+    b: Vector,
 }
 
 struct Decoder {
-    embedding: Vec<f32>,
+    embedding: Vector,
     lstm: Vec<LstmLayer>,
     pred_proj: PackedWeights,
-    pred_proj_b: Vec<f32>,
+    pred_proj_b: Vector,
     enc_proj: PackedWeights,
-    enc_proj_b: Vec<f32>,
+    enc_proj_b: Vector,
     joint: PackedWeights,
-    joint_b: Vec<f32>,
+    joint_b: Vector,
 }
 
 /// A loaded Parakeet TDT model.
@@ -276,34 +307,22 @@ pub struct Parakeet {
     tokenizer: Tokenizer,
     kernels: Kernels,
     pool: Pool,
+    precision: Option<Precision>,
 }
 
-struct Loader {
-    st: SafeTensors,
-}
-
-impl Loader {
-    fn take(&mut self, name: &str, shape: &[usize]) -> Result<Vec<f32>> {
-        self.st.read_f32(name, Some(shape))
+/// The precision a pack's weight matrices are in, if they share one.
+fn pack_precision(pack: &Pack) -> Option<Precision> {
+    let mut found = None;
+    for entry in pack.entries() {
+        if let crate::pack::Kind::Matrix { precision, .. } = entry.kind {
+            match found {
+                None => found = Some(precision),
+                Some(p) if p != precision => return None,
+                _ => {}
+            }
+        }
     }
-
-    fn linear(&mut self, name: &str, n: usize, k: usize) -> Result<PackedWeights> {
-        let w = self.take(name, &[n, k])?;
-        Ok(PackedWeights::from_rows(&w, n, k))
-    }
-
-    fn norm(&mut self, prefix: &str, d: usize) -> Result<Norm> {
-        Ok(Norm {
-            gamma: self.take(&format!("{prefix}.weight"), &[d])?,
-            beta: self.take(&format!("{prefix}.bias"), &[d])?,
-        })
-    }
-
-    /// A `[channels, 1, 3, 3]` conv weight as `[9, channels]`.
-    fn conv3x3(&mut self, name: &str, channels: usize) -> Result<Vec<f32>> {
-        let w = self.take(name, &[channels, 1, 3, 3])?;
-        Ok(transpose(&w, channels, 9))
-    }
+    found
 }
 
 /// Transposes a row-major `[rows, cols]` matrix.
@@ -317,18 +336,393 @@ fn transpose(w: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     out
 }
 
+/// Converts Parakeet's weights from `src` (named as in the Hugging Face checkpoint) into pack
+/// entries in `precision`. BatchNorm is folded into the depthwise convolutions, q, k and v are
+/// stacked, and each LSTM layer's two matrices are joined.
+pub fn convert(
+    src: &mut dyn Source,
+    config_json: &[u8],
+    tokenizer_json: &[u8],
+    precision: Precision,
+    sink: &mut dyn Sink,
+) -> Result<()> {
+    let config = Config::from_json(config_json)?;
+    let tokenizer = Tokenizer::from_json(tokenizer_json)?;
+    if tokenizer.len() != config.vocab {
+        return Err(Error::Model(format!(
+            "The tokenizer has {} tokens but the model {}.",
+            tokenizer.len(),
+            config.vocab
+        )));
+    }
+    sink.bytes("config.json", config_json)?;
+    sink.bytes("tokenizer.json", tokenizer_json)?;
+    let c = &config;
+    let (d, ch, h) = (c.d_model, c.sub_channels, c.pred_hidden);
+    let matrix = |sink: &mut dyn Sink, name: &str, m: Matrix, n: usize, k: usize| {
+        sink.matrix(name, &m.rows(), n, k, precision)
+    };
+
+    let sub_f = c.n_mels / 8;
+    for (i, name) in [(0, "conv0"), (2, "dw1"), (5, "dw2")] {
+        let w = src.tensor(
+            &format!("encoder.subsampling.layers.{i}.weight"),
+            &[ch, 1, 3, 3],
+        )?;
+        sink.f32(&format!("sub.{name}.w"), &[9, ch], &transpose(&w, ch, 9))?;
+        let b = src.tensor(&format!("encoder.subsampling.layers.{i}.bias"), &[ch])?;
+        sink.f32(&format!("sub.{name}.b"), &[ch], &b)?;
+    }
+    for (i, name) in [(3, "pw1"), (6, "pw2")] {
+        let w = src.matrix(
+            &format!("encoder.subsampling.layers.{i}.weight"),
+            &[ch, ch, 1, 1],
+        )?;
+        matrix(sink, &format!("sub.{name}"), w, ch, ch)?;
+        let b = src.tensor(&format!("encoder.subsampling.layers.{i}.bias"), &[ch])?;
+        sink.f32(&format!("sub.{name}.b"), &[ch], &b)?;
+    }
+    let w = src.matrix("encoder.subsampling.linear.weight", &[d, ch * sub_f])?;
+    matrix(sink, "sub.linear", w, d, ch * sub_f)?;
+    sink.f32(
+        "sub.linear.b",
+        &[d],
+        &src.tensor("encoder.subsampling.linear.bias", &[d])?,
+    )?;
+
+    for i in 0..c.layers {
+        let (p, o) = (format!("encoder.layers.{i}"), format!("layers.{i}"));
+        let norm = |sink: &mut dyn Sink, src: &mut dyn Source, from: &str, to: &str| {
+            sink.f32(
+                &format!("{o}.{to}.w"),
+                &[d],
+                &src.tensor(&format!("{p}.{from}.weight"), &[d])?,
+            )?;
+            sink.f32(
+                &format!("{o}.{to}.b"),
+                &[d],
+                &src.tensor(&format!("{p}.{from}.bias"), &[d])?,
+            )
+        };
+        norm(sink, src, "norm_feed_forward1", "norm_ff1")?;
+        norm(sink, src, "norm_self_att", "norm_att")?;
+        norm(sink, src, "norm_conv", "norm_conv")?;
+        norm(sink, src, "norm_feed_forward2", "norm_ff2")?;
+        norm(sink, src, "norm_out", "norm_out")?;
+        for (ff, to) in [("feed_forward1", "ff1"), ("feed_forward2", "ff2")] {
+            let w = src.matrix(&format!("{p}.{ff}.linear1.weight"), &[c.ff, d])?;
+            matrix(sink, &format!("{o}.{to}_in"), w, c.ff, d)?;
+            let w = src.matrix(&format!("{p}.{ff}.linear2.weight"), &[d, c.ff])?;
+            matrix(sink, &format!("{o}.{to}_out"), w, d, c.ff)?;
+        }
+        let qkv = ["q", "k", "v"]
+            .iter()
+            .map(|x| src.matrix(&format!("{p}.self_attn.{x}_proj.weight"), &[d, d]))
+            .collect::<Result<Vec<_>>>()?;
+        matrix(sink, &format!("{o}.qkv"), Matrix::stack(qkv), 3 * d, d)?;
+        let w = src.matrix(&format!("{p}.self_attn.relative_k_proj.weight"), &[d, d])?;
+        matrix(sink, &format!("{o}.pos"), w, d, d)?;
+        let w = src.matrix(&format!("{p}.self_attn.o_proj.weight"), &[d, d])?;
+        matrix(sink, &format!("{o}.out"), w, d, d)?;
+        for x in ["u", "v"] {
+            let shape = [c.heads, c.head_dim()];
+            let b = src.tensor(&format!("{p}.self_attn.bias_{x}"), &shape)?;
+            sink.f32(&format!("{o}.bias_{x}"), &shape, &b)?;
+        }
+        let w = src.matrix(&format!("{p}.conv.pointwise_conv1.weight"), &[2 * d, d, 1])?;
+        matrix(sink, &format!("{o}.pw1"), w, 2 * d, d)?;
+        let w = src.matrix(&format!("{p}.conv.pointwise_conv2.weight"), &[d, d, 1])?;
+        matrix(sink, &format!("{o}.pw2"), w, d, d)?;
+        let gamma = src.tensor(&format!("{p}.conv.norm.weight"), &[d])?;
+        let beta = src.tensor(&format!("{p}.conv.norm.bias"), &[d])?;
+        let mean = src.tensor(&format!("{p}.conv.norm.running_mean"), &[d])?;
+        let var = src.tensor(&format!("{p}.conv.norm.running_var"), &[d])?;
+        let dw = src.tensor(
+            &format!("{p}.conv.depthwise_conv.weight"),
+            &[d, 1, c.conv_kernel],
+        )?;
+        let mut dw_w = vec![0f32; c.conv_kernel * d];
+        let mut dw_b = vec![0f32; d];
+        for ch in 0..d {
+            let scale = gamma[ch] as f64 / (var[ch] as f64 + 1e-5).sqrt();
+            for k in 0..c.conv_kernel {
+                dw_w[k * d + ch] = (dw[ch * c.conv_kernel + k] as f64 * scale) as f32;
+            }
+            dw_b[ch] = (beta[ch] as f64 - mean[ch] as f64 * scale) as f32;
+        }
+        sink.f32(&format!("{o}.dw.w"), &[c.conv_kernel, d], &dw_w)?;
+        sink.f32(&format!("{o}.dw.b"), &[d], &dw_b)?;
+    }
+
+    for l in 0..c.pred_layers {
+        let w_ih = src.matrix(&format!("decoder.lstm.weight_ih_l{l}"), &[4 * h, h])?;
+        let w_hh = src.matrix(&format!("decoder.lstm.weight_hh_l{l}"), &[4 * h, h])?;
+        let w = Matrix::concat_inputs(w_ih, h, w_hh, h, 4 * h);
+        matrix(sink, &format!("dec.lstm.{l}"), w, 4 * h, 2 * h)?;
+        let b_ih = src.tensor(&format!("decoder.lstm.bias_ih_l{l}"), &[4 * h])?;
+        let b_hh = src.tensor(&format!("decoder.lstm.bias_hh_l{l}"), &[4 * h])?;
+        let b: Vec<f32> = b_ih.iter().zip(&b_hh).map(|(a, b)| a + b).collect();
+        sink.f32(&format!("dec.lstm.{l}.b"), &[4 * h], &b)?;
+    }
+    let outputs = c.vocab + c.durations.len();
+    sink.f32(
+        "dec.embedding",
+        &[c.vocab, h],
+        &src.tensor("decoder.embedding.weight", &[c.vocab, h])?,
+    )?;
+    for (from, to, n, k) in [
+        ("decoder.decoder_projector", "dec.pred_proj", h, h),
+        ("encoder_projector", "dec.enc_proj", h, d),
+        ("joint.head", "dec.joint", outputs, h),
+    ] {
+        let w = src.matrix(&format!("{from}.weight"), &[n, k])?;
+        matrix(sink, to, w, n, k)?;
+        sink.f32(
+            &format!("{to}.b"),
+            &[n],
+            &src.tensor(&format!("{from}.bias"), &[n])?,
+        )?;
+    }
+    Ok(())
+}
+
+/// NVIDIA's GGUF names for the Hugging Face checkpoint's names.
+fn nemo_name(name: &str) -> String {
+    let fixed = [
+        ("encoder.subsampling.layers.", "encoder.pre_encode.conv."),
+        ("encoder.subsampling.linear.", "encoder.pre_encode.out."),
+        ("decoder.embedding.", "decoder.prediction.embed."),
+        ("decoder.decoder_projector.", "joint.pred."),
+        ("encoder_projector.", "joint.enc."),
+        ("joint.head.", "joint.joint_net.2."),
+    ];
+    for (from, to) in fixed {
+        if let Some(rest) = name.strip_prefix(from) {
+            return format!("{to}{rest}");
+        }
+    }
+    if let Some(rest) = name.strip_prefix("decoder.lstm.") {
+        // weight_ih_l0 -> ih_l0.weight
+        if let Some((kind, which)) = rest.split_once('_') {
+            return format!("decoder.prediction.dec_rnn.lstm.{which}.{kind}");
+        }
+    }
+    let replacements = [
+        (".self_attn.q_proj.", ".self_attn.linear_q."),
+        (".self_attn.k_proj.", ".self_attn.linear_k."),
+        (".self_attn.v_proj.", ".self_attn.linear_v."),
+        (".self_attn.o_proj.", ".self_attn.linear_out."),
+        (".self_attn.relative_k_proj.", ".self_attn.linear_pos."),
+        (".self_attn.bias_u", ".self_attn.pos_bias_u"),
+        (".self_attn.bias_v", ".self_attn.pos_bias_v"),
+        (".conv.norm.", ".conv.batch_norm."),
+    ];
+    let mut out = name.to_string();
+    for (from, to) in replacements {
+        out = out.replace(from, to);
+    }
+    out
+}
+
+/// A `config.json` equivalent to the one beside the Hugging Face checkpoint, written from the
+/// GGUF file's metadata after checking the architecture and front end are Parakeet's.
+fn gguf_config(g: &Gguf) -> Result<String> {
+    let bad = |m: String| {
+        Error::Model(format!(
+            "The GGUF file doesn't describe a supported Parakeet TDT model. {m}"
+        ))
+    };
+    let num = |key: &str| -> Result<u64> {
+        g.get(key)
+            .and_then(gguf::Value::as_u64)
+            .ok_or_else(|| bad(format!("{key} is missing.")))
+    };
+    let expect = |key: &str, want: gguf::Value| -> Result<()> {
+        if g.get(key) == Some(&want) {
+            Ok(())
+        } else {
+            Err(bad(format!("{key} isn't {want:?}.")))
+        }
+    };
+    let near = |key: &str, want: f64| -> Result<()> {
+        match g.get(key).and_then(gguf::Value::as_f64) {
+            Some(v) if (v - want).abs() < 1e-6 => Ok(()),
+            _ => Err(bad(format!("{key} isn't {want}."))),
+        }
+    };
+    let s = |v: &str| gguf::Value::String(v.into());
+    expect("general.architecture", s("asr"))?;
+    expect("asr.head_type", s("tdt"))?;
+    expect("asr.encoder.xscaling", gguf::Value::Bool(false))?;
+    expect("asr.encoder.use_bias", gguf::Value::Bool(false))?;
+    expect("asr.encoder.conv_norm", s("batch_norm"))?;
+    expect("asr.encoder.att_context_style", s("regular"))?;
+    for key in [
+        "asr.encoder.offline_left_ctx",
+        "asr.encoder.offline_right_ctx",
+    ] {
+        expect(key, gguf::Value::Int(-1))?;
+    }
+    if num("asr.encoder.subsampling_factor")? != 8 {
+        return Err(bad("The subsampling factor isn't 8.".into()));
+    }
+    let n_mels = num("asr.encoder.feat_in")?;
+    if num("asr.preprocessor.sample_rate")? != 16000
+        || num("asr.preprocessor.n_fft")? != 512
+        || num("asr.preprocessor.features")? != n_mels
+    {
+        return Err(bad("Its front end isn't Parakeet's.".into()));
+    }
+    near("asr.preprocessor.window_size", 0.025)?;
+    near("asr.preprocessor.window_stride", 0.01)?;
+    near("asr.preprocessor.preemph", 0.97)?;
+    expect("asr.preprocessor.normalize", s("per_feature"))?;
+    expect("asr.preprocessor.hann_periodic", gguf::Value::Bool(false))?;
+    expect(
+        "asr.preprocessor.stft_center_window",
+        gguf::Value::Bool(true),
+    )?;
+    let pred_hidden = num("asr.rnnt.pred_hidden")?;
+    if num("asr.rnnt.joint_dim")? != pred_hidden || num("asr.rnnt.pred_embed_dim")? != pred_hidden {
+        return Err(bad(
+            "The joint and the prediction network differ in width.".into()
+        ));
+    }
+    let durations: Vec<Value> = g
+        .get("asr.tdt.durations")
+        .and_then(gguf::Value::as_array)
+        .and_then(|d| d.iter().map(|v| v.as_u64().map(Value::number)).collect())
+        .ok_or_else(|| bad("asr.tdt.durations is missing.".into()))?;
+    let n = |key: &str| -> Result<Value> { Ok(Value::number(num(key)?)) };
+    let b = |v: bool| Value::Bool(v);
+    let st = |v: &str| Value::String(v.into());
+    let encoder = Value::Object(vec![
+        ("hidden_act".into(), st("silu")),
+        ("attention_bias".into(), b(false)),
+        ("convolution_bias".into(), b(false)),
+        ("scale_input".into(), b(false)),
+        ("subsampling_factor".into(), Value::number(8)),
+        ("subsampling_conv_kernel_size".into(), Value::number(3)),
+        ("subsampling_conv_stride".into(), Value::number(2)),
+        ("hidden_size".into(), n("asr.encoder.d_model")?),
+        ("num_attention_heads".into(), n("asr.encoder.n_heads")?),
+        ("num_hidden_layers".into(), n("asr.encoder.n_layers")?),
+        ("intermediate_size".into(), n("asr.encoder.d_ff")?),
+        (
+            "conv_kernel_size".into(),
+            n("asr.encoder.conv_kernel_size")?,
+        ),
+        (
+            "subsampling_conv_channels".into(),
+            n("asr.encoder.subsampling_conv_channels")?,
+        ),
+        ("num_mel_bins".into(), Value::number(n_mels)),
+    ]);
+    let root = Value::Object(vec![
+        ("model_type".into(), st("parakeet_tdt")),
+        ("hidden_act".into(), st("relu")),
+        ("encoder_config".into(), encoder),
+        ("decoder_hidden_size".into(), Value::number(pred_hidden)),
+        ("num_decoder_layers".into(), n("asr.rnnt.pred_num_layers")?),
+        ("vocab_size".into(), n("asr.rnnt.vocab_size")?),
+        ("blank_token_id".into(), n("asr.rnnt.blank_id")?),
+        ("durations".into(), Value::Array(durations)),
+        (
+            "max_symbols_per_step".into(),
+            n("asr.rnnt.max_symbols_per_step")?,
+        ),
+    ]);
+    Ok(root.to_json())
+}
+
+fn read_file(path: &Path) -> Result<Vec<u8>> {
+    std::fs::read(path).map_err(|e| Error::io(path, e))
+}
+
+/// Converts a Hugging Face checkpoint directory (`model.safetensors`, `config.json` and
+/// `tokenizer.json`) or NVIDIA's GGUF file (with `tokenizer.json` beside it) into pack entries.
+pub fn convert_path(path: &Path, precision: Precision, sink: &mut dyn Sink) -> Result<()> {
+    if path.is_dir() {
+        let config = read_file(&path.join("config.json"))?;
+        let tokenizer = read_file(&path.join("tokenizer.json"))?;
+        let mut st = SafeTensors::open(&path.join("model.safetensors"))?;
+        return convert(&mut st, &config, &tokenizer, precision, sink);
+    }
+    let tokenizer_path = path.with_file_name("tokenizer.json");
+    let tokenizer = read_file(&tokenizer_path)?;
+    let mut g = Gguf::open(path)?;
+    let config = gguf_config(&g)?;
+    let pieces: Vec<&str> = g
+        .get("asr.tokenizer.vocab")
+        .and_then(gguf::Value::as_array)
+        .map(|v| v.iter().filter_map(gguf::Value::as_str).collect())
+        .unwrap_or_default();
+    if !Tokenizer::from_json(&tokenizer)?.has_pieces(&pieces) {
+        return Err(Error::Model(format!(
+            "{} doesn't hold the GGUF file's vocabulary.",
+            tokenizer_path.display()
+        )));
+    }
+    let mut src = GgufSource {
+        gguf: &mut g,
+        rename: nemo_name,
+    };
+    convert(&mut src, config.as_bytes(), &tokenizer, precision, sink)
+}
+
+/// Pack metadata describing a conversion.
+pub fn pack_metadata(path: &Path, precision: Precision) -> Vec<(String, String)> {
+    let source = path
+        .file_name()
+        .map_or(String::new(), |n| n.to_string_lossy().into_owned());
+    let bytes = if path.is_dir() {
+        std::fs::metadata(path.join("model.safetensors")).map(|m| m.len())
+    } else {
+        std::fs::metadata(path).map(|m| m.len())
+    };
+    vec![
+        ("precision".into(), precision.name().into()),
+        ("source".into(), source),
+        (
+            "source_bytes".into(),
+            bytes.map_or(String::new(), |b| b.to_string()),
+        ),
+        (
+            "engine".into(),
+            format!("notate {}", env!("CARGO_PKG_VERSION")),
+        ),
+    ]
+}
+
 impl Parakeet {
-    /// Loads `model.safetensors`, `config.json` and `tokenizer.json` from a directory.
-    pub fn load(dir: &Path, options: &Options) -> Result<Parakeet> {
+    /// Loads a model from a pack file, a Hugging Face checkpoint directory (`model.safetensors`,
+    /// `config.json` and `tokenizer.json`) or NVIDIA's GGUF file (with `tokenizer.json` beside
+    /// it). A pack is mapped as it is. The others are converted in memory to
+    /// `options.precision` (a GGUF file's 8-bit blocks are kept unchanged for Q8_0).
+    pub fn load(path: &Path, options: &Options) -> Result<Parakeet> {
+        let is_pack = path.is_file() && path.extension().and_then(|e| e.to_str()) != Some("gguf");
+        if is_pack {
+            return Parakeet::from_pack(&Pack::open(path)?, options);
+        }
+        let mut sink = MemorySink::new(PACK_MODEL, pack_metadata(path, options.precision));
+        convert_path(path, options.precision, &mut sink)?;
+        Parakeet::from_pack(&sink.finish()?, options)
+    }
+
+    /// Builds the model from a pack's entries, which it keeps views of.
+    pub fn from_pack(pack: &Pack, options: &Options) -> Result<Parakeet> {
+        if pack.model() != PACK_MODEL {
+            return Err(Error::Model(format!(
+                "The pack holds {}, not Parakeet TDT.",
+                pack.model()
+            )));
+        }
         let isa = options.isa.unwrap_or_else(Isa::detect);
         let kernels = Kernels::new(isa).ok_or_else(|| {
             Error::Model(format!("This CPU can't run the {} kernels.", isa.name()))
         })?;
-        let config_path = dir.join("config.json");
-        let config = Config::from_json(
-            &std::fs::read(&config_path).map_err(|e| Error::io(&config_path, e))?,
-        )?;
-        let tokenizer = Tokenizer::load(&dir.join("tokenizer.json"))?;
+        let config = Config::from_json(pack.bytes("config.json")?)?;
+        let tokenizer = Tokenizer::from_json(pack.bytes("tokenizer.json")?)?;
         if tokenizer.len() != config.vocab {
             return Err(Error::Model(format!(
                 "The tokenizer has {} tokens but the model {}.",
@@ -336,121 +730,75 @@ impl Parakeet {
                 config.vocab
             )));
         }
-        let mut ld = Loader {
-            st: SafeTensors::open(&dir.join("model.safetensors"))?,
-        };
         let c = &config;
-        let (d, ch) = (c.d_model, c.sub_channels);
-
+        let (d, ch, h) = (c.d_model, c.sub_channels, c.pred_hidden);
+        let v = |name: &str, shape: &[usize]| pack.vector(name, shape);
+        let m = |name: &str, n: usize, k: usize| pack.matrix(name, n, k);
         let sub_f = c.n_mels / 8;
-        let linear_w = ld.take("encoder.subsampling.linear.weight", &[d, ch * sub_f])?;
-        // Column c * sub_f + f of the stored weight becomes column f * ch + c.
-        let mut linear_perm = vec![0f32; d * ch * sub_f];
-        for o in 0..d {
-            for cc in 0..ch {
-                for f in 0..sub_f {
-                    linear_perm[o * ch * sub_f + f * ch + cc] =
-                        linear_w[o * ch * sub_f + cc * sub_f + f];
-                }
-            }
-        }
-        let conv0 = ld.take("encoder.subsampling.layers.0.weight", &[ch, 1, 3, 3])?;
-        let pw = |ld: &mut Loader, name: &str| -> Result<PackedWeights> {
-            let w = ld.take(name, &[ch, ch, 1, 1])?;
-            Ok(PackedWeights::from_rows(&w, ch, ch))
-        };
         let subsampling = Subsampling {
-            conv0_w: transpose(&conv0, ch, 9),
-            conv0_b: ld.take("encoder.subsampling.layers.0.bias", &[ch])?,
-            dw1_w: ld.conv3x3("encoder.subsampling.layers.2.weight", ch)?,
-            dw1_b: ld.take("encoder.subsampling.layers.2.bias", &[ch])?,
-            pw1: pw(&mut ld, "encoder.subsampling.layers.3.weight")?,
-            pw1_b: ld.take("encoder.subsampling.layers.3.bias", &[ch])?,
-            dw2_w: ld.conv3x3("encoder.subsampling.layers.5.weight", ch)?,
-            dw2_b: ld.take("encoder.subsampling.layers.5.bias", &[ch])?,
-            pw2: pw(&mut ld, "encoder.subsampling.layers.6.weight")?,
-            pw2_b: ld.take("encoder.subsampling.layers.6.bias", &[ch])?,
-            linear: PackedWeights::from_rows(&linear_perm, d, ch * sub_f),
-            linear_b: ld.take("encoder.subsampling.linear.bias", &[d])?,
+            conv0_w: v("sub.conv0.w", &[9, ch])?,
+            conv0_b: v("sub.conv0.b", &[ch])?,
+            dw1_w: v("sub.dw1.w", &[9, ch])?,
+            dw1_b: v("sub.dw1.b", &[ch])?,
+            pw1: m("sub.pw1", ch, ch)?,
+            pw1_b: v("sub.pw1.b", &[ch])?,
+            dw2_w: v("sub.dw2.w", &[9, ch])?,
+            dw2_b: v("sub.dw2.b", &[ch])?,
+            pw2: m("sub.pw2", ch, ch)?,
+            pw2_b: v("sub.pw2.b", &[ch])?,
+            linear: m("sub.linear", d, ch * sub_f)?,
+            linear_b: v("sub.linear.b", &[d])?,
         };
-        drop(linear_perm);
-
         let mut layers = Vec::with_capacity(c.layers);
         for i in 0..c.layers {
-            let p = format!("encoder.layers.{i}");
-            let mut qkv = ld.take(&format!("{p}.self_attn.q_proj.weight"), &[d, d])?;
-            qkv.extend(ld.take(&format!("{p}.self_attn.k_proj.weight"), &[d, d])?);
-            qkv.extend(ld.take(&format!("{p}.self_attn.v_proj.weight"), &[d, d])?);
-            let gamma = ld.take(&format!("{p}.conv.norm.weight"), &[d])?;
-            let beta = ld.take(&format!("{p}.conv.norm.bias"), &[d])?;
-            let mean = ld.take(&format!("{p}.conv.norm.running_mean"), &[d])?;
-            let var = ld.take(&format!("{p}.conv.norm.running_var"), &[d])?;
-            let dw = ld.take(
-                &format!("{p}.conv.depthwise_conv.weight"),
-                &[d, 1, c.conv_kernel],
-            )?;
-            let mut dw_w = vec![0f32; c.conv_kernel * d];
-            let mut dw_b = vec![0f32; d];
-            for ch in 0..d {
-                let scale = gamma[ch] as f64 / (var[ch] as f64 + 1e-5).sqrt();
-                for k in 0..c.conv_kernel {
-                    dw_w[k * d + ch] = (dw[ch * c.conv_kernel + k] as f64 * scale) as f32;
-                }
-                dw_b[ch] = (beta[ch] as f64 - mean[ch] as f64 * scale) as f32;
-            }
-            let pw1 = ld.take(&format!("{p}.conv.pointwise_conv1.weight"), &[2 * d, d, 1])?;
-            let pw2 = ld.take(&format!("{p}.conv.pointwise_conv2.weight"), &[d, d, 1])?;
+            let p = format!("layers.{i}");
+            let norm = |name: &str| -> Result<Norm> {
+                Ok(Norm {
+                    gamma: v(&format!("{p}.{name}.w"), &[d])?,
+                    beta: v(&format!("{p}.{name}.b"), &[d])?,
+                })
+            };
+            let hd = [c.heads, c.head_dim()];
             layers.push(Layer {
-                norm_ff1: ld.norm(&format!("{p}.norm_feed_forward1"), d)?,
-                ff1_in: ld.linear(&format!("{p}.feed_forward1.linear1.weight"), c.ff, d)?,
-                ff1_out: ld.linear(&format!("{p}.feed_forward1.linear2.weight"), d, c.ff)?,
-                norm_att: ld.norm(&format!("{p}.norm_self_att"), d)?,
-                qkv: PackedWeights::from_rows(&qkv, 3 * d, d),
-                pos: ld.linear(&format!("{p}.self_attn.relative_k_proj.weight"), d, d)?,
-                bias_u: ld.take(&format!("{p}.self_attn.bias_u"), &[c.heads, c.head_dim()])?,
-                bias_v: ld.take(&format!("{p}.self_attn.bias_v"), &[c.heads, c.head_dim()])?,
-                out: ld.linear(&format!("{p}.self_attn.o_proj.weight"), d, d)?,
-                norm_conv: ld.norm(&format!("{p}.norm_conv"), d)?,
-                pw1: PackedWeights::from_rows(&pw1, 2 * d, d),
-                dw_w,
-                dw_b,
-                pw2: PackedWeights::from_rows(&pw2, d, d),
-                norm_ff2: ld.norm(&format!("{p}.norm_feed_forward2"), d)?,
-                ff2_in: ld.linear(&format!("{p}.feed_forward2.linear1.weight"), c.ff, d)?,
-                ff2_out: ld.linear(&format!("{p}.feed_forward2.linear2.weight"), d, c.ff)?,
-                norm_out: ld.norm(&format!("{p}.norm_out"), d)?,
+                norm_ff1: norm("norm_ff1")?,
+                ff1_in: m(&format!("{p}.ff1_in"), c.ff, d)?,
+                ff1_out: m(&format!("{p}.ff1_out"), d, c.ff)?,
+                norm_att: norm("norm_att")?,
+                qkv: m(&format!("{p}.qkv"), 3 * d, d)?,
+                pos: m(&format!("{p}.pos"), d, d)?,
+                bias_u: v(&format!("{p}.bias_u"), &hd)?,
+                bias_v: v(&format!("{p}.bias_v"), &hd)?,
+                out: m(&format!("{p}.out"), d, d)?,
+                norm_conv: norm("norm_conv")?,
+                pw1: m(&format!("{p}.pw1"), 2 * d, d)?,
+                dw_w: v(&format!("{p}.dw.w"), &[c.conv_kernel, d])?,
+                dw_b: v(&format!("{p}.dw.b"), &[d])?,
+                pw2: m(&format!("{p}.pw2"), d, d)?,
+                norm_ff2: norm("norm_ff2")?,
+                ff2_in: m(&format!("{p}.ff2_in"), c.ff, d)?,
+                ff2_out: m(&format!("{p}.ff2_out"), d, c.ff)?,
+                norm_out: norm("norm_out")?,
             });
         }
-
-        let h = c.pred_hidden;
-        let mut lstm = Vec::with_capacity(c.pred_layers);
-        for l in 0..c.pred_layers {
-            let w_ih = ld.take(&format!("decoder.lstm.weight_ih_l{l}"), &[4 * h, h])?;
-            let w_hh = ld.take(&format!("decoder.lstm.weight_hh_l{l}"), &[4 * h, h])?;
-            let b_ih = ld.take(&format!("decoder.lstm.bias_ih_l{l}"), &[4 * h])?;
-            let b_hh = ld.take(&format!("decoder.lstm.bias_hh_l{l}"), &[4 * h])?;
-            let mut w = Vec::with_capacity(8 * h * h);
-            for g in 0..4 * h {
-                w.extend_from_slice(&w_ih[g * h..(g + 1) * h]);
-                w.extend_from_slice(&w_hh[g * h..(g + 1) * h]);
-            }
-            lstm.push(LstmLayer {
-                w: PackedWeights::from_rows(&w, 4 * h, 2 * h),
-                b: b_ih.iter().zip(&b_hh).map(|(a, b)| a + b).collect(),
-            });
-        }
+        let lstm = (0..c.pred_layers)
+            .map(|l| {
+                Ok(LstmLayer {
+                    w: m(&format!("dec.lstm.{l}"), 4 * h, 2 * h)?,
+                    b: v(&format!("dec.lstm.{l}.b"), &[4 * h])?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let outputs = c.vocab + c.durations.len();
         let decoder = Decoder {
-            embedding: ld.take("decoder.embedding.weight", &[c.vocab, h])?,
+            embedding: v("dec.embedding", &[c.vocab, h])?,
             lstm,
-            pred_proj: ld.linear("decoder.decoder_projector.weight", h, h)?,
-            pred_proj_b: ld.take("decoder.decoder_projector.bias", &[h])?,
-            enc_proj: ld.linear("encoder_projector.weight", h, d)?,
-            enc_proj_b: ld.take("encoder_projector.bias", &[h])?,
-            joint: ld.linear("joint.head.weight", outputs, h)?,
-            joint_b: ld.take("joint.head.bias", &[outputs])?,
+            pred_proj: m("dec.pred_proj", h, h)?,
+            pred_proj_b: v("dec.pred_proj.b", &[h])?,
+            enc_proj: m("dec.enc_proj", h, d)?,
+            enc_proj_b: v("dec.enc_proj.b", &[h])?,
+            joint: m("dec.joint", outputs, h)?,
+            joint_b: v("dec.joint.b", &[outputs])?,
         };
-
         let front_end = FrontEnd::new(FrontEndConfig {
             n_mels: c.n_mels,
             ..FrontEndConfig::parakeet()
@@ -464,7 +812,13 @@ impl Parakeet {
             tokenizer,
             kernels,
             pool: Pool::new(options.threads),
+            precision: pack_precision(pack),
         })
+    }
+
+    /// The precision of the encoder's weights.
+    pub fn precision(&self) -> Option<Precision> {
+        self.precision
     }
 
     pub fn config(&self) -> &Config {
@@ -627,10 +981,19 @@ impl Parakeet {
                 ..relu
             },
         );
+        // PyTorch flattens the last convolution's output channel by channel.
+        let mut flat = vec![0f32; t3 * f3 * ch];
+        for (src, dst) in h3.chunks_exact(f3 * ch).zip(flat.chunks_exact_mut(f3 * ch)) {
+            for f in 0..f3 {
+                for c in 0..ch {
+                    dst[c * f3 + f] = src[f * ch + c];
+                }
+            }
+        }
         let mut x = vec![0f32; t3 * self.config.d_model];
         k.linear(
             &self.pool,
-            &h3,
+            &flat,
             t3,
             &s.linear,
             &mut x,

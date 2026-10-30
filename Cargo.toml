@@ -34,3 +34,7 @@ harness = false
 [[bench]]
 name = "rtf"
 harness = false
+
+[[bench]]
+name = "weights"
+harness = false

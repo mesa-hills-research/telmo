@@ -1,19 +1,21 @@
 //! Transcribes WAV files and prints the text with timings.
 //!
 //! ```text
-//! cargo run --release --example transcribe -- MODEL_DIR FILE.wav... [--threads N] [--isa scalar|avx2] [--steps] [--repeat N]
+//! cargo run --release --example transcribe -- MODEL FILE.wav... [--threads N] [--isa scalar|avx2|avx512|neon] [--precision P] [--steps] [--repeat N]
 //! ```
 //!
-//! MODEL_DIR holds `model.safetensors`, `config.json` and `tokenizer.json` of
-//! nvidia/parakeet-tdt-0.6b-v3 or ibm-granite/granite-speech-5.0-470m-turboctc. The audio must be
-//! 16 kHz.
+//! MODEL is a pack, a directory holding `model.safetensors`, `config.json` and `tokenizer.json`
+//! of nvidia/parakeet-tdt-0.6b-v3 or ibm-granite/granite-speech-5.0-470m-turboctc, or NVIDIA's
+//! GGUF file of Parakeet with `tokenizer.json` beside it. The
+//! latter two are converted in memory to `--precision` (f32, f16, bf16, int8 or q8_0, f32 by
+//! default). The audio must be 16 kHz.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use notate::kernels::Isa;
-use notate::{Model, Options};
+use notate::{Model, Options, Precision};
 
 fn main() -> ExitCode {
     match run() {
@@ -46,18 +48,26 @@ fn run() -> Result<(), String> {
                     .ok_or("--repeat takes a number")?
             }
             "--isa" => {
-                options.isa = Some(match args.next().as_deref() {
-                    Some("scalar") => Isa::Scalar,
-                    Some("avx2") => Isa::Avx2,
-                    _ => return Err("--isa takes scalar or avx2".into()),
-                })
+                options.isa = Some(
+                    args.next()
+                        .as_deref()
+                        .and_then(Isa::from_name)
+                        .ok_or("--isa takes scalar, avx2, avx512 or neon")?,
+                )
+            }
+            "--precision" => {
+                options.precision = args
+                    .next()
+                    .as_deref()
+                    .and_then(Precision::from_name)
+                    .ok_or("--precision takes f32, f16, bf16, int8 or q8_0")?
             }
             "--steps" => steps = true,
             _ => paths.push(arg.into()),
         }
     }
     if paths.len() < 2 {
-        return Err("Usage: transcribe MODEL_DIR FILE.wav... [--threads N] [--isa scalar|avx2] [--steps] [--repeat N]".into());
+        return Err("Usage: transcribe MODEL FILE.wav... [--threads N] [--isa scalar|avx2|avx512|neon] [--precision P] [--steps] [--repeat N]".into());
     }
     let model_dir = paths.remove(0);
 
@@ -65,12 +75,13 @@ fn run() -> Result<(), String> {
     let model = Model::load(&model_dir, &options).map_err(|e| e.to_string())?;
     let load = start.elapsed();
     eprintln!(
-        "Loaded {} in {:.2} s, {} threads, {} kernels, {:.0} MB of weights.",
+        "Loaded {} in {:.3} s, {} threads, {} kernels, {:.0} MB of {} weights.",
         model.name(),
         load.as_secs_f64(),
         model.threads(),
         model.isa().name(),
-        model.weight_bytes() as f64 / 1e6
+        model.weight_bytes() as f64 / 1e6,
+        model.precision().map_or("mixed", |p| p.name())
     );
 
     for path in &paths {
@@ -115,16 +126,21 @@ fn run() -> Result<(), String> {
             }
         }
     }
-    if let Some(peak) = peak_memory() {
-        eprintln!("Peak memory {:.0} MB.", peak as f64 / 1e6);
+    if let Some(peak) = memory("VmHWM:") {
+        eprintln!(
+            "Peak memory {:.0} MB. Now {:.0} MB private, {:.0} MB of mapped files.",
+            peak as f64 / 1e6,
+            memory("RssAnon:").unwrap_or(0) as f64 / 1e6,
+            memory("RssFile:").unwrap_or(0) as f64 / 1e6
+        );
     }
     Ok(())
 }
 
-/// The process's peak resident memory in bytes, on Linux.
-fn peak_memory() -> Option<u64> {
+/// A memory figure of this process in bytes, on Linux.
+fn memory(key: &str) -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+    let line = status.lines().find(|l| l.starts_with(key))?;
     let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
     Some(kb * 1024)
 }

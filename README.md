@@ -7,7 +7,8 @@ capitals and a timestamp for every token.
 
 - It has no dependencies. The core uses only the standard library and brings its own
   safetensors and JSON readers, FFT, matrix kernels and thread pool.
-- Its AVX2 and FMA kernels are chosen at run time, with a scalar fallback for other CPUs.
+- It picks AVX-512, AVX2 or NEON kernels at run time, with a scalar fallback for other CPUs.
+  The AVX-512 and NEON kernels compile but haven't been run yet.
 - Its output is bit-identical at every thread count, because threads split the matrix products
   by output columns.
 

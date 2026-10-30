@@ -1,6 +1,9 @@
 //! The readers must return an error, never panic, on damaged input. Each test mutates a valid
 //! file in many random ways (flipped bits, overwritten bytes, truncation, inserted junk).
 
+use notate::gguf::{self, Gguf, TensorType};
+use notate::pack::{FileSink, Kind, Pack, Sink};
+use notate::quant::{Precision, Rows};
 use notate::safetensors::SafeTensors;
 use notate::tokenizer::Tokenizer;
 use notate::{json, wav};
@@ -104,4 +107,96 @@ fn damaged_wav_files_are_refused_without_panicking() {
         whole.truncate(rng.below(whole.len() + 1));
         let _ = wav::parse(&whole);
     }
+}
+
+fn gguf_file() -> Vec<u8> {
+    let f32s: Vec<u8> = (0..6)
+        .flat_map(|i| (i as f32 * 0.5).to_le_bytes())
+        .collect();
+    let mut q8 = Vec::new();
+    for row in 0..2u16 {
+        q8.extend((0x3400 + row).to_le_bytes());
+        q8.extend((0..32).map(|i| i as u8));
+    }
+    gguf::write_for_tests(
+        &[
+            ("general.architecture", gguf::Value::String("asr".into())),
+            (
+                "asr.tokenizer.vocab",
+                gguf::Value::Array(vec![gguf::Value::String("a".into()); 3]),
+            ),
+        ],
+        &[
+            ("a", &[3, 2], TensorType::F32, &f32s),
+            ("q", &[32, 2], TensorType::Q8_0, &q8),
+        ],
+    )
+}
+
+#[test]
+fn damaged_gguf_files_are_refused_without_panicking() {
+    let valid = gguf_file();
+    assert!(Gguf::from_bytes(valid.clone()).is_ok());
+    let mut rng = Rng(0x5eed_0f09_9907_1234);
+    let mut accepted = 0;
+    for _ in 0..20_000 {
+        let input = mutate(&valid, &mut rng);
+        if let Ok(mut g) = Gguf::from_bytes(input) {
+            accepted += 1;
+            let names: Vec<String> = g.tensors.iter().map(|t| t.name.clone()).collect();
+            for name in names {
+                let _ = g.read_f32(&name, None);
+                let _ = g.read(&name, Some(&[2, 32]));
+            }
+        }
+    }
+    assert!(accepted > 0);
+}
+
+fn pack_file() -> Vec<u8> {
+    let dir = std::env::temp_dir().join(format!("notate-corrupt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("small.pack");
+    let mut sink = FileSink::create(&path, "test", vec![("source".into(), "x".into())]).unwrap();
+    let w: Vec<f32> = (0..20 * 32).map(|i| (i % 13) as f32 - 6.0).collect();
+    sink.matrix("q", &Rows::F32(&w), 20, 32, Precision::Q8_0)
+        .unwrap();
+    sink.matrix("h", &Rows::F32(&w), 20, 32, Precision::Bf16)
+        .unwrap();
+    sink.f32("v", &[3], &[1.0, 2.0, 3.0]).unwrap();
+    sink.bytes("b", b"{}").unwrap();
+    sink.finish().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    bytes
+}
+
+#[test]
+fn damaged_packs_are_refused_without_panicking() {
+    let valid = pack_file();
+    assert!(Pack::from_bytes(&valid).is_ok());
+    let mut rng = Rng(0x0bad_cafe_1357_9bdf);
+    let mut accepted = 0;
+    for _ in 0..20_000 {
+        let input = mutate(&valid, &mut rng);
+        if let Ok(pack) = Pack::from_bytes(&input) {
+            accepted += 1;
+            for entry in pack.entries() {
+                match &entry.kind {
+                    Kind::Matrix { n, k, .. } => {
+                        let w = pack.matrix(&entry.name, *n, *k).unwrap();
+                        let _ = w.to_rows();
+                    }
+                    Kind::F32 { shape } => {
+                        let v = pack.vector(&entry.name, shape).unwrap();
+                        let _ = v.iter().sum::<f32>();
+                    }
+                    Kind::Bytes => {
+                        let _ = pack.bytes(&entry.name).unwrap();
+                    }
+                }
+            }
+        }
+    }
+    assert!(accepted > 0);
 }
