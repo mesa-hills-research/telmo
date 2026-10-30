@@ -857,6 +857,11 @@ impl Parakeet {
         })
     }
 
+    /// The front end, whose [`FrontEnd::stream`] computes features as audio arrives.
+    pub fn front_end(&self) -> &FrontEnd {
+        &self.front_end
+    }
+
     /// Computes the normalized log-mel features, `[frames, n_mels]`.
     pub fn features(&self, samples: &[f32]) -> Result<crate::features::Features> {
         self.front_end.compute(samples)

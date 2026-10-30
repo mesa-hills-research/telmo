@@ -21,6 +21,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::error::Result;
+use crate::features::LogMelStream;
 use crate::granite::Granite;
 use crate::granite_stream::GraniteStream;
 use crate::model::Model;
@@ -33,6 +34,8 @@ use crate::vad::{Vad, VadConfig, VadEvent};
 pub const SAMPLE_RATE: usize = 16000;
 /// Samples per encoder frame (80 ms) of both models.
 const FRAME: usize = 1280;
+/// Samples per feature frame (10 ms).
+const HOP: usize = 160;
 
 /// How passes over an utterance are made and when words settle.
 #[derive(Debug, Clone)]
@@ -121,6 +124,8 @@ pub struct UtteranceStream {
     /// The previous pass's unsettled words, as token ids.
     previous: Vec<Vec<u32>>,
     granite: Option<GraniteStream>,
+    /// Parakeet's log-mel frames, computed once as the audio arrives.
+    log_mel: Option<LogMelStream>,
     /// Whether any text settled in this utterance.
     settled_any: bool,
     passes: usize,
@@ -130,14 +135,19 @@ pub struct UtteranceStream {
 impl UtteranceStream {
     pub fn new(model: &Model) -> UtteranceStream {
         let mut timings = Timings::default();
-        let (resume, granite) = match model {
-            Model::Parakeet(m) => (Resume::Tdt(m.initial_decoder_state(&mut timings)), None),
+        let (resume, granite, log_mel) = match model {
+            Model::Parakeet(m) => (
+                Resume::Tdt(m.initial_decoder_state(&mut timings)),
+                None,
+                Some(m.front_end().stream()),
+            ),
             Model::Granite(m) => (
                 Resume::Ctc {
                     frame: 0,
                     prev: u32::MAX,
                 },
                 Some(GraniteStream::new(m)),
+                None,
             ),
         };
         UtteranceStream {
@@ -147,6 +157,7 @@ impl UtteranceStream {
             recent: Vec::new(),
             previous: Vec::new(),
             granite,
+            log_mel,
             settled_any: false,
             passes: 0,
             timings,
@@ -162,7 +173,9 @@ impl UtteranceStream {
     /// Removes and returns the audio past `samples`, as when the utterance's end is found after
     /// that audio arrived. Audio a pass already gave Granite's blocks stays.
     pub fn split_off(&mut self, samples: usize) -> Vec<f32> {
-        let kept = self.granite.as_ref().map_or(0, |g| g.samples());
+        let kept = (self.granite.as_ref().map(|g| g.samples()))
+            .max(self.log_mel.as_ref().map(|l| l.samples()))
+            .unwrap_or(0);
         self.audio
             .split_off(samples.max(kept).min(self.audio.len()))
     }
@@ -185,7 +198,7 @@ impl UtteranceStream {
     pub fn pass(&mut self, model: &Model, config: &PassConfig, mode: PassMode) -> Result<PassText> {
         self.passes += 1;
         let hyp = match model {
-            Model::Parakeet(m) => self.parakeet_hypothesis(m, config)?,
+            Model::Parakeet(m) => self.parakeet_hypothesis(m, config, mode == PassMode::Final)?,
             Model::Granite(m) => self.granite_hypothesis(m, mode == PassMode::Final)?,
         };
         let tokenizer = match model {
@@ -302,20 +315,38 @@ impl UtteranceStream {
     }
 
     /// Re-encodes the unsettled audio with up to `config.context` of settled audio before it,
-    /// and decodes from the state saved after the last settled token.
-    fn parakeet_hypothesis(&mut self, model: &Parakeet, config: &PassConfig) -> Result<Vec<Hyp>> {
+    /// and decodes from the state saved after the last settled token. The window's features
+    /// are normalized over the window, as NVIDIA's buffered streaming does.
+    fn parakeet_hypothesis(
+        &mut self,
+        model: &Parakeet,
+        config: &PassConfig,
+        finished: bool,
+    ) -> Result<Vec<Hyp>> {
         let Resume::Tdt(state) = &self.resume else {
             unreachable!("Parakeet resumes from a decoder state")
         };
+        let log_mel = self
+            .log_mel
+            .as_mut()
+            .expect("Parakeet keeps its log-mel frames");
+        // The frames take audio only when a pass runs, so the end of an utterance can still be
+        // trimmed until then.
+        let timings = &mut self.timings;
+        timings.time("features", || {
+            log_mel.push(&self.audio[log_mel.samples().min(self.audio.len())..]);
+            if finished {
+                log_mel.finish();
+            }
+        });
         let context = (config.context.as_secs_f64() * SAMPLE_RATE as f64) as usize;
         let start = (state.frame * FRAME).saturating_sub(context) / FRAME * FRAME;
-        let window = &self.audio[start.min(self.audio.len())..];
-        // The front end needs two frames of 10 ms, and the encoder at least one frame.
-        if window.len() < FRAME {
+        let (first, ready) = (start / HOP, log_mel.frames());
+        // The encoder needs a frame of 80 ms.
+        if ready < first + FRAME / HOP {
             return Ok(Vec::new());
         }
-        let timings = &mut self.timings;
-        let features = timings.time("features", || model.features(window))?;
+        let features = timings.time("features", || log_mel.normalize(first..ready));
         let encoded = model.encode(&features.data, features.frames, timings, &mut |_, _, _| {});
         let tokens = model.decode_from(&encoded, start / FRAME, state, timings);
         Ok(tokens
