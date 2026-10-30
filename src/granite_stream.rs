@@ -1,5 +1,6 @@
 //! Streaming transcription with Granite Speech. Audio arrives in pieces, and each update encodes
-//! what is new without running the encoder over the whole utterance again.
+//! what is new without running the encoder over the whole utterance again. Like all streaming
+//! in this crate, it is experimental.
 //!
 //! Granite's attention stays inside blocks of 128 frames, 2.56 s in the first block of layers,
 //! 5.12 s in the second and 10.24 s in the rest, so once an attention block is complete, new

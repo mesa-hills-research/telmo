@@ -1,5 +1,8 @@
 //! Streaming recognition of one utterance at a time, as audio arrives.
 //!
+//! Streaming is experimental. Its API and behaviour may change in any release, and its
+//! accuracy is a little below offline transcription of the same audio.
+//!
 //! Neither model is built for streaming, so each pass recomputes part of the utterance and
 //! decodes from where the settled text ends. Parakeet re-encodes a window made of the unsettled
 //! audio and up to a few seconds of settled audio before it, and continues greedy decoding from
@@ -114,7 +117,8 @@ struct Hyp {
     resume: Resume,
 }
 
-/// One utterance's audio and the text settled from it so far.
+/// One utterance's audio and the text settled from it so far. Experimental, like the rest of
+/// this module.
 pub struct UtteranceStream {
     audio: Vec<f32>,
     /// Where decoding continues after the settled tokens.
@@ -463,8 +467,8 @@ struct Active {
     tentative: String,
 }
 
-/// The synchronous core of a [`Stream`]: it takes audio, splits it into utterances and runs
-/// passes when asked. [`Stream`] decides when.
+/// The synchronous core of a [`Stream`], experimental like it. It takes audio, splits it into
+/// utterances and runs passes when asked. [`Stream`] decides when.
 pub struct Streamer {
     model: Arc<Model>,
     config: StreamConfig,
@@ -742,8 +746,8 @@ pub struct StreamStats {
     pub longest: Duration,
 }
 
-/// Streaming recognition on a thread of its own. Push audio as it arrives, and events come
-/// back through the callback given to [`Stream::start`].
+/// Streaming recognition on a thread of its own, which is experimental. Push audio as it
+/// arrives, and events come back through the callback given to [`Stream::start`].
 pub struct Stream {
     sender: mpsc::Sender<Message>,
     worker: JoinHandle<Result<StreamStats>>,

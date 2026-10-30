@@ -1,4 +1,24 @@
-//! Speech recognition on the CPU in pure Rust.
+//! Speech recognition on the CPU in pure Rust, with no dependencies.
+//!
+//! Notate runs IBM's Granite Speech 5.0 470M TurboCTC (English, French, German, Spanish,
+//! Portuguese, Italian and Japanese), the default, and NVIDIA's Parakeet TDT 0.6B v3 (25
+//! European languages). Their weights aren't part of the crate. Convert a downloaded model once
+//! into a pack with [`pack`] (or the `notate pack` command), then load it with [`Model::load`].
+//!
+//! ```no_run
+//! use notate::{Model, Options};
+//!
+//! let model = Model::load("granite-int8.pack".as_ref(), &Options::default())?;
+//! let audio = notate::wav::read("speech.wav".as_ref())?;
+//! let samples = notate::resample::resample(&audio.samples, audio.sample_rate, 16000);
+//! println!("{}", model.transcribe(&samples)?.text);
+//! # Ok::<(), notate::Error>(())
+//! ```
+//!
+//! Offline transcription is what Notate does today. Streaming ([`stream`]) is experimental. The
+//! kernels use AVX2 or plain Rust by default. AVX-512 and NEON kernels exist but haven't run on
+//! real hardware, so they're used only when named in [`Options::isa`] or the `NOTATE_ISA`
+//! environment variable.
 
 pub mod error;
 pub mod features;
