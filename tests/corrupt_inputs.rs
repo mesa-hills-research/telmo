@@ -1,6 +1,7 @@
 //! The readers must return an error, never panic, on damaged input. Each test mutates a valid
 //! file in many random ways (flipped bits, overwritten bytes, truncation, inserted junk).
 
+use notate::gguf::{self, Gguf, TensorType};
 use notate::safetensors::SafeTensors;
 use notate::tokenizer::Tokenizer;
 use notate::{json, wav};
@@ -104,4 +105,48 @@ fn damaged_wav_files_are_refused_without_panicking() {
         whole.truncate(rng.below(whole.len() + 1));
         let _ = wav::parse(&whole);
     }
+}
+
+fn gguf_file() -> Vec<u8> {
+    let f32s: Vec<u8> = (0..6)
+        .flat_map(|i| (i as f32 * 0.5).to_le_bytes())
+        .collect();
+    let mut q8 = Vec::new();
+    for row in 0..2u16 {
+        q8.extend((0x3400 + row).to_le_bytes());
+        q8.extend((0..32).map(|i| i as u8));
+    }
+    gguf::write_for_tests(
+        &[
+            ("general.architecture", gguf::Value::String("asr".into())),
+            (
+                "asr.tokenizer.vocab",
+                gguf::Value::Array(vec![gguf::Value::String("a".into()); 3]),
+            ),
+        ],
+        &[
+            ("a", &[3, 2], TensorType::F32, &f32s),
+            ("q", &[32, 2], TensorType::Q8_0, &q8),
+        ],
+    )
+}
+
+#[test]
+fn damaged_gguf_files_are_refused_without_panicking() {
+    let valid = gguf_file();
+    assert!(Gguf::from_bytes(valid.clone()).is_ok());
+    let mut rng = Rng(0x5eed_0f09_9907_1234);
+    let mut accepted = 0;
+    for _ in 0..20_000 {
+        let input = mutate(&valid, &mut rng);
+        if let Ok(mut g) = Gguf::from_bytes(input) {
+            accepted += 1;
+            let names: Vec<String> = g.tensors.iter().map(|t| t.name.clone()).collect();
+            for name in names {
+                let _ = g.read_f32(&name, None);
+                let _ = g.read(&name, Some(&[2, 32]));
+            }
+        }
+    }
+    assert!(accepted > 0);
 }

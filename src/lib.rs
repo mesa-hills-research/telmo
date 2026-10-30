@@ -3,6 +3,7 @@
 pub mod error;
 pub mod features;
 pub mod fft;
+pub mod gguf;
 pub mod json;
 pub mod kernels;
 pub mod parakeet;
