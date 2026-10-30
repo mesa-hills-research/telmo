@@ -28,6 +28,10 @@ name = "wer"
 test = true
 
 [[bench]]
+name = "audio"
+harness = false
+
+[[bench]]
 name = "matmul"
 harness = false
 
