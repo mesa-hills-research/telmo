@@ -291,6 +291,19 @@ pub struct Kernels {
         bias: &[f32],
         out: &mut [f32],
     ),
+    /// One output time step of a 3x3, stride-2 convolution over channels-last input, plain
+    /// from one input channel or depthwise.
+    pub conv3x3s2_row: fn(
+        input: &[f32],
+        in_t: usize,
+        in_f: usize,
+        channels: usize,
+        depthwise: bool,
+        w: &[f32],
+        bias: &[f32],
+        t: usize,
+        out: &mut [f32],
+    ),
 }
 
 impl Kernels {
@@ -420,6 +433,34 @@ impl Kernels {
         epi: &Epilogue,
     ) {
         self.matmul(pool, a, w.k, m, &w.view(), c, w.n, epi);
+    }
+
+    /// The matrix product on the calling thread alone, writing through a pointer, for callers
+    /// whose threads write disjoint columns of one buffer.
+    ///
+    /// # Safety
+    /// `c` must be valid for writes of rows `0..m` (stride `ldc`) in columns `0..n`, and nothing
+    /// else may access those elements during the call.
+    pub(crate) unsafe fn matmul_serial_raw(
+        &self,
+        a: &[f32],
+        lda: usize,
+        m: usize,
+        b: &BView,
+        c: SharedMut<f32>,
+        ldc: usize,
+        epi: &Epilogue,
+    ) {
+        if m == 0 || b.n == 0 {
+            return;
+        }
+        assert!(lda >= b.k && ldc >= b.n);
+        assert!(a.len() >= (m - 1) * lda + b.k, "a is too short");
+        if let Some(bias) = epi.bias {
+            assert!(bias.len() >= b.n);
+        }
+        // SAFETY: passed on from the caller.
+        unsafe { self.gemm_panels(a, lda, m, b, 0..b.panels(), c, ldc, epi) };
     }
 
     /// The matrix product on the calling thread alone.

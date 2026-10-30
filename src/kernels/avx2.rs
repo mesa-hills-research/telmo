@@ -23,6 +23,9 @@ pub(crate) fn kernels() -> Kernels {
         dwconv1d_frame: |input, channels, frames, t, w, kernel, bias, out| unsafe {
             dwconv1d_frame(input, channels, frames, t, w, kernel, bias, out)
         },
+        conv3x3s2_row: |input, in_t, in_f, channels, depthwise, w, bias, t, out| unsafe {
+            conv3x3s2_row(input, in_t, in_f, channels, depthwise, w, bias, t, out)
+        },
     }
 }
 
@@ -345,4 +348,20 @@ unsafe fn dwconv1d_frame(
     out: &mut [f32],
 ) {
     scalar::dwconv1d_frame(input, channels, frames, t, w, kernel, bias, out)
+}
+
+/// The scalar loop, compiled with AVX2 so it vectorizes over channels, with the same results.
+#[target_feature(enable = "avx2,fma")]
+unsafe fn conv3x3s2_row(
+    input: &[f32],
+    in_t: usize,
+    in_f: usize,
+    channels: usize,
+    depthwise: bool,
+    w: &[f32],
+    bias: &[f32],
+    t: usize,
+    out: &mut [f32],
+) {
+    scalar::conv3x3s2_row(input, in_t, in_f, channels, depthwise, w, bias, t, out)
 }

@@ -13,6 +13,7 @@ pub(crate) fn kernels() -> Kernels {
         silu,
         axpy,
         dwconv1d_frame,
+        conv3x3s2_row,
     }
 }
 
@@ -124,6 +125,51 @@ pub(crate) fn dwconv1d_frame(
         let wj = &w[j * channels..(j + 1) * channels];
         for c in 0..channels {
             out[c] += wj[c] * row[c];
+        }
+    }
+}
+
+/// One output row (time step `t`) of a 3x3 convolution with stride 2 and zero padding 1 over
+/// a channels-last `[in_t, in_f, channels]` input. Depthwise, each channel convolves its own
+/// input. Otherwise the input has a single channel (`[in_t, in_f]`) that every output channel
+/// reads. Weights are `[9, channels]`, tap `dt * 3 + df` first. Writes `[out_f, channels]`.
+#[inline(always)]
+pub(crate) fn conv3x3s2_row(
+    input: &[f32],
+    in_t: usize,
+    in_f: usize,
+    channels: usize,
+    depthwise: bool,
+    w: &[f32],
+    bias: &[f32],
+    t: usize,
+    out: &mut [f32],
+) {
+    let out_f = (in_f - 1) / 2 + 1;
+    for f in 0..out_f {
+        let o = &mut out[f * channels..(f + 1) * channels];
+        o.copy_from_slice(&bias[..channels]);
+        for dt in 0..3 {
+            let Some(st) = (2 * t + dt).checked_sub(1).filter(|&s| s < in_t) else {
+                continue;
+            };
+            for df in 0..3 {
+                let Some(sf) = (2 * f + df).checked_sub(1).filter(|&s| s < in_f) else {
+                    continue;
+                };
+                let wk = &w[(dt * 3 + df) * channels..(dt * 3 + df + 1) * channels];
+                if depthwise {
+                    let src = &input[(st * in_f + sf) * channels..(st * in_f + sf + 1) * channels];
+                    for c in 0..channels {
+                        o[c] += wk[c] * src[c];
+                    }
+                } else {
+                    let v = input[st * in_f + sf];
+                    for c in 0..channels {
+                        o[c] += wk[c] * v;
+                    }
+                }
+            }
         }
     }
 }
