@@ -2,7 +2,8 @@
 
 Parakeet TDT 0.6B v3 (`nvidia/parakeet-tdt-0.6b-v3` at revision `541d1f9`) and Granite Speech
 5.0 470M TurboCTC (`ibm-granite/granite-speech-5.0-470m-turboctc` at revision `1dd23f4`, the
-multilingual release), both with greedy decoding.
+multilingual release), both with greedy decoding. Streaming's latency and accuracy are in
+[streaming.md](streaming.md#latency-and-accuracy).
 
 ## Machine
 
@@ -69,7 +70,7 @@ The two don't differ measurably from each other.
 
 Granite with int8 weights is Notate's default (`ModelType::DEFAULT`). It has the smallest pack and
 the lowest WER on both LibriSpeech sets, within the bootstrap interval of bf16. `ModelType::for_language`
-falls back to Parakeet with q8_0 weights for the 18 European languages Granite doesn't know. In the
+falls back to Parakeet with q8_0 weights for the 19 European languages Granite doesn't know. In the
 FLEURS table below Parakeet makes fewer errors in every language the two share, most of all in
 French (6.31% against 9.30%) and Portuguese (7.65% against 11.08%), so it's worth choosing for those
 two despite its larger pack.
