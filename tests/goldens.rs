@@ -420,8 +420,8 @@ fn the_scalar_kernels_give_the_same_tokens() {
     }
 }
 
-/// Runs every clip with narrow weights: each saved layer's cosine similarity with the reference,
-/// and whether the tokens equal the reference's.
+/// Runs every clip with narrow weights and reports each saved layer's cosine similarity with the
+/// reference, and whether the tokens equal the reference's.
 fn check_narrow(label: &str, model: &Parakeet) -> (f64, usize, usize) {
     let mut worst = 1f64;
     let mut same = 0;

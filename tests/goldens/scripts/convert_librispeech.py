@@ -2,7 +2,7 @@
 
 Usage: python -I convert_librispeech.py <subset dir, e.g. .../LibriSpeech/test-clean> <out wav dir> <out tsv>
 
-The samples are copied exactly: each FLAC is read as int16 and written as PCM_16, then read back and compared.
+The samples are copied exactly. Each FLAC is read as int16 and written as PCM_16, then read back and compared.
 TSV lines are `utt_id<TAB>absolute wav path<TAB>transcript`, sorted by utt_id, no header.
 """
 

@@ -1,4 +1,4 @@
-"""Reference hypotheses: transformers' GraniteSpeech5ForCTC with greedy CTC decoding over a TSV of utterances.
+"""Reference hypotheses from transformers' GraniteSpeech5ForCTC with greedy CTC decoding over a TSV of utterances.
 
 Usage:
   python -I granite_hyps.py <model dir> <in tsv> <out tsv> [--subset 500 --seed 0] [--limit N] [--threads 6]

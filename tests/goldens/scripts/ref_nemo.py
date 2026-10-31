@@ -7,7 +7,7 @@ For each clip it writes <out dir>/<id>.safetensors (features, subsampling output
 the encoder output, the joint's projections, the decoding trace) and <out dir>/<id>.json (texts, tokens,
 checks). The model runs in eval mode, float32, on the CPU, with the preprocessor's dither and pad_to at 0.
 
---no-subsampling-mask is an ablation: it turns off the time masking inside NeMo's ConvSubsampling
+--no-subsampling-mask is an ablation. It turns off the time masking inside NeMo's ConvSubsampling
 (MaskedConvSequential) to measure what that masking changes. Its outputs are not goldens.
 """
 
@@ -47,7 +47,7 @@ def greedy_tdt(model, enc_proj, enc_len):
         g, state, *_ = decoder.predict(torch.tensor([[label]], dtype=torch.long), state, add_sos=False, batch_size=1)
         return joint.project_prednet(g)[0, 0], state  # joint.pred(decoder output), [640]
 
-    # start state: the SOS label is blank (a zero embedding row) with a zero LSTM state, as in torch_impl
+    # start state, where the SOS label is blank (a zero embedding row) with a zero LSTM state, as in torch_impl
     state = decoder.initialize_state(enc_proj[None])
     pred, state = pred_step(blank, state)
     preds = [pred]
@@ -57,7 +57,7 @@ def greedy_tdt(model, enc_proj, enc_len):
     run_frame, run_count = -1, 0  # non-blank labels emitted at the same frame
     while t < enc_len:
         logits = joint.joint_net(enc_proj[t] + pred)  # raw logits, [8198]
-        # NeMo's joint_after_projection would log_softmax these on CPU (log_softmax: null); argmaxes agree
+        # NeMo's joint_after_projection would log_softmax these on CPU (log_softmax: null). Argmaxes agree
         if len(joints) < JOINT_STEPS:
             joints.append(logits.clone())
             joint_frames.append(t)
@@ -204,7 +204,7 @@ def main() -> None:
             info["decoding_token_frame"] = as_list(getattr(dec_hyp, "timestamp", None))
             info["decoding_token_duration"] = as_list(getattr(dec_hyp, "token_duration", None))
             info["decoding_text"] = dec_hyp.text
-            # NeMo's joint as the decoder calls it: log_softmax over all 8198 outputs on CPU (log_softmax: null)
+            # NeMo's joint as the decoder calls it, with log_softmax over all 8198 outputs on CPU (log_softmax: null)
             with torch.inference_mode():
                 j0 = model.joint.joint_after_projection(enc_proj[None, :1], trace["pred"][None, :1])[0, 0, 0]
             info["joint_log_softmax_setting"] = model.joint.log_softmax

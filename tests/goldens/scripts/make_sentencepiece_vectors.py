@@ -1,4 +1,4 @@
-"""Write sentencepiece-vectors.json for Parakeet: words with the token ids the model's own SentencePiece model
+"""Write sentencepiece-vectors.json for Parakeet. It holds words with the token ids the model's own SentencePiece model
 (tokenizer.model inside NVIDIA's parakeet-tdt-0.6b-v3.nemo) splits them into. Words with digits are where
 Hugging Face's converted tokenizer.json differs from it.
 

@@ -1,4 +1,4 @@
-"""Write encode-vectors.json for both models: words and phrases with the token ids Hugging Face's
+"""Write encode-vectors.json for both models. It holds words and phrases with the token ids Hugging Face's
 tokenizers library splits them into, for checking the crate's BPE encoder.
 
 Usage:
