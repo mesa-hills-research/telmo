@@ -4,9 +4,9 @@ Usage: python -I gen_basic.py <basic.py> <commit> <wer dir> [<list.tsv> <hypothe
 
 <basic.py> is whisper/normalizers/basic.py from github.com/openai/whisper at <commit> (MIT).
 Writes into <wer dir>:
-- unicode-nfkc.tsv, what NFKC needs from this Python's unicodedata: every character's full
+- unicode-nfkc.tsv, what NFKC needs from this Python's unicodedata, namely every character's full
   compatibility decomposition, the canonical combining classes and the canonical compositions,
-- basic-vectors.tsv, inputs and BasicTextNormalizer()'s output for them: hand-written lines,
+- basic-vectors.tsv, inputs and BasicTextNormalizer()'s output for them, the inputs being hand-written lines,
   runs of every character the NFKC tables name, and the reference and hypothesis of the first
   ten utterances of each list given (a list has `id<TAB>wav<TAB>reference`, a hypothesis file
   `id<TAB>text`).
@@ -55,7 +55,7 @@ for cp in code_points():
     mapping = unicodedata.decomposition(c) if cp not in HANGUL else ""
     if mapping and not mapping.startswith("<"):
         parts = [int(p, 16) for p in mapping.split()]
-        # A primary composite: two parts, and NFC keeps it (it isn't excluded from composition).
+        # A primary composite has two parts, and NFC keeps it (it isn't excluded from composition).
         if len(parts) == 2 and unicodedata.normalize("NFC", c) == c:
             compositions.append((parts[0], parts[1], cp))
 

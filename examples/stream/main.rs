@@ -577,7 +577,7 @@ fn summarize(events: &[Timed]) -> (String, Vec<Utterance>, usize, usize) {
     (text.trim().to_string(), utterances, replaced, settled_words)
 }
 
-/// The audio of each utterance a stream found, in seconds: from 300 ms before its onset (but
+/// The audio of each utterance a stream found, in seconds, from 300 ms before its onset (but
 /// not before the previous one's end) to where its end was decided.
 fn segments(events: &[Timed]) -> Vec<(f64, f64)> {
     let mut onsets: Vec<Option<f64>> = Vec::new();
@@ -675,8 +675,8 @@ fn cpu_seconds() -> f64 {
     let Ok(stat) = std::fs::read_to_string("/proc/self/stat") else {
         return 0.0;
     };
-    // Fields after the command name, which is in parentheses: utime and stime are the 12th and
-    // 13th, in clock ticks of 1/100 s.
+    // Fields after the command name, which is in parentheses. Of these, utime and stime are the
+    // 12th and 13th, in clock ticks of 1/100 s.
     let rest = stat.rsplit_once(')').map_or("", |(_, r)| r);
     let f: Vec<&str> = rest.split_whitespace().collect();
     let ticks = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);

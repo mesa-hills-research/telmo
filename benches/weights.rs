@@ -1,6 +1,6 @@
 //! Time and weight traffic of the matrix product per weight precision, on the shapes where
-//! reading the weights dominates: Parakeet's decoder steps (one row) and short streaming
-//! windows (8 rows), plus a long pass (512 rows) for comparison.
+//! reading the weights dominates (Parakeet's decoder steps with one row and short streaming
+//! windows of 8 rows), plus a long pass (512 rows) for comparison.
 //!
 //! ```text
 //! cargo bench --bench weights [-- --threads 1,6] [--precisions f32,f16,bf16,int8,q8_0]

@@ -41,7 +41,7 @@ with open(f"{out_dir}/english-spelling.tsv", "w", encoding="utf-8", newline="\n"
 
 
 def char_class(ch):
-    """One letter per class: what the normalizer's regexes and removal steps need to know."""
+    """One letter per class, giving what the normalizer's regexes and removal steps need to know."""
     cat = unicodedata.category(ch)
     if ch.isspace():
         return "z"  # \s and str.split()
@@ -120,8 +120,8 @@ for c in range(0x110000):
     if out != class_rule(ch, char_class(ch)):
         replacements.append((c, out))
 
-# Runs of consecutive code points become one line: "a-b x" when they all give
-# x, "a-b +x" when they give x, x + 1 and so on.
+# Runs of consecutive code points become one line, "a-b x" when they all give
+# x and "a-b +x" when they give x, x + 1 and so on.
 runs = []
 for c, out in replacements:
     if runs:

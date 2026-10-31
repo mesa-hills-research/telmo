@@ -1,4 +1,4 @@
-//! Transcribes a test set and scores it the way the Open ASR leaderboard does: both texts go
+//! Transcribes a test set and scores it the way the Open ASR leaderboard does. Both texts go
 //! through Whisper's English normalizer, then the word errors of all utterances are summed and
 //! divided by the reference words.
 //!
@@ -7,8 +7,8 @@
 //! cargo run --release --example wer -- --hyp HYP.tsv LIST.tsv [--compare DIR] [--normalizer 2025|2026] [--basic] [--cer]
 //! ```
 //!
-//! MODEL is what `Model::load` takes: a pack, a checkpoint directory or a GGUF file, the
-//! latter two converted in memory to `--precision`.
+//! MODEL is what `Model::load` takes (a pack, a checkpoint directory or a GGUF file). The
+//! latter two are converted in memory to `--precision`.
 //!
 //! A list has one utterance per line, `id<TAB>path to a 16 kHz WAV<TAB>reference text`.
 //! `--limit` scores a fixed random subset of each list (`--seed` picks it). `--out` writes the

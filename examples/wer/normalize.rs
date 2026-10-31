@@ -1270,7 +1270,7 @@ fn process_words(words: &[String], version: Version) -> Vec<String> {
             r.emit_value();
             r.emit(current);
         } else if zero(current) {
-            // In 2026 "oh" is a zero only inside a run of digits: one must follow, and with no
+            // In 2026 "oh" is a zero only inside a run of digits. One must follow, and with no
             // number pending a second must follow too ("oh seven nine").
             let in_number = is_digit_token(next)
                 && (r.value.is_some() || is_digit_token(words.get(i + 2).map(String::as_str)));
@@ -1504,8 +1504,8 @@ fn canonical(digits: &str) -> String {
     }
 }
 
-/// What `Fraction(text)` makes of a run of decimal digits of any script with at most one period:
-/// "12", "1.5", "1." or ".5".
+/// What `Fraction(text)` makes of a run of decimal digits of any script with at most one period,
+/// such as "12", "1.5", "1." or ".5".
 struct Decimal {
     /// The integer part as ASCII digits.
     whole: String,

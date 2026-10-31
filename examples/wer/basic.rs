@@ -32,7 +32,7 @@ pub fn normalize(text: &str) -> String {
 
 struct Tables {
     decompositions: HashMap<u32, Vec<char>>,
-    /// Runs of characters with a nonzero canonical combining class: first, last, class.
+    /// Runs of characters with a nonzero canonical combining class, as (first, last, class).
     classes: Vec<(u32, u32, u8)>,
     compositions: HashMap<(u32, u32), char>,
 }
@@ -118,8 +118,8 @@ fn compose(a: char, b: char) -> Option<char> {
     tables().compositions.get(&(a, b)).copied()
 }
 
-/// Unicode normalization form KC: full compatibility decomposition, canonical ordering of
-/// combining marks, then canonical composition.
+/// Unicode normalization form KC, which is full compatibility decomposition, canonical ordering
+/// of combining marks, then canonical composition.
 pub fn nfkc(s: &[char]) -> Vec<char> {
     let mut chars = Vec::with_capacity(s.len());
     for &c in s {

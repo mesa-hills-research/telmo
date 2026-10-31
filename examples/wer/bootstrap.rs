@@ -1,5 +1,5 @@
-//! The paired bootstrap over utterances: whether one system's word error rate differs from
-//! another's on the same test set by more than chance would explain.
+//! The paired bootstrap over utterances, which tests whether one system's word error rate
+//! differs from another's on the same test set by more than chance would explain.
 //!
 //! Both systems are scored on every utterance. Each resample draws as many utterances as the set
 //! has, with replacement, and computes the difference of the two corpus word error rates on the
@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn a_consistent_gain_has_an_interval_below_zero() {
-        // B makes one error fewer on every tenth utterance: 10 fewer errors in 1,000 words.
+        // B makes one error fewer on every tenth utterance, so 10 fewer errors in 1,000 words.
         let set: Vec<Paired> = (0..100)
             .map(|i| Paired {
                 errors_a: 2,
