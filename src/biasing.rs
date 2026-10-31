@@ -32,7 +32,7 @@ pub struct Boost {
 impl Default for Boost {
     fn default() -> Self {
         Boost {
-            bonus: 2.0,
+            bonus: 1.5,
             beam: 4,
             spotting_bonus: 4.0,
             spotting_margin: 2.0,
