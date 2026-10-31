@@ -2,8 +2,8 @@
 //! reads the networks only through [`TdtNetwork`], so its rules are tested with scripted
 //! scores.
 //!
-//! A search state is the text with everything that decides its future: the frame the next joint
-//! step reads, the tokens emitted on that frame and the state of the special-word matcher.
+//! A search state is the text with everything that decides its future, namely the frame the next
+//! joint step reads, the tokens emitted on that frame and the state of the special-word matcher.
 //! States that are equal merge, keeping the better score, and the best `beam` survive each step.
 //! The score of a hypothesis that can still emit holds the provisional bonus of a special word
 //! under way. A hypothesis that reaches the end of the audio takes its final score at once.
@@ -35,8 +35,8 @@ pub(crate) struct Shape<'a> {
     pub max_symbols: usize,
 }
 
-/// Where a search starts: the frame, the tokens already emitted on it, and the decoder's state
-/// and prediction output.
+/// Where a search starts, given by the frame, the tokens already emitted on it, and the decoder's
+/// state and prediction output.
 pub(crate) struct Start {
     pub frame: usize,
     pub on_frame: usize,
@@ -211,7 +211,7 @@ pub(crate) fn beam_search(
                 let score = hyp.score + row[shape.blank] - token_lse + dl - duration_lse;
                 candidates.push(land(m, frames, i, Step::Blank, key, score));
             }
-            // Where a token lands with each duration: the frame, the tokens on it, and whether
+            // Where a token lands with each duration, as the frame, the tokens on it, and whether
             // that's the end of the audio.
             let after: Vec<(usize, usize)> = shape
                 .durations
@@ -235,8 +235,8 @@ pub(crate) fn beam_search(
                 };
                 *best = best.max(dl);
             }
-            // The best tokens by the score of their best landing: logit, change in bonus and
-            // duration, and the final take-back for a landing at the end. A token that neither
+            // The best tokens by the score of their best landing (logit, change in bonus and
+            // duration, and the final take-back for a landing at the end). A token that neither
             // continues nor starts a special word changes the bonus by one of two amounts and
             // has nothing to take back, and the matcher lists the rest.
             let state = hyp.key.matcher;

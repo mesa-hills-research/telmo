@@ -1,4 +1,4 @@
-//! Session-word biasing: decoding that favours a list of special words, such as the names and
+//! Session-word biasing is decoding that favours a list of special words, such as the names and
 //! technical terms of a conversation, with little change to ordinary words.
 //!
 //! Each special word is split into the model's tokens in its usual spelling and capitalized.
@@ -294,8 +294,8 @@ fn is_combining(c: char) -> bool {
     matches!(c, '\u{0300}'..='\u{036f}' | '\u{1ab0}'..='\u{1aff}' | '\u{1dc0}'..='\u{1dff}' | '\u{20d0}'..='\u{20ff}' | '\u{fe20}'..='\u{fe2f}')
 }
 
-/// Characters of scripts written without spaces between words: Chinese, Japanese, Thai, Lao,
-/// Khmer and Myanmar, and full-width forms.
+/// Characters of scripts written without spaces between words (Chinese, Japanese, Thai, Lao,
+/// Khmer and Myanmar), and full-width forms.
 fn is_unspaced_script(c: char) -> bool {
     matches!(c, '\u{0e00}'..='\u{0eff}' | '\u{1000}'..='\u{109f}' | '\u{1780}'..='\u{17ff}' | '\u{3000}'..='\u{30ff}' | '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{ff00}'..='\u{ffef}')
 }
@@ -446,8 +446,8 @@ impl Matcher {
     }
 
     /// Completes the deepest word that ends where `s` stands, and returns what it adds to the
-    /// committed bonus: its weight for each of its tokens not covered yet, and the rest of it for
-    /// tokens a single-token word covered at its share.
+    /// committed bonus, which is its weight for each of its tokens not covered yet, and the rest
+    /// of it for tokens a single-token word covered at its share.
     fn commit(&self, s: &mut MatchState) -> f32 {
         let output = self.nodes[s.node as usize].output;
         if output == NONE {
@@ -481,8 +481,8 @@ impl Matcher {
         }
     }
 
-    /// The state after `token`, and the change in the bonus the hypothesis holds: what words
-    /// completed before a word boundary commit, plus the change in provisional bonus.
+    /// The state after `token`, and the change in the bonus the hypothesis holds, which is what
+    /// words completed before a word boundary commit, plus the change in provisional bonus.
     pub(crate) fn step(&self, s: MatchState, token: u32) -> (MatchState, f32) {
         let before = self.provisional(&s);
         let mut s = s;
@@ -788,7 +788,7 @@ pub(crate) mod tests {
             (&["kubectl"], &[1, 2, 3, 6], 3.0, 3.0),
             (&["kubectl"], &[1, 2, 3], 3.0, 3.0),
             (&["kubectl"], &[1, 2, 3, 7, 6], 3.0, 3.0),
-            // Left before the end, or the word goes on with letters: taken back.
+            // Left before the end, or the word goes on with letters, so it's taken back.
             (&["kubectl"], &[1, 2, 6], 0.0, 0.0),
             (&["kubectl"], &[1, 2], 0.0, 2.0),
             (&["kubectl"], &[1, 2, 3, 47], 0.0, 0.0),

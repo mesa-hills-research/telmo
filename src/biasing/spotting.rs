@@ -1,4 +1,4 @@
-//! Granite's word spotting: special words aligned to the CTC output, replacing greedy words
+//! Granite's word spotting aligns special words to the CTC output, replacing greedy words
 //! where they fit the audio well enough.
 
 use std::ops::Range;
@@ -7,15 +7,15 @@ use super::{Compiled, Form};
 use crate::parakeet::Token;
 use crate::tokenizer::Tokenizer;
 
-/// The scores word spotting reads, for each frame: its best logit, the blank's logit and the
-/// logits of [`Compiled::tokens`], in that order.
+/// The scores word spotting reads for each frame, which are its best logit, the blank's logit
+/// and the logits of [`Compiled::tokens`], in that order.
 pub(crate) fn score_row(logits: &[f32], blank: usize, tokens: &[u32], out: &mut Vec<f32>) {
     out.push(logits.iter().fold(f32::NEG_INFINITY, |m, &x| m.max(x)));
     out.push(logits[blank]);
     out.extend(tokens.iter().map(|&t| logits[t as usize]));
 }
 
-/// A stretch of greedy tokens that spotting replaces whole or not at all: a word, or a
+/// A stretch of greedy tokens that spotting replaces whole or not at all, either a word or a
 /// punctuation token.
 #[derive(Debug, Clone, Copy)]
 struct Span {
@@ -39,8 +39,8 @@ fn overlap(a: &Spot, b: &Spot) -> bool {
     a.first <= b.last && b.first <= a.last
 }
 
-/// Whether `a` dominates `b`: as good a gain over frames inside `b`'s. A dominated spot can never
-/// win, since whatever overlaps the better one overlaps it too.
+/// Whether `a` dominates `b`, meaning it has as good a gain over frames inside `b`'s. A dominated
+/// spot can never win, since whatever overlaps the better one overlaps it too.
 fn dominates(a: &Spot, b: &Spot) -> bool {
     a.gain >= b.gain && b.first <= a.first && a.last <= b.last
 }
@@ -68,8 +68,8 @@ fn keep(spots: &mut Vec<Spot>, from: usize, spot: Spot) {
     spots.push(spot);
 }
 
-/// The spots that win, in frame order: the best first, then each next best that overlaps none
-/// chosen before it.
+/// The spots that win, in frame order (the best first, then each next best that overlaps none
+/// chosen before it).
 fn choose(mut spots: Vec<Spot>) -> Vec<Spot> {
     spots.sort_by(|a, b| b.gain.total_cmp(&a.gain));
     let mut chosen: Vec<Spot> = Vec::new();
@@ -239,7 +239,7 @@ fn align(form: &Form, first: usize, last: usize, cost: &dyn Fn(usize, usize) -> 
     let mut cost_of = vec![f32::INFINITY; states];
     cost_of[0] = cost(first, form.column(0));
     cost_of[1] = cost(first, form.column(1));
-    // back[i][s]: the state at frame first + i - 1 the best path to s at first + i came from.
+    // back[i][s] is the state at frame first + i - 1 the best path to s at first + i came from.
     let mut back = vec![vec![0u8; states]; n];
     for (i, row) in back.iter_mut().enumerate().skip(1) {
         let mut next = vec![f32::INFINITY; states];
@@ -316,7 +316,7 @@ mod tests {
     fn spotting_replaces_whole_greedy_words_when_the_word_is_close() {
         let tok = tokenizer();
         let (c, _) = Compiled::new(&special(&["kubectl"]), &tok);
-        // Greedy: "▁the ▁cube ▁control ,".
+        // The greedy text is "▁the ▁cube ▁control ,".
         let best = [6, 0, 4, 4, 0, 5, 5, 0, 7, 0];
         let greedy = ctc(&best);
         // The word's tokens are a little less likely than the greedy ones on the same frames.
