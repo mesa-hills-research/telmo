@@ -254,9 +254,9 @@ f32 weights on a quiet machine.
 | 512 | 1024 | 1024 | 93 | 416 |
 
 m is the number of encoder frames (12.5 a second). The kernel keeps a 6 x 16 tile of sums in
-registers and walks the weights in blocks of 256 inputs. f16, bf16 and 8-bit weights are widened
-in registers when all rows fit in one tile, and otherwise into a buffer that stays in L1 while
-every row reuses it.
+registers (8 x 16 with AVX-512) and walks the weights in blocks of 256 inputs. f16, bf16 and 8-bit
+weights are widened in registers when all rows fit in one tile, and otherwise into a buffer that
+stays in L1 while every row reuses it.
 
 ## Memory and loading
 

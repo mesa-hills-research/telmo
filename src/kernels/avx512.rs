@@ -11,9 +11,9 @@ use std::arch::x86_64::*;
 use super::{Act, Isa, Kernels, PANEL, scalar};
 use crate::quant::{Precision, Q8_BLOCK};
 
-/// Rows of the register tile. A row of the 16-wide panel is one register, so 12 rows use 12
-/// accumulators of the 32 registers, and 12 divides the 48 rows of an attention block.
-const TILE_ROWS: usize = 12;
+/// Rows of the register tile. A row of the 16-wide panel is one register. On a Cascade Lake
+/// Xeon 8 rows ran faster than 12, most of all on products of many rows.
+const TILE_ROWS: usize = 8;
 
 pub(crate) fn kernels() -> Kernels {
     assert!(Isa::Avx512.is_supported());
@@ -22,7 +22,7 @@ pub(crate) fn kernels() -> Kernels {
         tile_rows: TILE_ROWS,
         tile,
         widen,
-        tile_narrow: None,
+        tile_narrow: Some(tile_narrow),
         store: |acc, c, bias, act, scale, accumulate| unsafe {
             store(acc, c, bias, act, scale, accumulate)
         },
@@ -53,10 +53,6 @@ unsafe fn tile(
 ) {
     unsafe {
         match rows {
-            12 => tile_rows::<12>(k, a, lda, b, k_stride, out, load),
-            11 => tile_rows::<11>(k, a, lda, b, k_stride, out, load),
-            10 => tile_rows::<10>(k, a, lda, b, k_stride, out, load),
-            9 => tile_rows::<9>(k, a, lda, b, k_stride, out, load),
             8 => tile_rows::<8>(k, a, lda, b, k_stride, out, load),
             7 => tile_rows::<7>(k, a, lda, b, k_stride, out, load),
             6 => tile_rows::<6>(k, a, lda, b, k_stride, out, load),
@@ -65,7 +61,7 @@ unsafe fn tile(
             3 => tile_rows::<3>(k, a, lda, b, k_stride, out, load),
             2 => tile_rows::<2>(k, a, lda, b, k_stride, out, load),
             1 => tile_rows::<1>(k, a, lda, b, k_stride, out, load),
-            _ => unreachable!("tiles have 1 to 12 rows"),
+            _ => unreachable!("tiles have 1 to 8 rows"),
         }
     }
 }
@@ -106,6 +102,114 @@ unsafe fn tile_rows<const R: usize>(
     }
     for (r, acc) in acc.iter().enumerate() {
         unsafe { _mm512_storeu_ps(out.add(r * PANEL), *acc) };
+    }
+}
+
+/// # Safety
+/// As for `tile`, with `b` holding `k` runs of 16 narrow values and `scales` as `widen` takes
+/// them, and the CPU must have AVX-512F.
+unsafe fn tile_narrow(
+    precision: Precision,
+    k: usize,
+    a: *const f32,
+    lda: usize,
+    rows: usize,
+    b: *const u8,
+    scales: *const f32,
+    out: *mut f32,
+    load: bool,
+) {
+    macro_rules! rows {
+        ($p:expr) => {
+            match rows {
+                8 => tile_narrow_rows::<8, { $p }>(k, a, lda, b, scales, out, load),
+                7 => tile_narrow_rows::<7, { $p }>(k, a, lda, b, scales, out, load),
+                6 => tile_narrow_rows::<6, { $p }>(k, a, lda, b, scales, out, load),
+                5 => tile_narrow_rows::<5, { $p }>(k, a, lda, b, scales, out, load),
+                4 => tile_narrow_rows::<4, { $p }>(k, a, lda, b, scales, out, load),
+                3 => tile_narrow_rows::<3, { $p }>(k, a, lda, b, scales, out, load),
+                2 => tile_narrow_rows::<2, { $p }>(k, a, lda, b, scales, out, load),
+                1 => tile_narrow_rows::<1, { $p }>(k, a, lda, b, scales, out, load),
+                _ => unreachable!("tiles have 1 to 8 rows"),
+            }
+        };
+    }
+    // SAFETY: passed on from the caller.
+    unsafe {
+        match precision {
+            Precision::F32 => unreachable!("f32 weights use the plain tile"),
+            Precision::F16 => rows!(F16),
+            Precision::Bf16 => rows!(BF16),
+            Precision::Int8 => rows!(INT8),
+            Precision::Q8_0 => rows!(Q8_0),
+        }
+    }
+}
+
+const F16: u8 = 0;
+const BF16: u8 = 1;
+const INT8: u8 = 2;
+const Q8_0: u8 = 3;
+
+/// An `R x 16` register tile over narrow weights, each input's 16 values widened once in a
+/// register (int8 times its scale) and shared by the `R` rows. The values and the order of the
+/// fused multiply-adds are those of `widen` followed by `tile_rows`, so the sums are identical.
+#[target_feature(enable = "avx512f,fma,f16c")]
+unsafe fn tile_narrow_rows<const R: usize, const P: u8>(
+    k: usize,
+    a: *const f32,
+    lda: usize,
+    b: *const u8,
+    scales: *const f32,
+    out: *mut f32,
+    load: bool,
+) {
+    let mut acc = [_mm512_setzero_ps(); R];
+    // SAFETY: the caller guarantees `out` holds R rows of 16, `a` R rows of `k` values, `b`
+    // `k` runs of 16 values, and the scales.
+    unsafe {
+        if load {
+            for (r, acc) in acc.iter_mut().enumerate() {
+                *acc = _mm512_loadu_ps(out.add(r * PANEL));
+            }
+        }
+        let mut rows = [a; R];
+        for (r, row) in rows.iter_mut().enumerate() {
+            *row = a.add(r * lda);
+        }
+        let step = if P == F16 || P == BF16 { 32 } else { 16 };
+        let mut s = _mm512_set1_ps(1.0);
+        if P == INT8 {
+            s = _mm512_loadu_ps(scales);
+        }
+        let mut i = 0;
+        while i < k {
+            let end = if P == Q8_0 {
+                s = _mm512_loadu_ps(scales.add(i / Q8_BLOCK * PANEL));
+                (i + Q8_BLOCK).min(k)
+            } else {
+                k
+            };
+            while i < end {
+                let p = b.add(i * step);
+                let w = if P == F16 {
+                    _mm512_cvtph_ps(_mm256_loadu_si256(p as *const __m256i))
+                } else if P == BF16 {
+                    let h = _mm256_loadu_si256(p as *const __m256i);
+                    _mm512_castsi512_ps(_mm512_slli_epi32::<16>(_mm512_cvtepu16_epi32(h)))
+                } else {
+                    let q = _mm512_cvtepi8_epi32(_mm_loadu_si128(p as *const __m128i));
+                    _mm512_mul_ps(_mm512_cvtepi32_ps(q), s)
+                };
+                for r in 0..R {
+                    acc[r] = _mm512_fmadd_ps(_mm512_set1_ps(*rows[r].add(i)), w, acc[r]);
+                }
+                i += 1;
+            }
+        }
+        for (r, acc) in acc.iter().enumerate() {
+            _mm512_storeu_ps(out.add(r * PANEL), *acc);
+        }
     }
 }
 

@@ -28,7 +28,7 @@ pub(crate) mod scalar;
 /// Output columns per weight panel, the width of the matrix product's register tile.
 pub const PANEL: usize = 16;
 /// Rows of the matrix product's register tile on AVX2, on NEON and in the scalar kernels.
-/// AVX-512 uses 12 (see [`Kernels::tile_rows`]).
+/// AVX-512 uses 8 (see [`Kernels::tile_rows`]).
 pub const TILE_ROWS: usize = 6;
 /// Inputs per block of the matrix product (a 16 KB block of a weight panel).
 const KC: usize = 256;
