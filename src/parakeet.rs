@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::biasing::{self, Compiled, SpecialWords};
+use crate::biasing::{Compiled, SpecialWords, tdt_beam};
 use crate::error::{Error, Result};
 use crate::features::{FrontEnd, FrontEndConfig};
 use crate::gguf::{self, Gguf};
@@ -1303,7 +1303,7 @@ impl Parakeet {
         words: &SpecialWords,
         timings: &mut Timings,
     ) -> Vec<Token> {
-        let words = Compiled::new(words, &self.tokenizer);
+        let (words, _) = Compiled::new(words, &self.tokenizer);
         if words.is_empty() {
             return self.decode(encoded, timings, None);
         }
@@ -1349,12 +1349,8 @@ impl Parakeet {
         out
     }
 
-    /// TDT beam search that favours special words, from `state` like [`Parakeet::decode_from`].
-    /// It keeps the `words.boost.beam` best hypotheses with different text, expanding those at
-    /// the earliest frame together. Each expands to the blank and to its most likely tokens, and
-    /// to tokens of special words that their bonus makes as likely, each with every duration. A
-    /// token that continues a special word earns its bonus, which stays only if the word is
-    /// completed at a word boundary or the end of the audio.
+    /// TDT beam search that favours special words (see [`crate::biasing`]), from `state` like
+    /// [`Parakeet::decode_from`]. Token frames count from the utterance's start.
     pub(crate) fn beam_search(
         &self,
         encoded: &Encoded,
@@ -1365,19 +1361,16 @@ impl Parakeet {
     ) -> Vec<Token> {
         let c = &self.config;
         let dec = &self.decoder;
-        let k = &self.kernels;
-        let pool = &self.pool;
         let h = c.pred_hidden;
-        let frames = encoded.frames;
         let first = state.frame.saturating_sub(offset);
-        if first >= frames {
+        if first >= encoded.frames {
             return Vec::new();
         }
-        let rows = frames - first;
+        let rows = encoded.frames - first;
         let mut enc_proj = vec![0f32; rows * h];
         timings.time("enc_proj", || {
-            k.linear(
-                pool,
+            self.kernels.linear(
+                &self.pool,
                 &encoded.data[first * encoded.width..],
                 rows,
                 &dec.enc_proj,
@@ -1385,181 +1378,29 @@ impl Parakeet {
                 &Epilogue::bias(&dec.enc_proj_b),
             )
         });
-
-        let beam = words.boost.beam.max(1);
-        let (vocab, outputs) = (c.vocab, c.vocab + c.durations.len());
-        let mut hyps = vec![BeamHyp {
-            tokens: Vec::new(),
-            score: 0.0,
-            hash: 0,
-            node: biasing::ROOT,
+        let shape = tdt_beam::Shape {
+            vocab: c.vocab,
+            blank: c.blank,
+            durations: &c.durations,
+            max_symbols: c.max_symbols,
+        };
+        let start = tdt_beam::Start {
             frame: first,
             on_frame: state.on_frame,
-            lstm: state.lstm.clone(),
+            state: state.lstm.clone(),
             pred: state.pred.clone(),
-        }];
-        let mut z = Vec::new();
-        let mut logits = Vec::new();
-        let mut candidates: Vec<Candidate> = Vec::new();
-        let mut tokens: Vec<usize> = Vec::new();
-        while let Some(t) = hyps.iter().map(|h| h.frame).filter(|&f| f < frames).min() {
-            let group: Vec<usize> = (0..hyps.len()).filter(|&i| hyps[i].frame == t).collect();
-            let row = &enc_proj[(t - first) * h..(t - first + 1) * h];
-            z.clear();
-            for &i in &group {
-                z.extend(
-                    row.iter()
-                        .zip(&hyps[i].pred)
-                        .map(|(&e, &p)| (e + p).max(0.0)),
-                );
-            }
-            logits.resize(group.len() * outputs, 0.0);
-            timings.time("joint", || {
-                k.linear(
-                    pool,
-                    &z,
-                    group.len(),
-                    &dec.joint,
-                    &mut logits,
-                    &Epilogue::bias(&dec.joint_b),
-                )
-            });
-            candidates.clear();
-            for (i, hyp) in hyps.iter().enumerate().filter(|(_, h)| h.frame != t) {
-                candidates.push(Candidate {
-                    parent: i,
-                    step: Step::Keep,
-                    frame: hyp.frame,
-                    on_frame: hyp.on_frame,
-                    score: hyp.score,
-                    node: hyp.node,
-                    hash: hyp.hash,
-                    len: hyp.tokens.len(),
-                });
-            }
-            for (g, &i) in group.iter().enumerate() {
-                let hyp = &hyps[i];
-                let row = &logits[g * outputs..(g + 1) * outputs];
-                let token_lse = log_sum_exp(&row[..vocab]);
-                let duration_lse = log_sum_exp(&row[vocab..]);
-                let blank = row[c.blank] - token_lse;
-                for (&d, &dl) in c.durations.iter().zip(&row[vocab..]) {
-                    candidates.push(Candidate {
-                        parent: i,
-                        step: Step::Blank,
-                        frame: t + d.max(1),
-                        on_frame: 0,
-                        score: hyp.score + blank + dl - duration_lse,
-                        node: hyp.node,
-                        hash: hyp.hash,
-                        len: hyp.tokens.len(),
-                    });
-                }
-                top_tokens(&row[..c.blank], beam, &mut tokens);
-                let floor = tokens.last().map_or(f32::INFINITY, |&tok| row[tok]);
-                for tok in words.next_tokens(hyp.node) {
-                    let tok = tok as usize;
-                    if tok < c.blank
-                        && !tokens.contains(&tok)
-                        && row[tok] + words.step(hyp.node, tok as u32).1 >= floor
-                    {
-                        tokens.push(tok);
-                    }
-                }
-                for &tok in &tokens {
-                    let (node, bonus) = words.step(hyp.node, tok as u32);
-                    let base = hyp.score + row[tok] - token_lse + bonus;
-                    for (&d, &dl) in c.durations.iter().zip(&row[vocab..]) {
-                        let (frame, on_frame) = if d > 0 {
-                            (t + d, 0)
-                        } else if hyp.on_frame + 1 >= c.max_symbols {
-                            (t + 1, 0)
-                        } else {
-                            (t, hyp.on_frame + 1)
-                        };
-                        candidates.push(Candidate {
-                            parent: i,
-                            step: Step::Emit(tok as u32, d as u32),
-                            frame,
-                            on_frame,
-                            score: base + dl - duration_lse,
-                            node,
-                            hash: (hyp.hash ^ (tok as u64 + 1)).wrapping_mul(0x0100_0000_01b3),
-                            len: hyp.tokens.len() + 1,
-                        });
-                    }
-                }
-            }
-            // The best candidates with different text survive.
-            candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
-            let mut kept: Vec<&Candidate> = Vec::with_capacity(beam);
-            for cand in &candidates {
-                if kept.len() == beam {
-                    break;
-                }
-                if !kept
-                    .iter()
-                    .any(|k| k.hash == cand.hash && k.len == cand.len)
-                {
-                    kept.push(cand);
-                }
-            }
-            let mut next: Vec<BeamHyp> = Vec::with_capacity(kept.len());
-            let mut emitted: Vec<usize> = Vec::new();
-            for cand in kept {
-                let parent = &hyps[cand.parent];
-                let mut hyp = BeamHyp {
-                    tokens: parent.tokens.clone(),
-                    score: cand.score,
-                    hash: cand.hash,
-                    node: cand.node,
-                    frame: cand.frame,
-                    on_frame: cand.on_frame,
-                    lstm: parent.lstm.clone(),
-                    pred: parent.pred.clone(),
-                };
-                if let Step::Emit(id, duration) = cand.step {
-                    hyp.tokens.push(Token {
-                        id,
-                        frame: (offset + t) as u32,
-                        duration,
-                    });
-                    if hyp.frame < frames {
-                        emitted.push(next.len());
-                    }
-                }
-                next.push(hyp);
-            }
-            if !emitted.is_empty() {
-                let ids: Vec<usize> = emitted
-                    .iter()
-                    .map(|&i| next[i].tokens.last().expect("a token was emitted").id as usize)
-                    .collect();
-                let mut states: Vec<f32> = emitted
-                    .iter()
-                    .flat_map(|&i| next[i].lstm.iter().copied())
-                    .collect();
-                let mut preds = vec![0f32; emitted.len() * h];
-                timings.time("predict", || {
-                    self.predict_rows(&ids, &mut states, &mut preds)
-                });
-                let width = states.len() / emitted.len();
-                for (r, &i) in emitted.iter().enumerate() {
-                    next[i]
-                        .lstm
-                        .copy_from_slice(&states[r * width..(r + 1) * width]);
-                    next[i].pred.copy_from_slice(&preds[r * h..(r + 1) * h]);
-                }
-            }
-            hyps = next;
+        };
+        let mut network = Networks {
+            model: self,
+            enc_proj,
+            first,
+            timings,
+        };
+        let mut tokens = tdt_beam::beam_search(&mut network, &shape, encoded.frames, start, words);
+        for t in &mut tokens {
+            t.frame += offset as u32;
         }
-        // A path that skips speech with long blanks can score as well as the right text,
-        // so the final choice is by score per token, as NVIDIA's NeMo chooses.
-        let per_token =
-            |h: &BeamHyp| (h.score + words.finish(h.node)) / (h.tokens.len() + 1) as f32;
-        hyps.into_iter()
-            .max_by(|a, b| per_token(a).total_cmp(&per_token(b)))
-            .map_or_else(Vec::new, |h| h.tokens)
+        tokens
     }
 
     fn decode_inner(
@@ -1782,60 +1623,49 @@ fn positions(t: usize, d: usize) -> Vec<f32> {
     out
 }
 
-/// A hypothesis of the biased beam search.
-struct BeamHyp {
-    tokens: Vec<Token>,
-    /// The path's log probability plus the bonuses it holds.
-    score: f32,
-    /// A hash of the token ids, for telling texts apart.
-    hash: u64,
-    /// Where the hypothesis is in the tree of special words.
-    node: u32,
-    /// The frame (in the encoded window) the next joint step reads.
-    frame: usize,
-    on_frame: usize,
-    lstm: Vec<f32>,
-    pred: Vec<f32>,
+/// Parakeet's joint and prediction networks as the biased beam search reads them, with the
+/// encoder frames from `first` on already projected for the joint.
+struct Networks<'a> {
+    model: &'a Parakeet,
+    enc_proj: Vec<f32>,
+    first: usize,
+    timings: &'a mut Timings,
 }
 
-/// What a candidate does to the hypothesis it comes from.
-#[derive(Clone, Copy)]
-enum Step {
-    /// Nothing, as it waits at a later frame.
-    Keep,
-    Blank,
-    /// Emits a token with a duration.
-    Emit(u32, u32),
-}
+impl tdt_beam::TdtNetwork for Networks<'_> {
+    fn state_width(&self) -> usize {
+        let c = &self.model.config;
+        c.pred_layers * 2 * c.pred_hidden
+    }
 
-/// A hypothesis the beam search may keep, described by its parent and a step.
-struct Candidate {
-    parent: usize,
-    step: Step,
-    frame: usize,
-    on_frame: usize,
-    score: f32,
-    node: u32,
-    hash: u64,
-    /// The number of tokens.
-    len: usize,
-}
+    fn pred_width(&self) -> usize {
+        self.model.config.pred_hidden
+    }
 
-fn log_sum_exp(v: &[f32]) -> f32 {
-    let max = v.iter().fold(f32::NEG_INFINITY, |m, &x| m.max(x));
-    max + v.iter().map(|&x| (x - max).exp()).sum::<f32>().ln()
-}
+    fn joint(&mut self, frame: usize, preds: &[f32], out: &mut [f32]) {
+        let m = self.model;
+        let h = m.config.pred_hidden;
+        let row = &self.enc_proj[(frame - self.first) * h..(frame - self.first + 1) * h];
+        let z: Vec<f32> = preds
+            .chunks_exact(h)
+            .flat_map(|p| row.iter().zip(p).map(|(&e, &p)| (e + p).max(0.0)))
+            .collect();
+        self.timings.time("joint", || {
+            m.kernels.linear(
+                &m.pool,
+                &z,
+                preds.len() / h,
+                &m.decoder.joint,
+                out,
+                &Epilogue::bias(&m.decoder.joint_b),
+            )
+        });
+    }
 
-/// The indices of the `n` largest values, largest first, the first of equals before the others.
-fn top_tokens(v: &[f32], n: usize, out: &mut Vec<usize>) {
-    out.clear();
-    for (i, &x) in v.iter().enumerate() {
-        if out.len() == n && x <= v[out[n - 1]] {
-            continue;
-        }
-        let at = out.partition_point(|&j| v[j] >= x);
-        out.insert(at, i);
-        out.truncate(n);
+    fn predict(&mut self, tokens: &[usize], states: &mut [f32], preds: &mut [f32]) {
+        let m = self.model;
+        self.timings
+            .time("predict", || m.predict_rows(tokens, states, preds));
     }
 }
 

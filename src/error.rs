@@ -20,6 +20,8 @@ pub enum Error {
     Wav(String),
     /// The model files don't match the model's architecture, or the input doesn't fit the model.
     Model(String),
+    /// A setting is out of its range.
+    Setting(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -42,7 +44,7 @@ impl fmt::Display for Error {
             }
             Error::SafeTensors(message) => write!(f, "Bad safetensors file. {message}"),
             Error::Wav(message) => write!(f, "Bad WAV file. {message}"),
-            Error::Model(message) => f.write_str(message),
+            Error::Model(message) | Error::Setting(message) => f.write_str(message),
         }
     }
 }

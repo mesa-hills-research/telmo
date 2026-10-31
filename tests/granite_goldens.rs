@@ -251,19 +251,23 @@ fn the_tokenizer_encodes_like_the_reference() {
 fn special_words_leave_right_transcripts_as_they_are() {
     let model = model(None, 6);
     // The golden clips' rarer words, and words that don't occur in them.
-    let words: SpecialWords = [
-        "Southey",
-        "Montesquieu",
-        "Bertie",
-        "Hamburg",
-        "kubectl",
-        "nginx",
-        "serde",
-        "tokio",
-        "Fauchelevent",
-    ]
-    .into_iter()
-    .collect();
+    let words: SpecialWords = {
+        let mut words = SpecialWords::new();
+        for word in [
+            "Southey",
+            "Montesquieu",
+            "Bertie",
+            "Hamburg",
+            "kubectl",
+            "nginx",
+            "serde",
+            "tokio",
+            "Fauchelevent",
+        ] {
+            words.add(word).unwrap();
+        }
+        words
+    };
     for clip in clips() {
         let plain = model.transcribe(&clip.samples).unwrap().text;
         let biased = model.transcribe_biased(&clip.samples, &words).unwrap().text;

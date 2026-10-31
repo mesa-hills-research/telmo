@@ -134,19 +134,23 @@ fn check(var: &str, special: &SpecialWords) {
 
 /// The golden clips' rarer words, and words that don't occur in them.
 fn special_words() -> SpecialWords {
-    [
-        "Southey",
-        "Montesquieu",
-        "Bertie",
-        "Hamburg",
-        "kubectl",
-        "nginx",
-        "serde",
-        "tokio",
-        "Fauchelevent",
-    ]
-    .into_iter()
-    .collect()
+    {
+        let mut words = SpecialWords::new();
+        for word in [
+            "Southey",
+            "Montesquieu",
+            "Bertie",
+            "Hamburg",
+            "kubectl",
+            "nginx",
+            "serde",
+            "tokio",
+            "Fauchelevent",
+        ] {
+            words.add(word).unwrap();
+        }
+        words
+    }
 }
 
 #[test]

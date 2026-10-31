@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::biasing::SpecialWords;
+use crate::biasing::{Compiled, Rejection, SpecialWords};
 use crate::error::{Error, Result};
 use crate::granite::{self, Granite};
 use crate::json;
@@ -165,6 +165,12 @@ impl Model {
             Model::Parakeet(m) => m.transcribe_biased(samples, words),
             Model::Granite(m) => m.transcribe_biased(samples, words),
         }
+    }
+
+    /// The special words with no spelling this model's vocabulary can use, which decoding leaves
+    /// out, and why.
+    pub fn unusable_special_words(&self, words: &SpecialWords) -> Vec<(String, Rejection)> {
+        Compiled::new(words, self.tokenizer()).1
     }
 
     /// The model's tokenizer.

@@ -54,7 +54,7 @@ pub mod tokenizer;
 pub mod vad;
 pub mod wav;
 
-pub use biasing::SpecialWords;
+pub use biasing::{Boost, Rejection, SpecialWords};
 pub use error::{Error, Result};
 pub use granite::Granite;
 pub use granite_stream::GraniteStream;

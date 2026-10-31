@@ -586,7 +586,7 @@ impl Granite {
         words: &SpecialWords,
         timings: &mut Timings,
     ) -> Vec<Token> {
-        let words = Compiled::new(words, &self.tokenizer);
+        let (words, _) = Compiled::new(words, &self.tokenizer);
         let columns = (!words.is_empty()).then_some(words.tokens.as_slice());
         let (ids, scores) = timed(timings, "ctc_head", || {
             self.frame_scores(&encoded.data, encoded.frames, columns)
@@ -596,7 +596,7 @@ impl Granite {
             return tokens;
         }
         timed(timings, "spotting", || {
-            biasing::spot(&words, &self.tokenizer, &tokens, &scores, 0)
+            biasing::spot(&words, &self.tokenizer, &tokens, &scores, 0).0
         })
     }
 

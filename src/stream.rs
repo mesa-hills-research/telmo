@@ -418,7 +418,7 @@ impl UtteranceStream {
                 duration: (h.end_frame - h.frame) as u32,
             })
             .collect();
-        let tokens = granite::timed(&mut self.timings, "spotting", || {
+        let (tokens, _) = granite::timed(&mut self.timings, "spotting", || {
             biasing::spot(
                 words,
                 model.tokenizer(),
@@ -907,7 +907,7 @@ impl Stream {
 
 /// The special words in the model's tokens, or none if they leave nothing to favour.
 fn compile(model: &Model, words: &SpecialWords) -> Option<Arc<Compiled>> {
-    Some(Compiled::new(words, model.tokenizer()))
+    Some(Compiled::new(words, model.tokenizer()).0)
         .filter(|w| !w.is_empty())
         .map(Arc::new)
 }

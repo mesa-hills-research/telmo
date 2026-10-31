@@ -13,14 +13,13 @@
 
 use std::path::{Path, PathBuf};
 
-use telmo::biasing::Boost;
 use telmo::features::{FrontEnd, FrontEndConfig};
 use telmo::json::{self, Value};
 use telmo::kernels::Isa;
 use telmo::parakeet::{DecodeTrace, Timings};
 use telmo::safetensors::SafeTensors;
 use telmo::tokenizer::Tokenizer;
-use telmo::{Options, Parakeet, Precision, SpecialWords};
+use telmo::{Boost, Options, Parakeet, Precision, SpecialWords};
 
 /// Features may differ by this much (after normalization to unit variance). The reference
 /// computes its STFT in f32, and the rounding shows most in the lowest mel filters, which sum
@@ -304,16 +303,20 @@ const SPECIAL_WORDS: [&str; 9] = [
     "Fauchelevent",
 ];
 
+fn special_words() -> SpecialWords {
+    let mut words = SpecialWords::new();
+    for word in SPECIAL_WORDS {
+        words.add(word).unwrap();
+    }
+    words
+}
+
 #[test]
 #[ignore = "needs the model files, see the top of this file"]
 fn a_beam_of_one_without_a_bonus_decodes_greedily() {
     let model = model(None, 6);
-    let mut words: SpecialWords = SPECIAL_WORDS.into_iter().collect();
-    words.boost = Boost {
-        bonus: 0.0,
-        beam: 1,
-        ..Boost::default()
-    };
+    let mut words = special_words();
+    words.set_boost(Boost::new(0.0, 1, 4.0, 2.0).unwrap());
     for clip in clips() {
         let f = model.features(&clip.samples).unwrap();
         let encoded = model.encode(
@@ -332,7 +335,7 @@ fn a_beam_of_one_without_a_bonus_decodes_greedily() {
 #[ignore = "needs the model files, see the top of this file"]
 fn special_words_leave_right_transcripts_as_they_are() {
     let model = model(None, 6);
-    let words: SpecialWords = SPECIAL_WORDS.into_iter().collect();
+    let words = special_words();
     for clip in clips() {
         let plain = model.transcribe(&clip.samples).unwrap().text;
         let biased = model.transcribe_biased(&clip.samples, &words).unwrap().text;
