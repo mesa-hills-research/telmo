@@ -18,7 +18,7 @@ use telmo::kernels::Isa;
 use telmo::parakeet::Timings;
 use telmo::safetensors::SafeTensors;
 use telmo::tokenizer::Tokenizer;
-use telmo::{Options, Precision};
+use telmo::{Options, Precision, SpecialWords};
 
 /// Features may differ by this much. The reference computes its STFT and mel sums in f32.
 const FEATURES_MAX_ABS: f32 = 5e-5;
@@ -243,6 +243,38 @@ fn the_tokenizer_encodes_like_the_reference() {
             .map(|i| i.as_u64().unwrap() as u32)
             .collect();
         assert_eq!(tokenizer.encode(text), want, "{text}");
+    }
+}
+
+#[test]
+#[ignore = "needs the model files, see the top of this file"]
+fn special_words_leave_right_transcripts_as_they_are() {
+    let model = model(None, 6);
+    // The golden clips' rarer words, and words that don't occur in them.
+    let words: SpecialWords = [
+        "Southey",
+        "Montesquieu",
+        "Bertie",
+        "Hamburg",
+        "kubectl",
+        "nginx",
+        "serde",
+        "tokio",
+        "Fauchelevent",
+    ]
+    .into_iter()
+    .collect();
+    for clip in clips() {
+        let plain = model.transcribe(&clip.samples).unwrap().text;
+        let biased = model.transcribe_biased(&clip.samples, &words).unwrap().text;
+        // A beam search may find a likelier path that differs in case or punctuation.
+        let normalized = |text: &str| -> String {
+            text.chars()
+                .filter(|c| c.is_alphanumeric() || *c == ' ')
+                .flat_map(char::to_lowercase)
+                .collect()
+        };
+        assert_eq!(normalized(&biased), normalized(&plain), "{}", clip.id);
     }
 }
 

@@ -7,6 +7,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::biasing::{self, Compiled, SpecialWords};
 use crate::error::{Error, Result};
 use crate::features::{FrontEnd, FrontEndConfig};
 use crate::gguf::{self, Gguf};
@@ -839,6 +840,12 @@ impl Parakeet {
 
     /// Transcribes 16 kHz mono samples.
     pub fn transcribe(&self, samples: &[f32]) -> Result<Transcript> {
+        self.transcribe_biased(samples, &SpecialWords::new())
+    }
+
+    /// Transcribes 16 kHz mono samples, favouring special words with a beam search. With no
+    /// words, it decodes greedily as [`Parakeet::transcribe`] does.
+    pub fn transcribe_biased(&self, samples: &[f32], words: &SpecialWords) -> Result<Transcript> {
         let mut timings = Timings::default();
         let features = timings.time("features", || self.front_end.compute(samples))?;
         let encoded = self.encode(
@@ -847,7 +854,7 @@ impl Parakeet {
             &mut timings,
             &mut |_, _, _| {},
         );
-        let tokens = self.decode(&encoded, &mut timings, None);
+        let tokens = self.decode_biased(&encoded, words, &mut timings);
         let ids: Vec<u32> = tokens.iter().map(|t| t.id).collect();
         let text = timings.time("detokenize", || self.tokenizer.decode(&ids));
         Ok(Transcript {
@@ -1288,6 +1295,22 @@ impl Parakeet {
         tokens
     }
 
+    /// Decodes with a beam search that favours special words, as
+    /// [`Parakeet::transcribe_biased`] does. With no words, it's [`Parakeet::decode`].
+    pub fn decode_biased(
+        &self,
+        encoded: &Encoded,
+        words: &SpecialWords,
+        timings: &mut Timings,
+    ) -> Vec<Token> {
+        let words = Compiled::new(words, &self.tokenizer);
+        if words.is_empty() {
+            return self.decode(encoded, timings, None);
+        }
+        let start = self.initial_decoder_state(timings);
+        self.beam_search(encoded, 0, &start, &words, timings)
+    }
+
     /// The decoder's state before any token, as NeMo starts it (the blank token's input).
     pub fn initial_decoder_state(&self, timings: &mut Timings) -> DecoderState {
         let c = &self.config;
@@ -1324,6 +1347,219 @@ impl Parakeet {
             &mut |token, after| out.push((token, after.clone())),
         );
         out
+    }
+
+    /// TDT beam search that favours special words, from `state` like [`Parakeet::decode_from`].
+    /// It keeps the `words.boost.beam` best hypotheses with different text, expanding those at
+    /// the earliest frame together. Each expands to the blank and to its most likely tokens, and
+    /// to tokens of special words that their bonus makes as likely, each with every duration. A
+    /// token that continues a special word earns its bonus, which stays only if the word is
+    /// completed at a word boundary or the end of the audio.
+    pub(crate) fn beam_search(
+        &self,
+        encoded: &Encoded,
+        offset: usize,
+        state: &DecoderState,
+        words: &Compiled,
+        timings: &mut Timings,
+    ) -> Vec<Token> {
+        let c = &self.config;
+        let dec = &self.decoder;
+        let k = &self.kernels;
+        let pool = &self.pool;
+        let h = c.pred_hidden;
+        let frames = encoded.frames;
+        let first = state.frame.saturating_sub(offset);
+        if first >= frames {
+            return Vec::new();
+        }
+        let rows = frames - first;
+        let mut enc_proj = vec![0f32; rows * h];
+        timings.time("enc_proj", || {
+            k.linear(
+                pool,
+                &encoded.data[first * encoded.width..],
+                rows,
+                &dec.enc_proj,
+                &mut enc_proj,
+                &Epilogue::bias(&dec.enc_proj_b),
+            )
+        });
+
+        let beam = words.boost.beam.max(1);
+        let (vocab, outputs) = (c.vocab, c.vocab + c.durations.len());
+        let mut hyps = vec![BeamHyp {
+            tokens: Vec::new(),
+            score: 0.0,
+            hash: 0,
+            node: biasing::ROOT,
+            frame: first,
+            on_frame: state.on_frame,
+            lstm: state.lstm.clone(),
+            pred: state.pred.clone(),
+        }];
+        let mut z = Vec::new();
+        let mut logits = Vec::new();
+        let mut candidates: Vec<Candidate> = Vec::new();
+        let mut tokens: Vec<usize> = Vec::new();
+        while let Some(t) = hyps.iter().map(|h| h.frame).filter(|&f| f < frames).min() {
+            let group: Vec<usize> = (0..hyps.len()).filter(|&i| hyps[i].frame == t).collect();
+            let row = &enc_proj[(t - first) * h..(t - first + 1) * h];
+            z.clear();
+            for &i in &group {
+                z.extend(
+                    row.iter()
+                        .zip(&hyps[i].pred)
+                        .map(|(&e, &p)| (e + p).max(0.0)),
+                );
+            }
+            logits.resize(group.len() * outputs, 0.0);
+            timings.time("joint", || {
+                k.linear(
+                    pool,
+                    &z,
+                    group.len(),
+                    &dec.joint,
+                    &mut logits,
+                    &Epilogue::bias(&dec.joint_b),
+                )
+            });
+            candidates.clear();
+            for (i, hyp) in hyps.iter().enumerate().filter(|(_, h)| h.frame != t) {
+                candidates.push(Candidate {
+                    parent: i,
+                    step: Step::Keep,
+                    frame: hyp.frame,
+                    on_frame: hyp.on_frame,
+                    score: hyp.score,
+                    node: hyp.node,
+                    hash: hyp.hash,
+                    len: hyp.tokens.len(),
+                });
+            }
+            for (g, &i) in group.iter().enumerate() {
+                let hyp = &hyps[i];
+                let row = &logits[g * outputs..(g + 1) * outputs];
+                let token_lse = log_sum_exp(&row[..vocab]);
+                let duration_lse = log_sum_exp(&row[vocab..]);
+                let blank = row[c.blank] - token_lse;
+                for (&d, &dl) in c.durations.iter().zip(&row[vocab..]) {
+                    candidates.push(Candidate {
+                        parent: i,
+                        step: Step::Blank,
+                        frame: t + d.max(1),
+                        on_frame: 0,
+                        score: hyp.score + blank + dl - duration_lse,
+                        node: hyp.node,
+                        hash: hyp.hash,
+                        len: hyp.tokens.len(),
+                    });
+                }
+                top_tokens(&row[..c.blank], beam, &mut tokens);
+                let floor = tokens.last().map_or(f32::INFINITY, |&tok| row[tok]);
+                for tok in words.next_tokens(hyp.node) {
+                    let tok = tok as usize;
+                    if tok < c.blank
+                        && !tokens.contains(&tok)
+                        && row[tok] + words.step(hyp.node, tok as u32).1 >= floor
+                    {
+                        tokens.push(tok);
+                    }
+                }
+                for &tok in &tokens {
+                    let (node, bonus) = words.step(hyp.node, tok as u32);
+                    let base = hyp.score + row[tok] - token_lse + bonus;
+                    for (&d, &dl) in c.durations.iter().zip(&row[vocab..]) {
+                        let (frame, on_frame) = if d > 0 {
+                            (t + d, 0)
+                        } else if hyp.on_frame + 1 >= c.max_symbols {
+                            (t + 1, 0)
+                        } else {
+                            (t, hyp.on_frame + 1)
+                        };
+                        candidates.push(Candidate {
+                            parent: i,
+                            step: Step::Emit(tok as u32, d as u32),
+                            frame,
+                            on_frame,
+                            score: base + dl - duration_lse,
+                            node,
+                            hash: (hyp.hash ^ (tok as u64 + 1)).wrapping_mul(0x0100_0000_01b3),
+                            len: hyp.tokens.len() + 1,
+                        });
+                    }
+                }
+            }
+            // The best candidates with different text survive.
+            candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+            let mut kept: Vec<&Candidate> = Vec::with_capacity(beam);
+            for cand in &candidates {
+                if kept.len() == beam {
+                    break;
+                }
+                if !kept
+                    .iter()
+                    .any(|k| k.hash == cand.hash && k.len == cand.len)
+                {
+                    kept.push(cand);
+                }
+            }
+            let mut next: Vec<BeamHyp> = Vec::with_capacity(kept.len());
+            let mut emitted: Vec<usize> = Vec::new();
+            for cand in kept {
+                let parent = &hyps[cand.parent];
+                let mut hyp = BeamHyp {
+                    tokens: parent.tokens.clone(),
+                    score: cand.score,
+                    hash: cand.hash,
+                    node: cand.node,
+                    frame: cand.frame,
+                    on_frame: cand.on_frame,
+                    lstm: parent.lstm.clone(),
+                    pred: parent.pred.clone(),
+                };
+                if let Step::Emit(id, duration) = cand.step {
+                    hyp.tokens.push(Token {
+                        id,
+                        frame: (offset + t) as u32,
+                        duration,
+                    });
+                    if hyp.frame < frames {
+                        emitted.push(next.len());
+                    }
+                }
+                next.push(hyp);
+            }
+            if !emitted.is_empty() {
+                let ids: Vec<usize> = emitted
+                    .iter()
+                    .map(|&i| next[i].tokens.last().expect("a token was emitted").id as usize)
+                    .collect();
+                let mut states: Vec<f32> = emitted
+                    .iter()
+                    .flat_map(|&i| next[i].lstm.iter().copied())
+                    .collect();
+                let mut preds = vec![0f32; emitted.len() * h];
+                timings.time("predict", || {
+                    self.predict_rows(&ids, &mut states, &mut preds)
+                });
+                let width = states.len() / emitted.len();
+                for (r, &i) in emitted.iter().enumerate() {
+                    next[i]
+                        .lstm
+                        .copy_from_slice(&states[r * width..(r + 1) * width]);
+                    next[i].pred.copy_from_slice(&preds[r * h..(r + 1) * h]);
+                }
+            }
+            hyps = next;
+        }
+        // A path that skips speech with long blanks can score as well as the right text,
+        // so the final choice is by score per token, as NVIDIA's NeMo chooses.
+        let per_token =
+            |h: &BeamHyp| (h.score + words.finish(h.node)) / (h.tokens.len() + 1) as f32;
+        hyps.into_iter()
+            .max_by(|a, b| per_token(a).total_cmp(&per_token(b)))
+            .map_or_else(Vec::new, |h| h.tokens)
     }
 
     fn decode_inner(
@@ -1432,40 +1668,63 @@ impl Parakeet {
     /// Runs the prediction network on one token, updating the LSTM state and writing the
     /// projected output to `pred`.
     fn predict(&self, token: usize, state: &mut [f32], pred: &mut [f32]) {
+        self.predict_rows(&[token], state, pred);
+    }
+
+    /// Runs the prediction network on several tokens at once, each with its own LSTM state
+    /// (`[tokens, layers * 2 * hidden]`) and output (`[tokens, hidden]`), so the weights are read
+    /// once for all of them.
+    fn predict_rows(&self, tokens: &[usize], states: &mut [f32], preds: &mut [f32]) {
         let c = &self.config;
         let dec = &self.decoder;
         let k = &self.kernels;
         let h = c.pred_hidden;
-        let mut input = vec![0f32; 2 * h];
-        input[..h].copy_from_slice(&dec.embedding[token * h..(token + 1) * h]);
-        let mut gates = vec![0f32; 4 * h];
+        let (rows, width) = (tokens.len(), c.pred_layers * 2 * h);
+        let mut input = vec![0f32; rows * 2 * h];
+        for (r, &token) in tokens.iter().enumerate() {
+            input[r * 2 * h..r * 2 * h + h]
+                .copy_from_slice(&dec.embedding[token * h..(token + 1) * h]);
+        }
+        let mut gates = vec![0f32; rows * 4 * h];
         for (l, layer) in dec.lstm.iter().enumerate() {
-            let (hs, cs) = state[l * 2 * h..(l + 1) * 2 * h].split_at_mut(h);
-            input[h..].copy_from_slice(hs);
+            for r in 0..rows {
+                let hs = &states[r * width + l * 2 * h..r * width + l * 2 * h + h];
+                input[r * 2 * h + h..(r + 1) * 2 * h].copy_from_slice(hs);
+            }
             k.linear(
                 &self.pool,
                 &input,
-                1,
+                rows,
                 &layer.w,
                 &mut gates,
                 &Epilogue::bias(&layer.b),
             );
-            for j in 0..h {
-                let i = sigmoid(gates[j]);
-                let f = sigmoid(gates[h + j]);
-                let g = gates[2 * h + j].tanh();
-                let o = sigmoid(gates[3 * h + j]);
-                cs[j] = f * cs[j] + i * g;
-                hs[j] = o * cs[j].tanh();
+            for r in 0..rows {
+                let state = &mut states[r * width + l * 2 * h..r * width + (l + 1) * 2 * h];
+                let (hs, cs) = state.split_at_mut(h);
+                let gates = &gates[r * 4 * h..(r + 1) * 4 * h];
+                for j in 0..h {
+                    let i = sigmoid(gates[j]);
+                    let f = sigmoid(gates[h + j]);
+                    let g = gates[2 * h + j].tanh();
+                    let o = sigmoid(gates[3 * h + j]);
+                    cs[j] = f * cs[j] + i * g;
+                    hs[j] = o * cs[j].tanh();
+                }
+                input[r * 2 * h..r * 2 * h + h].copy_from_slice(hs);
             }
-            input[..h].copy_from_slice(hs);
         }
+        let last: Vec<f32> = input
+            .chunks_exact(2 * h)
+            .flat_map(|r| &r[..h])
+            .copied()
+            .collect();
         k.linear(
             &self.pool,
-            &input[..h],
-            1,
+            &last,
+            rows,
             &dec.pred_proj,
-            pred,
+            preds,
             &Epilogue::bias(&dec.pred_proj_b),
         );
     }
@@ -1521,6 +1780,63 @@ fn positions(t: usize, d: usize) -> Vec<f32> {
         }
     }
     out
+}
+
+/// A hypothesis of the biased beam search.
+struct BeamHyp {
+    tokens: Vec<Token>,
+    /// The path's log probability plus the bonuses it holds.
+    score: f32,
+    /// A hash of the token ids, for telling texts apart.
+    hash: u64,
+    /// Where the hypothesis is in the tree of special words.
+    node: u32,
+    /// The frame (in the encoded window) the next joint step reads.
+    frame: usize,
+    on_frame: usize,
+    lstm: Vec<f32>,
+    pred: Vec<f32>,
+}
+
+/// What a candidate does to the hypothesis it comes from.
+#[derive(Clone, Copy)]
+enum Step {
+    /// Nothing, as it waits at a later frame.
+    Keep,
+    Blank,
+    /// Emits a token with a duration.
+    Emit(u32, u32),
+}
+
+/// A hypothesis the beam search may keep, described by its parent and a step.
+struct Candidate {
+    parent: usize,
+    step: Step,
+    frame: usize,
+    on_frame: usize,
+    score: f32,
+    node: u32,
+    hash: u64,
+    /// The number of tokens.
+    len: usize,
+}
+
+fn log_sum_exp(v: &[f32]) -> f32 {
+    let max = v.iter().fold(f32::NEG_INFINITY, |m, &x| m.max(x));
+    max + v.iter().map(|&x| (x - max).exp()).sum::<f32>().ln()
+}
+
+/// The indices of the `n` largest values, largest first, the first of equals before the others.
+fn top_tokens(v: &[f32], n: usize, out: &mut Vec<usize>) {
+    out.clear();
+    for (i, &x) in v.iter().enumerate() {
+        if out.len() == n && x <= v[out[n - 1]] {
+            continue;
+        }
+        let at = out.partition_point(|&j| v[j] >= x);
+        out.insert(at, i);
+        out.truncate(n);
+    }
 }
 
 fn sigmoid(x: f32) -> f32 {
