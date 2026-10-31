@@ -36,9 +36,16 @@ pub enum Error {
     Checksum,
 }
 
+/// How many times a download that stopped after receiving something resumes in the same run.
+const RESUMES: u32 = 5;
+
+/// The wait before the first of those resumes, which grows by as much before each one after it.
+const RESUME_DELAY: Duration = Duration::from_millis(if cfg!(test) { 10 } else { 1000 });
+
 /// Makes `path` the file at `url`, `size` bytes with the SHA-256 `sha256` in hex. A shorter file
-/// is resumed from where it ends, and a file of the right size is only checked. A file that
-/// doesn't match is deleted. Progress shows while it downloads when stderr is a terminal.
+/// is resumed from where it ends, and a file of the right size is only checked. A download that
+/// stops after receiving something resumes a few times. A file that doesn't match is deleted.
+/// Progress shows while it downloads when stderr is a terminal.
 pub fn fetch(
     agent: &ureq::Agent,
     url: &str,
@@ -46,8 +53,30 @@ pub fn fetch(
     size: u64,
     sha256: &str,
 ) -> Result<(), Error> {
-    if fs::metadata(path).map_or(0, |m| m.len()) != size {
-        download(agent, url, path, size)?;
+    let length = || fs::metadata(path).map_or(0, |m| m.len());
+    if length() != size {
+        let name = path.file_name().unwrap_or(path.as_os_str()).display();
+        match megabytes(size) {
+            0 => eprintln!("{name}"),
+            mb => eprintln!("{name} ({mb} MB)"),
+        }
+        let mut resumes = 0;
+        loop {
+            let before = length();
+            match download(agent, url, path, size) {
+                Ok(()) => break,
+                Err(Error::Failed {
+                    reason,
+                    retry: true,
+                }) if resumes < RESUMES && length() > before => {
+                    resumes += 1;
+                    let at = megabytes(length());
+                    eprintln!("The download stopped ({reason}). Resuming from {at} MB.");
+                    std::thread::sleep(RESUME_DELAY * resumes);
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
     let digest = sha256::file_hex(path)
         .map_err(|e| Error::File(format!("Couldn't read {} ({e}).", path.display())))?;
@@ -59,11 +88,6 @@ pub fn fetch(
 }
 
 fn download(agent: &ureq::Agent, url: &str, path: &Path, size: u64) -> Result<(), Error> {
-    let name = path.file_name().unwrap_or(path.as_os_str()).display();
-    match megabytes(size) {
-        0 => eprintln!("{name}"),
-        mb => eprintln!("{name} ({mb} MB)"),
-    }
     // A file longer than it should be can't be resumed.
     let have = fs::metadata(path).map_or(0, |m| m.len());
     let resume_at = if have < size { have } else { 0 };
@@ -82,6 +106,14 @@ fn download(agent: &ureq::Agent, url: &str, path: &Path, size: u64) -> Result<()
                 reason: "the server sent a part that wasn't asked for".into(),
                 retry: false,
             });
+        }
+        // The server has less than the partial file, so that file can't be resumed.
+        416 if resume_at > 0 => {
+            drop(response);
+            fs::remove_file(path)
+                .map_err(|e| Error::File(format!("Couldn't delete {} ({e}).", path.display())))?;
+            eprintln!("The server couldn't resume the download, so Telmo starts it over.");
+            return download(agent, url, path, size);
         }
         code => {
             return Err(Error::Failed {
@@ -232,9 +264,9 @@ mod tests {
         Body,
         /// Sends the whole body and ignores a Range header.
         IgnoreRange,
-        /// Sends the headers for the whole body, then `n` bytes, then closes the connection.
+        /// Answers like `Body`, but closes the connection after `n` bytes.
         DropAfter(usize),
-        /// Sends the headers and `n` bytes, then nothing while the connection stays open.
+        /// Answers like `Body`, but sends nothing after `n` bytes until the client hangs up.
         StallAfter(usize),
         /// Redirects to the same path with `?moved` appended.
         Redirect,
@@ -308,35 +340,36 @@ mod tests {
             // The client may hang up first, as when it gives up on a stall.
             let _ = stream.write_all(bytes);
         };
+        // The part a Range header asks for, or the whole body.
+        let (status, part, content_range) = match first {
+            Some(first) => (
+                "206 Partial Content",
+                &body[first..],
+                format!(
+                    "Content-Range: bytes {first}-{}/{}\r\n",
+                    body.len() - 1,
+                    body.len()
+                ),
+            ),
+            None => ("200 OK", body, String::new()),
+        };
         match reply {
-            Reply::Body => match first {
-                Some(first) => {
-                    let part = &body[first..];
-                    let range = format!(
-                        "Content-Range: bytes {first}-{}/{}\r\n",
-                        body.len() - 1,
-                        body.len()
-                    );
-                    send(head("206 Partial Content", part, &range).as_bytes());
-                    send(part);
-                }
-                None => {
-                    send(head("200 OK", body, "").as_bytes());
-                    send(body);
-                }
-            },
+            Reply::Body => {
+                send(head(status, part, &content_range).as_bytes());
+                send(part);
+            }
             Reply::IgnoreRange => {
                 send(head("200 OK", body, "").as_bytes());
                 send(body);
             }
             Reply::DropAfter(n) => {
-                send(head("200 OK", body, "").as_bytes());
-                send(&body[..n]);
+                send(head(status, part, &content_range).as_bytes());
+                send(&part[..n]);
             }
             Reply::StallAfter(n) => {
-                send(head("200 OK", body, "").as_bytes());
-                send(&body[..n]);
-                thread::sleep(Duration::from_secs(3));
+                send(head(status, part, &content_range).as_bytes());
+                send(&part[..n]);
+                let _ = reader.read(&mut [0]);
             }
             Reply::Redirect => {
                 let location = format!("Location: {path}?moved\r\n");
@@ -358,6 +391,13 @@ mod tests {
         sha256::hex(&sha.finish())
     }
 
+    fn failure(reason: &str, retry: bool) -> Result<(), Error> {
+        Err(Error::Failed {
+            reason: reason.into(),
+            retry,
+        })
+    }
+
     fn fetch_from(server: &Server, path: &Path, body: &[u8]) -> Result<(), Error> {
         let agent = agent(Duration::from_secs(1));
         fetch(&agent, &server.url, path, body.len() as u64, &digest(body))
@@ -376,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn resumes_after_a_dropped_connection_across_a_redirect() {
+    fn resumes_at_once_after_a_dropped_connection_across_a_redirect() {
         let dir = crate::tests::temp_dir("download-resume");
         let path = dir.join("model.bin");
         let body = body();
@@ -384,16 +424,77 @@ mod tests {
             body.clone(),
             vec![Reply::DropAfter(100_000), Reply::Redirect, Reply::Body],
         );
-        let dropped = Error::Failed {
-            reason: "the connection closed early".into(),
-            retry: true,
-        };
-        assert_eq!(fetch_from(&server, &path, &body), Err(dropped));
-        assert_eq!(fs::read(&path).unwrap(), &body[..100_000], "kept to resume");
         assert_eq!(fetch_from(&server, &path, &body), Ok(()));
         assert_eq!(fs::read(&path).unwrap(), body);
         let resume = Some("bytes=100000-".to_string());
         assert_eq!(server.ranges(), [None, resume.clone(), resume]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_resume_that_gets_nothing_stops_and_the_next_run_goes_on() {
+        let dir = crate::tests::temp_dir("download-rerun");
+        let path = dir.join("model.bin");
+        let body = body();
+        let server = Server::start(
+            body.clone(),
+            vec![Reply::DropAfter(100_000), Reply::Status(503)],
+        );
+        assert_eq!(
+            fetch_from(&server, &path, &body),
+            failure("the server answered 503 Service Unavailable", true)
+        );
+        assert_eq!(fs::read(&path).unwrap(), &body[..100_000], "kept to resume");
+        let resume = Some("bytes=100000-".to_string());
+        assert_eq!(server.ranges(), [None, resume.clone()]);
+
+        let server = Server::start(body.clone(), vec![Reply::Body]);
+        assert_eq!(fetch_from(&server, &path, &body), Ok(()));
+        assert_eq!(fs::read(&path).unwrap(), body);
+        assert_eq!(server.ranges(), [resume]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn gives_up_after_five_resumes() {
+        let dir = crate::tests::temp_dir("download-give-up");
+        let path = dir.join("model.bin");
+        let body = body();
+        let server = Server::start(
+            body.clone(),
+            (0..6).map(|_| Reply::DropAfter(10_000)).collect(),
+        );
+        assert_eq!(
+            fetch_from(&server, &path, &body),
+            failure("the connection closed early", true)
+        );
+        assert_eq!(fs::read(&path).unwrap(), &body[..60_000]);
+        let ranges = (0..6)
+            .map(|i| (i > 0).then(|| format!("bytes={}-", i * 10_000)))
+            .collect::<Vec<_>>();
+        assert_eq!(server.ranges(), ranges);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn starts_over_once_when_the_server_cant_resume() {
+        let dir = crate::tests::temp_dir("download-416");
+        let path = dir.join("model.bin");
+        let body = body();
+        fs::write(&path, [0; 1000]).unwrap();
+        let server = Server::start(body.clone(), vec![Reply::Status(416), Reply::Body]);
+        assert_eq!(fetch_from(&server, &path, &body), Ok(()));
+        assert_eq!(fs::read(&path).unwrap(), body);
+        assert_eq!(server.ranges(), [Some("bytes=1000-".to_string()), None]);
+
+        fs::write(&path, [0; 1000]).unwrap();
+        let server = Server::start(body.clone(), vec![Reply::Status(416), Reply::Status(416)]);
+        assert_eq!(
+            fetch_from(&server, &path, &body),
+            failure("the server answered 416 Range Not Satisfiable", false)
+        );
+        assert!(!path.exists());
+        assert_eq!(server.ranges(), [Some("bytes=1000-".to_string()), None]);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -455,19 +556,13 @@ mod tests {
         let path = dir.join("model.bin");
         let body = body();
         let server = Server::start(body.clone(), vec![Reply::Status(404), Reply::Status(503)]);
-        let failed = |reason: &str, retry| {
-            Err(Error::Failed {
-                reason: reason.into(),
-                retry,
-            })
-        };
         assert_eq!(
             fetch_from(&server, &path, &body),
-            failed("the server answered 404 Not Found", false)
+            failure("the server answered 404 Not Found", false)
         );
         assert_eq!(
             fetch_from(&server, &path, &body),
-            failed("the server answered 503 Service Unavailable", true)
+            failure("the server answered 503 Service Unavailable", true)
         );
         server.ranges();
         fs::remove_dir_all(dir).unwrap();
@@ -493,20 +588,17 @@ mod tests {
     }
 
     #[test]
-    fn a_stalled_connection_times_out_and_keeps_what_arrived() {
+    fn a_stalled_connection_times_out_and_resumes() {
         let dir = crate::tests::temp_dir("download-stall");
         let path = dir.join("model.bin");
         let body = body();
-        let server = Server::start(body.clone(), vec![Reply::StallAfter(50_000)]);
+        let server = Server::start(body.clone(), vec![Reply::StallAfter(50_000), Reply::Body]);
         let start = Instant::now();
-        let stalled = Error::Failed {
-            reason: "timed out".into(),
-            retry: true,
-        };
-        assert_eq!(fetch_from(&server, &path, &body), Err(stalled));
-        assert!(start.elapsed() < Duration::from_secs(3));
-        assert_eq!(fs::read(&path).unwrap(), &body[..50_000]);
-        server.ranges();
+        assert_eq!(fetch_from(&server, &path, &body), Ok(()));
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(3));
+        assert_eq!(fs::read(&path).unwrap(), body);
+        assert_eq!(server.ranges(), [None, Some("bytes=50000-".to_string())]);
         fs::remove_dir_all(dir).unwrap();
     }
 
