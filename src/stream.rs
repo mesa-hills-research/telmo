@@ -22,12 +22,13 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::biasing::{self, Compiled, SpecialWords};
 use crate::error::Result;
 use crate::features::LogMelStream;
-use crate::granite::Granite;
+use crate::granite::{self, Granite};
 use crate::granite_stream::GraniteStream;
 use crate::model::Model;
-use crate::parakeet::{Parakeet, Timings};
+use crate::parakeet::{Parakeet, Timings, Token};
 use crate::resample::Resampler;
 use crate::tokenizer::Tokenizer;
 use crate::vad::{Vad, VadConfig, VadEvent};
@@ -136,22 +137,39 @@ pub struct UtteranceStream {
     /// Whether any text settled in this utterance.
     settled_any: bool,
     passes: usize,
+    /// The special words passes favour.
+    words: Option<Arc<Compiled>>,
     pub timings: Timings,
 }
 
 impl UtteranceStream {
     pub fn new(model: &Model) -> UtteranceStream {
+        UtteranceStream::with_compiled(model, None)
+    }
+
+    /// A stream whose passes favour special words, as [`Model::transcribe_biased`] does.
+    pub fn with_special_words(model: &Model, words: &SpecialWords) -> UtteranceStream {
+        UtteranceStream::with_compiled(model, compile(model, words))
+    }
+
+    fn with_compiled(model: &Model, words: Option<Arc<Compiled>>) -> UtteranceStream {
         let timings = Timings::default();
         let (resume, granite, log_mel) = match model {
             Model::Parakeet(m) => (Resume::Frame(0), None, Some(m.front_end().stream())),
-            Model::Granite(m) => (
-                Resume::Ctc {
-                    frame: 0,
-                    prev: u32::MAX,
-                },
-                Some(GraniteStream::new(m)),
-                None,
-            ),
+            Model::Granite(m) => {
+                let mut blocks = GraniteStream::new(m);
+                if let Some(words) = &words {
+                    blocks.keep_spotting_scores(&words.tokens);
+                }
+                (
+                    Resume::Ctc {
+                        frame: 0,
+                        prev: u32::MAX,
+                    },
+                    Some(blocks),
+                    None,
+                )
+            }
         };
         UtteranceStream {
             audio: Vec::new(),
@@ -163,6 +181,7 @@ impl UtteranceStream {
             log_mel,
             settled_any: false,
             passes: 0,
+            words,
             timings,
         }
     }
@@ -204,10 +223,7 @@ impl UtteranceStream {
             Model::Parakeet(m) => self.parakeet_hypothesis(m, config, mode == PassMode::Final)?,
             Model::Granite(m) => self.granite_hypothesis(m, mode == PassMode::Final)?,
         };
-        let tokenizer = match model {
-            Model::Parakeet(m) => m.tokenizer(),
-            Model::Granite(m) => m.tokenizer(),
-        };
+        let tokenizer = model.tokenizer();
         let hyp = self.drop_repeats(tokenizer, config, hyp);
         let words = split_words(tokenizer, self.last_settled, &hyp);
         // Where the model last heard speech: the last token with a letter or digit, since
@@ -352,14 +368,21 @@ impl UtteranceStream {
         let encoded = model.encode(&features.data, features.frames, timings, &mut |_, _, _| {});
         let mut state = model.initial_decoder_state(timings);
         state.frame = start / FRAME;
-        let tokens = model.decode_from(&encoded, start / FRAME, &state, timings);
+        let tokens: Vec<Token> = match &self.words {
+            Some(words) => model.beam_search(&encoded, start / FRAME, &state, words, timings),
+            None => model
+                .decode_from(&encoded, start / FRAME, &state, timings)
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect(),
+        };
         // A token placed a frame earlier than the settled text's end in an earlier window still
         // counts as new. What it repeats of the settled text is dropped later.
         let from = boundary.saturating_sub(1);
         Ok(tokens
             .into_iter()
-            .filter(|(t, _)| boundary == 0 || t.frame as usize >= from)
-            .map(|(t, _)| {
+            .filter(|t| boundary == 0 || t.frame as usize >= from)
+            .map(|t| {
                 let end_frame = t.frame as usize + (t.duration as usize).max(1);
                 Hyp {
                     id: t.id,
@@ -382,12 +405,43 @@ impl UtteranceStream {
         let Resume::Ctc { frame, prev } = self.resume else {
             unreachable!("Granite resumes from a CTC frame")
         };
-        Ok(ctc_hypothesis(
-            blocks.frame_ids(),
-            frame,
-            prev,
-            model.config().blank as u32,
-        ))
+        let ids = blocks.frame_ids();
+        let hyp = ctc_hypothesis(ids, frame, prev, model.config().blank as u32);
+        let Some(words) = &self.words else {
+            return Ok(hyp);
+        };
+        let greedy: Vec<Token> = hyp
+            .iter()
+            .map(|h| Token {
+                id: h.id,
+                frame: h.frame as u32,
+                duration: (h.end_frame - h.frame) as u32,
+            })
+            .collect();
+        let tokens = granite::timed(&mut self.timings, "spotting", || {
+            biasing::spot(
+                words,
+                model.tokenizer(),
+                &greedy,
+                blocks.spotting_scores(),
+                frame,
+            )
+        });
+        Ok(tokens
+            .into_iter()
+            .map(|t| {
+                let end_frame = (t.frame + t.duration) as usize;
+                Hyp {
+                    id: t.id,
+                    frame: t.frame as usize,
+                    end_frame,
+                    resume: Resume::Ctc {
+                        frame: end_frame,
+                        prev: ids[end_frame - 1],
+                    },
+                }
+            })
+            .collect())
     }
 
     /// The decoder's position after the settled text, in encoder frames from the start.
@@ -490,6 +544,8 @@ pub struct Streamer {
     wrote: bool,
     /// Utterances started so far.
     started: u64,
+    /// The special words new utterances favour.
+    words: Option<Arc<Compiled>>,
 }
 
 /// Audio kept for the time before an onset, comfortably more than voice activity reaches back.
@@ -511,11 +567,18 @@ impl Streamer {
             closing: VecDeque::new(),
             wrote: false,
             started: 0,
+            words: None,
         }
     }
 
     pub fn config(&self) -> &StreamConfig {
         &self.config
+    }
+
+    /// Favours these special words from the next utterance on. An utterance under way keeps the
+    /// words it started with.
+    pub fn set_special_words(&mut self, words: &SpecialWords) {
+        self.words = compile(&self.model, words);
     }
 
     /// Takes audio at the input rate. Returns the events of voice activity. Passes wait for
@@ -567,7 +630,8 @@ impl Streamer {
                             .split_off(audio_from.saturating_sub(ended.start) as usize);
                         self.closing.push_back(ended);
                     }
-                    let mut stream = UtteranceStream::new(&self.model);
+                    let mut stream =
+                        UtteranceStream::with_compiled(&self.model, self.words.clone());
                     stream.push(&self.history_since(audio_from));
                     let index = self.started;
                     self.started += 1;
@@ -734,6 +798,7 @@ impl Streamer {
 
 enum Message {
     Audio(Vec<f32>),
+    Words(SpecialWords),
     Finish,
 }
 
@@ -777,6 +842,7 @@ impl Stream {
                         Ok(Message::Audio(audio)) => {
                             streamer.push(&audio).into_iter().for_each(&mut on_event)
                         }
+                        Ok(Message::Words(words)) => streamer.set_special_words(&words),
                         Ok(Message::Finish) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                             finishing = true
                         }
@@ -824,6 +890,12 @@ impl Stream {
         let _ = self.sender.send(Message::Audio(samples.to_vec()));
     }
 
+    /// Favours these special words from the next utterance on, as
+    /// [`Streamer::set_special_words`] does. It returns at once.
+    pub fn set_special_words(&self, words: SpecialWords) {
+        let _ = self.sender.send(Message::Words(words));
+    }
+
     /// Ends the input, waits for the last events and returns how the passes went.
     pub fn finish(self) -> Result<StreamStats> {
         let _ = self.sender.send(Message::Finish);
@@ -831,6 +903,13 @@ impl Stream {
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
+}
+
+/// The special words in the model's tokens, or none if they leave nothing to favour.
+fn compile(model: &Model, words: &SpecialWords) -> Option<Arc<Compiled>> {
+    Some(Compiled::new(words, model.tokenizer()))
+        .filter(|w| !w.is_empty())
+        .map(Arc::new)
 }
 
 /// CTC greedy decoding of `ids` from `frame` on, where the frame before had `prev`. Repeats
