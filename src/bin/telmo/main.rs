@@ -2,6 +2,7 @@
 //! or Parakeet TDT on first use.
 
 mod cache;
+mod download;
 mod install;
 mod sha256;
 
@@ -43,9 +44,11 @@ Options
   --yes            Downloads a missing model without asking
 
 Granite and Parakeet download on first use, after asking, into the cache
-directory that telmo models shows. A model directory holds model.safetensors,
-config.json and tokenizer.json, and Parakeet's GGUF file needs tokenizer.json
-beside it. WAV files may have any sample rate.
+directory that telmo models shows. Downloads use the proxy environment
+variables (ALL_PROXY, HTTPS_PROXY and NO_PROXY) and resume where they stopped.
+A model directory holds model.safetensors, config.json and tokenizer.json, and
+Parakeet's GGUF file needs tokenizer.json beside it. WAV files may have any
+sample rate.
 ";
 
 #[derive(Debug, PartialEq)]
