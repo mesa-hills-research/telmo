@@ -82,9 +82,13 @@ Some rules keep ordinary words safe.
 - Words of one or two letters or digits are refused unless added with `add_code_word`.
 - A word that is a single token of the vocabulary is one the model knows, so it earns half the
   bonus. For Granite that means it is never spotted at the default margin.
-- A spotted word must beat what Granite already heard by the margin.
+- A spotted word must beat what Granite already heard by the margin, and a short word, which
+  carries little sound, by more. A word with fewer than five letters or digits adds the
+  short-word margin once for each letter it lacks, so at the defaults a word of four letters
+  needs 2 + 3 = 5 and one of three letters 2 + 3 × 2 = 8.
 
-`Boost::new` sets the strength, and `SpecialWords::set_boost` gives it to a list.
+`Boost::new` sets the strength, `Boost::with_short_word_margin` the short-word margin, and
+`SpecialWords::set_boost` gives them to a list.
 
 | Setting | Default | Range | Meaning |
 |---|---:|---|---|
@@ -92,6 +96,7 @@ Some rules keep ordinary words safe.
 | `beam` | 4 | 1 to 16 | Hypotheses Parakeet's beam search keeps |
 | `spotting_bonus` | 4 | 0 to 10 | Granite's bonus for each token of a spotted word |
 | `spotting_margin` | 2 | 0 to 50 | How much a spotted word with its bonus must beat the greedy words |
+| `short_word_margin` | 3 | 0 to 50 | What a spotted word adds to that for each letter or digit it has below five |
 
 ## Accuracy
 
