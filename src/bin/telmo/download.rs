@@ -269,7 +269,7 @@ pub fn megabytes(bytes: u64) -> u64 {
 
 /// A line on a terminal that shows how much of a file has arrived and how fast.
 struct Progress {
-    /// Whether to show it: stderr is a terminal and the file is at least a megabyte.
+    /// Whether to show it, true when stderr is a terminal and the file is at least a megabyte.
     on: bool,
     from: u64,
     size: u64,
