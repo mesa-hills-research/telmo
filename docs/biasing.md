@@ -140,7 +140,8 @@ utterances, came before Granite's short-word margin. Parakeet met every limit, i
 dev-other just inside. Granite met the WER and recall limits but put 22 listed words in place of
 others in the 5,567 utterances, 4 in 1,000, nearly all identifiers of three or four letters
 ("mamma" became "mma", "lean" became "lan", "say" became "sha"). The short-word margin came out of
-that.
+that. With it, Granite put 1 listed word in place of another on dev, which no longer counts as a
+check, since dev had been seen by then.
 
 | | Granite | Granite with the list | Parakeet | Parakeet with the list |
 |---|---:|---:|---:|---:|
