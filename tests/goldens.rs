@@ -290,6 +290,30 @@ fn the_tokenizer_encodes_like_the_reference() {
     }
 }
 
+/// The model was trained on its SentencePiece model's split, which goes on with a word after a
+/// digit where Hugging Face's converted file starts a new one.
+#[test]
+#[ignore = "needs the model files, see the top of this file"]
+fn the_tokenizer_encodes_like_sentencepiece() {
+    let tokenizer = Tokenizer::load(&model_dir().join("tokenizer.json")).unwrap();
+    let vectors = std::fs::read(golden_dir().join("sentencepiece-vectors.json"))
+        .expect("sentencepiece-vectors.json");
+    let vectors = json::parse(&vectors).unwrap();
+    let vectors = vectors.get("vectors").and_then(Value::as_array).unwrap();
+    assert!(vectors.len() >= 20);
+    for vector in vectors {
+        let text = vector.get("text").and_then(Value::as_str).unwrap();
+        let want: Vec<u32> = vector
+            .get("ids")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|i| i.as_u64().unwrap() as u32)
+            .collect();
+        assert_eq!(tokenizer.encode(text), want, "{text}");
+    }
+}
+
 /// The golden clips' rarer words, and words that don't occur in them.
 const SPECIAL_WORDS: [&str; 9] = [
     "Southey",
