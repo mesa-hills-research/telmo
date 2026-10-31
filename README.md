@@ -69,9 +69,9 @@ as it arrives, with settled and tentative text, and is described in
 [docs/streaming.md](docs/streaming.md).
 
 Names and technical terms the models rarely heard come out right more often when you pass them
-as special words, `model.transcribe_biased(&samples, &words)` with a `SpecialWords` list, and
-ordinary words come out as before. [docs/biasing.md](docs/biasing.md) describes it, with its
-accuracy.
+as special words, `model.transcribe_biased(&samples, &words)` with a `SpecialWords` list, with
+little change to ordinary words. [docs/biasing.md](docs/biasing.md) describes it, with its
+accuracy and limits.
 
 ## Accuracy and speed
 
