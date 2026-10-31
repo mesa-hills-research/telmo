@@ -58,6 +58,10 @@ pub struct GraniteStream {
     /// Encoder frames the next block must have before the one before it freezes.
     lag: usize,
     ids: Vec<u32>,
+    /// The tokens of special words whose logits word spotting reads.
+    spotting: Option<Vec<u32>>,
+    /// Each frame's row for word spotting (see [`crate::biasing::score_row`]).
+    scores: Vec<f32>,
     first_changed: usize,
     scratch: Option<(usize, Scratch)>,
 }
@@ -89,9 +93,21 @@ impl GraniteStream {
             frozen: 0,
             lag: DEFAULT_FREEZE_LAG,
             ids: Vec::new(),
+            spotting: None,
+            scores: Vec::new(),
             first_changed: 0,
             scratch: None,
         }
+    }
+
+    /// Keeps, for every frame, the scores word spotting reads for these tokens of special words.
+    pub(crate) fn keep_spotting_scores(&mut self, tokens: &[u32]) {
+        self.spotting = Some(tokens.to_vec());
+    }
+
+    /// The rows word spotting reads, one for each frame so far.
+    pub(crate) fn spotting_scores(&self) -> &[f32] {
+        &self.scores
     }
 
     /// Sets how many encoder frames (80 ms each) the next 10.24 s block must have before the one
@@ -300,14 +316,19 @@ impl GraniteStream {
         }
 
         let first = changed;
-        let ids = timed(timings, "ctc_head", || {
-            model.ids_of(
+        let (ids, scores) = timed(timings, "ctc_head", || {
+            model.frame_scores(
                 &self.layers.last().expect("the model has layers").out[first * d..],
                 frames_in - first,
+                self.spotting.as_deref(),
             )
         });
         self.ids.truncate(first);
         self.ids.extend(ids);
+        if let Some(tokens) = &self.spotting {
+            self.scores.truncate(first * (2 + tokens.len()));
+            self.scores.extend(scores);
+        }
         self.first_changed = first;
         if frames_in > self.lag {
             self.frozen = self.frozen.max((frames_in - 1 - self.lag) / ctx * ctx);

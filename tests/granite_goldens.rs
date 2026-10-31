@@ -18,7 +18,7 @@ use telmo::kernels::Isa;
 use telmo::parakeet::Timings;
 use telmo::safetensors::SafeTensors;
 use telmo::tokenizer::Tokenizer;
-use telmo::{Options, Precision};
+use telmo::{Options, Precision, SpecialWords};
 
 /// Features may differ by this much. The reference computes its STFT and mel sums in f32.
 const FEATURES_MAX_ABS: f32 = 5e-5;
@@ -221,6 +221,64 @@ fn the_tokenizer_decodes_like_the_reference() {
             .collect();
         let want = sequence.get("text").and_then(Value::as_str).unwrap();
         assert_eq!(tokenizer.decode(&ids), want, "ids {ids:?}");
+    }
+}
+
+#[test]
+#[ignore = "needs the model files, see the top of this file"]
+fn the_tokenizer_encodes_like_the_reference() {
+    let tokenizer = Tokenizer::load(&model_dir().join("tokenizer.json")).unwrap();
+    let vectors =
+        std::fs::read(golden_dir().join("encode-vectors.json")).expect("encode-vectors.json");
+    let vectors = json::parse(&vectors).unwrap();
+    let vectors = vectors.get("vectors").and_then(Value::as_array).unwrap();
+    assert!(vectors.len() >= 200);
+    for vector in vectors {
+        let text = vector.get("text").and_then(Value::as_str).unwrap();
+        let want: Vec<u32> = vector
+            .get("ids")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|i| i.as_u64().unwrap() as u32)
+            .collect();
+        assert_eq!(tokenizer.encode(text), want, "{text}");
+    }
+}
+
+#[test]
+#[ignore = "needs the model files, see the top of this file"]
+fn special_words_leave_right_transcripts_as_they_are() {
+    let model = model(None, 6);
+    // The golden clips' rarer words, and words that don't occur in them.
+    let words: SpecialWords = {
+        let mut words = SpecialWords::new();
+        for word in [
+            "Southey",
+            "Montesquieu",
+            "Bertie",
+            "Hamburg",
+            "kubectl",
+            "nginx",
+            "serde",
+            "tokio",
+            "Fauchelevent",
+        ] {
+            words.add(word).unwrap();
+        }
+        words
+    };
+    for clip in clips() {
+        let plain = model.transcribe(&clip.samples).unwrap().text;
+        let biased = model.transcribe_biased(&clip.samples, &words).unwrap().text;
+        // A beam search may find a likelier path that differs in case or punctuation.
+        let normalized = |text: &str| -> String {
+            text.chars()
+                .filter(|c| c.is_alphanumeric() || *c == ' ')
+                .flat_map(char::to_lowercase)
+                .collect()
+        };
+        assert_eq!(normalized(&biased), normalized(&plain), "{}", clip.id);
     }
 }
 

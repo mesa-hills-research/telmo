@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::biasing::{Compiled, Rejection, SpecialWords};
 use crate::error::{Error, Result};
 use crate::granite::{self, Granite};
 use crate::json;
@@ -9,6 +10,7 @@ use crate::kernels::Isa;
 use crate::pack::{Pack, Sink};
 use crate::parakeet::{self, Options, Parakeet, Transcript};
 use crate::quant::Precision;
+use crate::tokenizer::Tokenizer;
 
 /// The models Telmo runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +155,29 @@ impl Model {
         match self {
             Model::Parakeet(m) => m.transcribe(samples),
             Model::Granite(m) => m.transcribe(samples),
+        }
+    }
+
+    /// Transcribes 16 kHz mono samples, favouring special words. With no words, it's
+    /// [`Model::transcribe`].
+    pub fn transcribe_biased(&self, samples: &[f32], words: &SpecialWords) -> Result<Transcript> {
+        match self {
+            Model::Parakeet(m) => m.transcribe_biased(samples, words),
+            Model::Granite(m) => m.transcribe_biased(samples, words),
+        }
+    }
+
+    /// The special words with no spelling this model's vocabulary can use, which decoding leaves
+    /// out, and why.
+    pub fn unusable_special_words(&self, words: &SpecialWords) -> Vec<(String, Rejection)> {
+        Compiled::new(words, self.tokenizer()).1
+    }
+
+    /// The model's tokenizer.
+    pub fn tokenizer(&self) -> &Tokenizer {
+        match self {
+            Model::Parakeet(m) => m.tokenizer(),
+            Model::Granite(m) => m.tokenizer(),
         }
     }
 

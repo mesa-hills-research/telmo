@@ -17,17 +17,19 @@
 //! and the text comes back as [`Event`]s.
 
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::biasing::{self, Compiled, SpecialWords};
 use crate::error::Result;
 use crate::features::LogMelStream;
-use crate::granite::Granite;
+use crate::granite::{self, Granite};
 use crate::granite_stream::GraniteStream;
 use crate::model::Model;
-use crate::parakeet::{Parakeet, Timings};
+use crate::parakeet::{Parakeet, Timings, Token};
 use crate::resample::Resampler;
 use crate::tokenizer::Tokenizer;
 use crate::vad::{Vad, VadConfig, VadEvent};
@@ -116,6 +118,9 @@ struct Hyp {
     /// The encoder frame after the token, from the utterance's start.
     end_frame: usize,
     resume: Resume,
+    /// Whether the token belongs to the word before it whatever the tokenizer says, as the
+    /// tokens of a spotted special word do, so they settle together.
+    joined: bool,
 }
 
 /// One utterance's audio and the text settled from it so far. Experimental, like the rest of
@@ -136,22 +141,39 @@ pub struct UtteranceStream {
     /// Whether any text settled in this utterance.
     settled_any: bool,
     passes: usize,
+    /// The special words passes favour.
+    words: Option<Arc<Compiled>>,
     pub timings: Timings,
 }
 
 impl UtteranceStream {
     pub fn new(model: &Model) -> UtteranceStream {
+        UtteranceStream::with_compiled(model, None)
+    }
+
+    /// A stream whose passes favour special words, as [`Model::transcribe_biased`] does.
+    pub fn with_special_words(model: &Model, words: &SpecialWords) -> UtteranceStream {
+        UtteranceStream::with_compiled(model, compile(model, words))
+    }
+
+    fn with_compiled(model: &Model, words: Option<Arc<Compiled>>) -> UtteranceStream {
         let timings = Timings::default();
         let (resume, granite, log_mel) = match model {
             Model::Parakeet(m) => (Resume::Frame(0), None, Some(m.front_end().stream())),
-            Model::Granite(m) => (
-                Resume::Ctc {
-                    frame: 0,
-                    prev: u32::MAX,
-                },
-                Some(GraniteStream::new(m)),
-                None,
-            ),
+            Model::Granite(m) => {
+                let mut blocks = GraniteStream::new(m);
+                if let Some(words) = &words {
+                    blocks.keep_spotting_scores(&words.tokens);
+                }
+                (
+                    Resume::Ctc {
+                        frame: 0,
+                        prev: u32::MAX,
+                    },
+                    Some(blocks),
+                    None,
+                )
+            }
         };
         UtteranceStream {
             audio: Vec::new(),
@@ -163,6 +185,7 @@ impl UtteranceStream {
             log_mel,
             settled_any: false,
             passes: 0,
+            words,
             timings,
         }
     }
@@ -204,10 +227,7 @@ impl UtteranceStream {
             Model::Parakeet(m) => self.parakeet_hypothesis(m, config, mode == PassMode::Final)?,
             Model::Granite(m) => self.granite_hypothesis(m, mode == PassMode::Final)?,
         };
-        let tokenizer = match model {
-            Model::Parakeet(m) => m.tokenizer(),
-            Model::Granite(m) => m.tokenizer(),
-        };
+        let tokenizer = model.tokenizer();
         let hyp = self.drop_repeats(tokenizer, config, hyp);
         let words = split_words(tokenizer, self.last_settled, &hyp);
         // Where the model last heard speech: the last token with a letter or digit, since
@@ -352,20 +372,28 @@ impl UtteranceStream {
         let encoded = model.encode(&features.data, features.frames, timings, &mut |_, _, _| {});
         let mut state = model.initial_decoder_state(timings);
         state.frame = start / FRAME;
-        let tokens = model.decode_from(&encoded, start / FRAME, &state, timings);
+        let tokens: Vec<Token> = match &self.words {
+            Some(words) => model.beam_search(&encoded, start / FRAME, &state, words, timings),
+            None => model
+                .decode_from(&encoded, start / FRAME, &state, timings)
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect(),
+        };
         // A token placed a frame earlier than the settled text's end in an earlier window still
         // counts as new. What it repeats of the settled text is dropped later.
         let from = boundary.saturating_sub(1);
         Ok(tokens
             .into_iter()
-            .filter(|(t, _)| boundary == 0 || t.frame as usize >= from)
-            .map(|(t, _)| {
+            .filter(|t| boundary == 0 || t.frame as usize >= from)
+            .map(|t| {
                 let end_frame = t.frame as usize + (t.duration as usize).max(1);
                 Hyp {
                     id: t.id,
                     frame: t.frame as usize,
                     end_frame,
                     resume: Resume::Frame(end_frame),
+                    joined: false,
                 }
             })
             .collect())
@@ -382,12 +410,29 @@ impl UtteranceStream {
         let Resume::Ctc { frame, prev } = self.resume else {
             unreachable!("Granite resumes from a CTC frame")
         };
-        Ok(ctc_hypothesis(
-            blocks.frame_ids(),
-            frame,
-            prev,
-            model.config().blank as u32,
-        ))
+        let ids = blocks.frame_ids();
+        let hyp = ctc_hypothesis(ids, frame, prev, model.config().blank as u32);
+        let Some(words) = &self.words else {
+            return Ok(hyp);
+        };
+        let greedy: Vec<Token> = hyp
+            .iter()
+            .map(|h| Token {
+                id: h.id,
+                frame: h.frame as u32,
+                duration: (h.end_frame - h.frame) as u32,
+            })
+            .collect();
+        let (tokens, spotted) = granite::timed(&mut self.timings, "spotting", || {
+            biasing::spot(
+                words,
+                model.tokenizer(),
+                &greedy,
+                blocks.spotting_scores(),
+                frame,
+            )
+        });
+        Ok(spotted_hypothesis(&tokens, &spotted, ids))
     }
 
     /// The decoder's position after the settled text, in encoder frames from the start.
@@ -490,6 +535,8 @@ pub struct Streamer {
     wrote: bool,
     /// Utterances started so far.
     started: u64,
+    /// The special words new utterances favour.
+    words: Option<Arc<Compiled>>,
 }
 
 /// Audio kept for the time before an onset, comfortably more than voice activity reaches back.
@@ -511,11 +558,18 @@ impl Streamer {
             closing: VecDeque::new(),
             wrote: false,
             started: 0,
+            words: None,
         }
     }
 
     pub fn config(&self) -> &StreamConfig {
         &self.config
+    }
+
+    /// Favours these special words from the next utterance on. An utterance under way keeps the
+    /// words it started with.
+    pub fn set_special_words(&mut self, words: &SpecialWords) {
+        self.words = compile(&self.model, words);
     }
 
     /// Takes audio at the input rate. Returns the events of voice activity. Passes wait for
@@ -567,7 +621,8 @@ impl Streamer {
                             .split_off(audio_from.saturating_sub(ended.start) as usize);
                         self.closing.push_back(ended);
                     }
-                    let mut stream = UtteranceStream::new(&self.model);
+                    let mut stream =
+                        UtteranceStream::with_compiled(&self.model, self.words.clone());
                     stream.push(&self.history_since(audio_from));
                     let index = self.started;
                     self.started += 1;
@@ -734,6 +789,7 @@ impl Streamer {
 
 enum Message {
     Audio(Vec<f32>),
+    Words(SpecialWords),
     Finish,
 }
 
@@ -777,6 +833,7 @@ impl Stream {
                         Ok(Message::Audio(audio)) => {
                             streamer.push(&audio).into_iter().for_each(&mut on_event)
                         }
+                        Ok(Message::Words(words)) => streamer.set_special_words(&words),
                         Ok(Message::Finish) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                             finishing = true
                         }
@@ -824,6 +881,12 @@ impl Stream {
         let _ = self.sender.send(Message::Audio(samples.to_vec()));
     }
 
+    /// Favours these special words from the next utterance on, as
+    /// [`Streamer::set_special_words`] does. It returns at once.
+    pub fn set_special_words(&self, words: SpecialWords) {
+        let _ = self.sender.send(Message::Words(words));
+    }
+
     /// Ends the input, waits for the last events and returns how the passes went.
     pub fn finish(self) -> Result<StreamStats> {
         let _ = self.sender.send(Message::Finish);
@@ -831,6 +894,43 @@ impl Stream {
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
+}
+
+/// The special words in the model's tokens, or none if they leave nothing to favour.
+fn compile(model: &Model, words: &SpecialWords) -> Option<Arc<Compiled>> {
+    Some(Compiled::new(words, model.tokenizer()).0)
+        .filter(|w| !w.is_empty())
+        .map(Arc::new)
+}
+
+/// A pass's hypothesis from Granite's tokens after word spotting, each resuming after its run
+/// of frames, where `ids` holds every frame's most likely token. The tokens of a spotted word,
+/// whose ranges `spotted` gives, are joined, so the word settles whole or not at all, and a
+/// later pass never resumes inside the frames it took over.
+fn spotted_hypothesis(tokens: &[Token], spotted: &[Range<usize>], ids: &[u32]) -> Vec<Hyp> {
+    let mut joined = vec![false; tokens.len()];
+    for range in spotted {
+        for j in &mut joined[range.start + 1..range.end] {
+            *j = true;
+        }
+    }
+    tokens
+        .iter()
+        .zip(joined)
+        .map(|(t, joined)| {
+            let end_frame = (t.frame + t.duration) as usize;
+            Hyp {
+                id: t.id,
+                frame: t.frame as usize,
+                end_frame,
+                resume: Resume::Ctc {
+                    frame: end_frame,
+                    prev: ids[end_frame - 1],
+                },
+                joined,
+            }
+        })
+        .collect()
 }
 
 /// CTC greedy decoding of `ids` from `frame` on, where the frame before had `prev`. Repeats
@@ -845,6 +945,7 @@ fn ctc_hypothesis(ids: &[u32], frame: usize, prev: u32, blank: u32) -> Vec<Hyp> 
                 id,
                 frame: f,
                 end_frame: f + 1,
+                joined: false,
                 resume: Resume::Ctc {
                     frame: f + 1,
                     prev: id,
@@ -872,13 +973,13 @@ struct Word {
     end: usize,
 }
 
-/// Splits tokens into words where the tokenizer allows a split.
+/// Splits tokens into words where the tokenizer allows a split and the tokens aren't joined.
 fn split_words(tokenizer: &Tokenizer, before: Option<u32>, hyp: &[Hyp]) -> Vec<Word> {
     let mut words: Vec<Word> = Vec::new();
     let mut prev = before;
     for (i, h) in hyp.iter().enumerate() {
         match words.last_mut() {
-            Some(w) if !tokenizer.may_split_before(prev, h.id) => w.end = i + 1,
+            Some(w) if h.joined || !tokenizer.may_split_before(prev, h.id) => w.end = i + 1,
             _ => words.push(Word {
                 start: i,
                 end: i + 1,
@@ -922,6 +1023,97 @@ fn word_ids(hyp: &[Hyp], w: &Word) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_spotted_phrase_settles_as_one_word() {
+        let tok = crate::biasing::tests::tokenizer();
+        // "▁the ▁New ▁York ▁city ▁the", the middle three spotted together, two frames each.
+        let ids_in = [6, 42, 43, 44, 6];
+        let tokens: Vec<Token> = ids_in
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| Token {
+                id,
+                frame: 2 * i as u32,
+                duration: 2,
+            })
+            .collect();
+        let frame_ids = vec![0u32; 10];
+        let hyp = spotted_hypothesis(&tokens, std::slice::from_ref(&(1..4)), &frame_ids);
+        let words: Vec<(usize, usize)> = split_words(&tok, None, &hyp)
+            .iter()
+            .map(|w| (w.start, w.end))
+            .collect();
+        assert_eq!(words, vec![(0, 1), (1, 4), (4, 5)]);
+        // Without the spot, each word stands alone.
+        let plain = spotted_hypothesis(&tokens, &[], &frame_ids);
+        assert_eq!(split_words(&tok, None, &plain).len(), 5);
+    }
+
+    /// The special words of the active utterance and of those waiting for their final pass.
+    fn lists(s: &Streamer) -> (Option<Arc<Compiled>>, Vec<Option<Arc<Compiled>>>) {
+        (
+            s.active.as_ref().and_then(|a| a.stream.words.clone()),
+            s.closing.iter().map(|a| a.stream.words.clone()).collect(),
+        )
+    }
+
+    fn same(a: &Option<Arc<Compiled>>, b: &Option<Arc<Compiled>>) -> bool {
+        match (a, b) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a model, named by GRANITE_SPEECH_DIR"]
+    fn each_utterance_keeps_the_list_it_started_with() {
+        let dir = std::env::var_os("GRANITE_SPEECH_DIR").expect("set GRANITE_SPEECH_DIR");
+        let model = Arc::new(Model::load(dir.as_ref(), &crate::Options::default()).unwrap());
+        let mut s = Streamer::new(model, StreamConfig::default());
+        let mut seed = 0x9e37_79b9u64;
+        let mut noise = |seconds: f64, level: f32| -> Vec<f32> {
+            (0..(seconds * SAMPLE_RATE as f64) as usize)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * level
+                })
+                .collect()
+        };
+        let list = |word: &str| {
+            let mut w = SpecialWords::new();
+            w.add(word).unwrap();
+            w
+        };
+        s.set_special_words(&list("kubectl"));
+        let a = s.words.clone();
+        let quiet = 0.0005;
+        s.push(&noise(1.0, quiet));
+        s.push(&noise(1.5, 0.2));
+        assert!(same(&lists(&s).0, &a), "the first utterance has list A");
+        s.set_special_words(&list("serde"));
+        let b = s.words.clone();
+        assert!(!same(&a, &b));
+        assert!(same(&lists(&s).0, &a), "it keeps A after the list changes");
+        // Speech ends, and the next utterance starts before the first had its final pass.
+        s.push(&noise(1.0, quiet));
+        s.push(&noise(1.5, 0.2));
+        let (active, closing) = lists(&s);
+        assert!(same(&active, &b), "the second utterance has list B");
+        assert_eq!(closing.len(), 1);
+        assert!(same(&closing[0], &a), "the closing one keeps A");
+        s.set_special_words(&SpecialWords::new());
+        assert!(s.words.is_none());
+        s.push(&noise(1.0, quiet));
+        s.push(&noise(1.5, 0.2));
+        let (active, closing) = lists(&s);
+        assert!(active.is_none(), "the third utterance has no list");
+        assert_eq!(closing.len(), 2);
+        assert!(same(&closing[0], &a) && same(&closing[1], &b));
+    }
 
     #[test]
     fn a_word_heard_again_shares_the_end_of_the_settled_one() {

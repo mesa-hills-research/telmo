@@ -18,3 +18,8 @@ $RL $DATA/venv/bin/python -I $S/ref_nemo.py $DATA/models/parakeet-tdt-0.6b-v3-ne
 $RL $DATA/venv/bin/python -I $S/ref_nemo.py $DATA/models/parakeet-tdt-0.6b-v3-nemo/parakeet-tdt-0.6b-v3.nemo $DATA/work/clips.json $DATA/work/nemo-no-subsampling-mask --threads 6 --no-subsampling-mask
 $RL $DATA/venv/bin/python -I $S/ref_hf.py $DATA/models/parakeet-tdt-0.6b-v3 $DATA/work/clips.json $DATA/work/hf --nemo-dir $DATA/work/nemo --threads 6
 $DATA/venv/bin/python -I $S/make_goldens.py $DATA/work/clips.json $DATA/work/nemo $DATA/work/hf $DATA/work/nemo-no-subsampling-mask $G $S/COMMANDS.txt
+# Encode vectors for both models (tokenizers 0.23.2, run with a venv that has it).
+DATA=$DATA $DATA/venv/bin/python -I $S/make_encode_vectors.py tests/goldens
+# SentencePiece vectors for Parakeet (sentencepiece 0.2.2), from the tokenizer.model inside the .nemo archive.
+tar -xf $DATA/models/parakeet-tdt-0.6b-v3-nemo/parakeet-tdt-0.6b-v3.nemo -C $DATA/tmp --wildcards '*tokenizer.model'
+$DATA/venv/bin/python -I $S/make_sentencepiece_vectors.py $DATA/tmp/*_tokenizer.model tests/goldens

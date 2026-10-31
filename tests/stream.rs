@@ -12,7 +12,7 @@ use telmo::json::{self, Value};
 use telmo::stream::{
     Event, PassConfig, PassMode, SAMPLE_RATE, Stream, StreamConfig, Streamer, UtteranceStream,
 };
-use telmo::{Model, Options};
+use telmo::{Model, Options, SpecialWords};
 
 fn clips() -> Vec<(String, Vec<f32>)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/parakeet-tdt-0.6b-v3");
@@ -39,9 +39,14 @@ fn model(var: &str) -> Model {
 
 /// Streams `samples` in steps of `step` seconds with a pass after each, then a final pass.
 /// Returns the settled text and how many tentative words were replaced before settling.
-fn stream(model: &Model, samples: &[f32], step: f64) -> (String, usize, usize) {
+fn stream(
+    model: &Model,
+    samples: &[f32],
+    step: f64,
+    words: &SpecialWords,
+) -> (String, usize, usize) {
     let config = PassConfig::default();
-    let mut s = UtteranceStream::new(model);
+    let mut s = UtteranceStream::with_special_words(model, words);
     let step = (step * SAMPLE_RATE as f64) as usize;
     let mut settled = String::new();
     let mut tentative = String::new();
@@ -108,12 +113,12 @@ fn distance(a: &[String], b: &[String]) -> usize {
     row[b.len()]
 }
 
-fn check(var: &str) {
+fn check(var: &str, special: &SpecialWords) {
     let model = model(var);
     let (mut errors, mut total) = (0, 0);
     for (id, samples) in &clips() {
-        let offline = model.transcribe(samples).unwrap().text;
-        let (streamed, changed, passes) = stream(&model, samples, 0.5);
+        let offline = model.transcribe_biased(samples, special).unwrap().text;
+        let (streamed, changed, passes) = stream(&model, samples, 0.5, special);
         let (o, s) = (words(&offline), words(&streamed));
         let e = distance(&o, &s);
         eprintln!(
@@ -127,16 +132,49 @@ fn check(var: &str) {
     assert!(errors * 20 <= total, "{errors} of {total} words differ");
 }
 
+/// The golden clips' rarer words, and words that don't occur in them.
+fn special_words() -> SpecialWords {
+    {
+        let mut words = SpecialWords::new();
+        for word in [
+            "Southey",
+            "Montesquieu",
+            "Bertie",
+            "Hamburg",
+            "kubectl",
+            "nginx",
+            "serde",
+            "tokio",
+            "Fauchelevent",
+        ] {
+            words.add(word).unwrap();
+        }
+        words
+    }
+}
+
 #[test]
 #[ignore = "needs the model files"]
 fn parakeet_streams_the_golden_clips_like_offline() {
-    check("PARAKEET_TDT_DIR");
+    check("PARAKEET_TDT_DIR", &SpecialWords::new());
 }
 
 #[test]
 #[ignore = "needs the model files"]
 fn granite_streams_the_golden_clips_like_offline() {
-    check("GRANITE_SPEECH_DIR");
+    check("GRANITE_SPEECH_DIR", &SpecialWords::new());
+}
+
+#[test]
+#[ignore = "needs the model files"]
+fn parakeet_streams_with_special_words_like_offline() {
+    check("PARAKEET_TDT_DIR", &special_words());
+}
+
+#[test]
+#[ignore = "needs the model files"]
+fn granite_streams_with_special_words_like_offline() {
+    check("GRANITE_SPEECH_DIR", &special_words());
 }
 
 /// The golden clips under 10 s, joined with 1.5 s pauses over quiet noise, at 48 kHz.
@@ -175,12 +213,12 @@ fn settled(events: &[Event]) -> (String, usize) {
     (text, ends)
 }
 
-fn check_session(var: &str) {
+fn check_session(var: &str, special: &SpecialWords) {
     let model = Arc::new(model(var));
     let (audio, clips) = session();
     let offline: Vec<String> = clips
         .iter()
-        .map(|c| model.transcribe(c).unwrap().text)
+        .map(|c| model.transcribe_biased(c, special).unwrap().text)
         .collect();
     let offline = words(&offline.join(" "));
     let config = StreamConfig {
@@ -190,6 +228,7 @@ fn check_session(var: &str) {
 
     // The synchronous core, with a pass after every half second of audio.
     let mut streamer = Streamer::new(model.clone(), config.clone());
+    streamer.set_special_words(special);
     let mut events = Vec::new();
     for piece in audio.chunks(24000) {
         events.extend(streamer.push(piece));
@@ -217,6 +256,7 @@ fn check_session(var: &str) {
     let log: Arc<Mutex<Vec<Event>>> = Arc::default();
     let sink = log.clone();
     let stream = Stream::start(model, config, move |e| sink.lock().unwrap().push(e));
+    stream.set_special_words(special.clone());
     for piece in audio.chunks(960) {
         stream.push(piece);
     }
@@ -234,11 +274,23 @@ fn check_session(var: &str) {
 #[test]
 #[ignore = "needs the model files"]
 fn parakeet_streams_a_session_of_utterances() {
-    check_session("PARAKEET_TDT_DIR");
+    check_session("PARAKEET_TDT_DIR", &SpecialWords::new());
 }
 
 #[test]
 #[ignore = "needs the model files"]
 fn granite_streams_a_session_of_utterances() {
-    check_session("GRANITE_SPEECH_DIR");
+    check_session("GRANITE_SPEECH_DIR", &SpecialWords::new());
+}
+
+#[test]
+#[ignore = "needs the model files"]
+fn parakeet_streams_a_session_with_special_words() {
+    check_session("PARAKEET_TDT_DIR", &special_words());
+}
+
+#[test]
+#[ignore = "needs the model files"]
+fn granite_streams_a_session_with_special_words() {
+    check_session("GRANITE_SPEECH_DIR", &special_words());
 }

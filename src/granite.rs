@@ -15,6 +15,7 @@
 use std::path::Path;
 use std::time::Instant;
 
+use crate::biasing::{self, Compiled, SpecialWords};
 use crate::error::{Error, Result};
 use crate::granite_features::GraniteFrontEnd;
 use crate::json;
@@ -550,6 +551,12 @@ impl Granite {
     /// Transcribes 16 kHz mono samples. Each token's frame is where its run of CTC frames starts
     /// (80 ms each), and its duration is the run's length.
     pub fn transcribe(&self, samples: &[f32]) -> Result<Transcript> {
+        self.transcribe_biased(samples, &SpecialWords::new())
+    }
+
+    /// Transcribes 16 kHz mono samples, favouring special words by spotting them in the CTC
+    /// output. With no words, it's [`Granite::transcribe`].
+    pub fn transcribe_biased(&self, samples: &[f32], words: &SpecialWords) -> Result<Transcript> {
         let mut timings = Timings::default();
         let features = timed(&mut timings, "features", || self.features(samples))?;
         let encoded = self.encode(
@@ -558,8 +565,7 @@ impl Granite {
             &mut timings,
             &mut |_, _, _| {},
         )?;
-        let ids = timed(&mut timings, "ctc_head", || self.frame_ids(&encoded));
-        let tokens = ctc_tokens(&ids, self.config.blank);
+        let tokens = self.decode_biased(&encoded, words, &mut timings);
         let text = timed(&mut timings, "detokenize", || {
             self.tokenizer
                 .decode(&tokens.iter().map(|t| t.id).collect::<Vec<_>>())
@@ -568,6 +574,29 @@ impl Granite {
             text,
             tokens,
             timings,
+        })
+    }
+
+    /// Greedy CTC decoding, then word spotting of special words as
+    /// [`Granite::transcribe_biased`] does it. A spotted word's last token lasts to the end of the
+    /// frames it took over.
+    pub fn decode_biased(
+        &self,
+        encoded: &Encoded,
+        words: &SpecialWords,
+        timings: &mut Timings,
+    ) -> Vec<Token> {
+        let (words, _) = Compiled::new(words, &self.tokenizer);
+        let columns = (!words.is_empty()).then_some(words.tokens.as_slice());
+        let (ids, scores) = timed(timings, "ctc_head", || {
+            self.frame_scores(&encoded.data, encoded.frames, columns)
+        });
+        let tokens = ctc_tokens(&ids, self.config.blank);
+        if words.is_empty() {
+            return tokens;
+        }
+        timed(timings, "spotting", || {
+            biasing::spot(&words, &self.tokenizer, &tokens, &scores, 0).0
         })
     }
 
@@ -649,14 +678,31 @@ impl Granite {
     /// The most likely token of each of `frames` frames of encoder output, computed a chunk of
     /// frames at a time.
     pub(crate) fn ids_of(&self, x: &[f32], frames: usize) -> Vec<u32> {
+        self.frame_scores(x, frames, None).0
+    }
+
+    /// The most likely token of each of `frames` frames of encoder output and, with `columns`,
+    /// the rows word spotting reads for them (see [`biasing::score_row`]).
+    pub(crate) fn frame_scores(
+        &self,
+        x: &[f32],
+        frames: usize,
+        columns: Option<&[u32]>,
+    ) -> (Vec<u32>, Vec<f32>) {
         let (d, vocab) = (self.config.d_model, self.config.vocab);
         let mut ids = Vec::with_capacity(frames);
+        let mut scores = Vec::new();
         for first in (0..frames).step_by(LOGIT_ROWS) {
             let rows = (frames - first).min(LOGIT_ROWS);
             let logits = self.logits_of(&x[first * d..(first + rows) * d], rows);
-            ids.extend(logits.chunks_exact(vocab).map(|row| argmax(row) as u32));
+            for row in logits.chunks_exact(vocab) {
+                ids.push(argmax(row) as u32);
+                if let Some(columns) = columns {
+                    biasing::score_row(row, self.config.blank, columns, &mut scores);
+                }
+            }
         }
-        ids
+        (ids, scores)
     }
 
     /// The encoder's blocks.

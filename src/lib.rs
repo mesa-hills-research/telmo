@@ -23,10 +23,14 @@
 //! telmo = { version = "0.2", default-features = false }
 //! ```
 //!
+//! [`Model::transcribe_biased`] favours a list of [`SpecialWords`], such as names and technical
+//! terms, while it transcribes.
+//!
 //! Offline transcription is what Telmo does today. Streaming ([`stream`]) is experimental. The
 //! kernels use AVX-512, AVX2 or NEON where the CPU has them and plain Rust elsewhere, unless
 //! [`Options::isa`] or the `TELMO_ISA` environment variable names others.
 
+pub mod biasing;
 pub mod error;
 pub mod features;
 pub mod fft;
@@ -50,6 +54,7 @@ pub mod tokenizer;
 pub mod vad;
 pub mod wav;
 
+pub use biasing::{Boost, Rejection, SpecialWords};
 pub use error::{Error, Result};
 pub use granite::Granite;
 pub use granite_stream::GraniteStream;

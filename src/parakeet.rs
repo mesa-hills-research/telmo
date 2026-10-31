@@ -7,6 +7,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::biasing::{Compiled, SpecialWords, tdt_beam};
 use crate::error::{Error, Result};
 use crate::features::{FrontEnd, FrontEndConfig};
 use crate::gguf::{self, Gguf};
@@ -839,6 +840,12 @@ impl Parakeet {
 
     /// Transcribes 16 kHz mono samples.
     pub fn transcribe(&self, samples: &[f32]) -> Result<Transcript> {
+        self.transcribe_biased(samples, &SpecialWords::new())
+    }
+
+    /// Transcribes 16 kHz mono samples, favouring special words with a beam search. With no
+    /// words, it decodes greedily as [`Parakeet::transcribe`] does.
+    pub fn transcribe_biased(&self, samples: &[f32], words: &SpecialWords) -> Result<Transcript> {
         let mut timings = Timings::default();
         let features = timings.time("features", || self.front_end.compute(samples))?;
         let encoded = self.encode(
@@ -847,7 +854,7 @@ impl Parakeet {
             &mut timings,
             &mut |_, _, _| {},
         );
-        let tokens = self.decode(&encoded, &mut timings, None);
+        let tokens = self.decode_biased(&encoded, words, &mut timings);
         let ids: Vec<u32> = tokens.iter().map(|t| t.id).collect();
         let text = timings.time("detokenize", || self.tokenizer.decode(&ids));
         Ok(Transcript {
@@ -1288,6 +1295,22 @@ impl Parakeet {
         tokens
     }
 
+    /// Decodes with a beam search that favours special words, as
+    /// [`Parakeet::transcribe_biased`] does. With no words, it's [`Parakeet::decode`].
+    pub fn decode_biased(
+        &self,
+        encoded: &Encoded,
+        words: &SpecialWords,
+        timings: &mut Timings,
+    ) -> Vec<Token> {
+        let (words, _) = Compiled::new(words, &self.tokenizer);
+        if words.is_empty() {
+            return self.decode(encoded, timings, None);
+        }
+        let start = self.initial_decoder_state(timings);
+        self.beam_search(encoded, 0, &start, &words, timings)
+    }
+
     /// The decoder's state before any token, as NeMo starts it (the blank token's input).
     pub fn initial_decoder_state(&self, timings: &mut Timings) -> DecoderState {
         let c = &self.config;
@@ -1324,6 +1347,60 @@ impl Parakeet {
             &mut |token, after| out.push((token, after.clone())),
         );
         out
+    }
+
+    /// TDT beam search that favours special words (see [`crate::biasing`]), from `state` like
+    /// [`Parakeet::decode_from`]. Token frames count from the utterance's start.
+    pub(crate) fn beam_search(
+        &self,
+        encoded: &Encoded,
+        offset: usize,
+        state: &DecoderState,
+        words: &Compiled,
+        timings: &mut Timings,
+    ) -> Vec<Token> {
+        let c = &self.config;
+        let dec = &self.decoder;
+        let h = c.pred_hidden;
+        let first = state.frame.saturating_sub(offset);
+        if first >= encoded.frames {
+            return Vec::new();
+        }
+        let rows = encoded.frames - first;
+        let mut enc_proj = vec![0f32; rows * h];
+        timings.time("enc_proj", || {
+            self.kernels.linear(
+                &self.pool,
+                &encoded.data[first * encoded.width..],
+                rows,
+                &dec.enc_proj,
+                &mut enc_proj,
+                &Epilogue::bias(&dec.enc_proj_b),
+            )
+        });
+        let shape = tdt_beam::Shape {
+            vocab: c.vocab,
+            blank: c.blank,
+            durations: &c.durations,
+            max_symbols: c.max_symbols,
+        };
+        let start = tdt_beam::Start {
+            frame: first,
+            on_frame: state.on_frame,
+            state: state.lstm.clone(),
+            pred: state.pred.clone(),
+        };
+        let mut network = Networks {
+            model: self,
+            enc_proj,
+            first,
+            timings,
+        };
+        let mut tokens = tdt_beam::beam_search(&mut network, &shape, encoded.frames, start, words);
+        for t in &mut tokens {
+            t.frame += offset as u32;
+        }
+        tokens
     }
 
     fn decode_inner(
@@ -1432,40 +1509,63 @@ impl Parakeet {
     /// Runs the prediction network on one token, updating the LSTM state and writing the
     /// projected output to `pred`.
     fn predict(&self, token: usize, state: &mut [f32], pred: &mut [f32]) {
+        self.predict_rows(&[token], state, pred);
+    }
+
+    /// Runs the prediction network on several tokens at once, each with its own LSTM state
+    /// (`[tokens, layers * 2 * hidden]`) and output (`[tokens, hidden]`), so the weights are read
+    /// once for all of them.
+    fn predict_rows(&self, tokens: &[usize], states: &mut [f32], preds: &mut [f32]) {
         let c = &self.config;
         let dec = &self.decoder;
         let k = &self.kernels;
         let h = c.pred_hidden;
-        let mut input = vec![0f32; 2 * h];
-        input[..h].copy_from_slice(&dec.embedding[token * h..(token + 1) * h]);
-        let mut gates = vec![0f32; 4 * h];
+        let (rows, width) = (tokens.len(), c.pred_layers * 2 * h);
+        let mut input = vec![0f32; rows * 2 * h];
+        for (r, &token) in tokens.iter().enumerate() {
+            input[r * 2 * h..r * 2 * h + h]
+                .copy_from_slice(&dec.embedding[token * h..(token + 1) * h]);
+        }
+        let mut gates = vec![0f32; rows * 4 * h];
         for (l, layer) in dec.lstm.iter().enumerate() {
-            let (hs, cs) = state[l * 2 * h..(l + 1) * 2 * h].split_at_mut(h);
-            input[h..].copy_from_slice(hs);
+            for r in 0..rows {
+                let hs = &states[r * width + l * 2 * h..r * width + l * 2 * h + h];
+                input[r * 2 * h + h..(r + 1) * 2 * h].copy_from_slice(hs);
+            }
             k.linear(
                 &self.pool,
                 &input,
-                1,
+                rows,
                 &layer.w,
                 &mut gates,
                 &Epilogue::bias(&layer.b),
             );
-            for j in 0..h {
-                let i = sigmoid(gates[j]);
-                let f = sigmoid(gates[h + j]);
-                let g = gates[2 * h + j].tanh();
-                let o = sigmoid(gates[3 * h + j]);
-                cs[j] = f * cs[j] + i * g;
-                hs[j] = o * cs[j].tanh();
+            for r in 0..rows {
+                let state = &mut states[r * width + l * 2 * h..r * width + (l + 1) * 2 * h];
+                let (hs, cs) = state.split_at_mut(h);
+                let gates = &gates[r * 4 * h..(r + 1) * 4 * h];
+                for j in 0..h {
+                    let i = sigmoid(gates[j]);
+                    let f = sigmoid(gates[h + j]);
+                    let g = gates[2 * h + j].tanh();
+                    let o = sigmoid(gates[3 * h + j]);
+                    cs[j] = f * cs[j] + i * g;
+                    hs[j] = o * cs[j].tanh();
+                }
+                input[r * 2 * h..r * 2 * h + h].copy_from_slice(hs);
             }
-            input[..h].copy_from_slice(hs);
         }
+        let last: Vec<f32> = input
+            .chunks_exact(2 * h)
+            .flat_map(|r| &r[..h])
+            .copied()
+            .collect();
         k.linear(
             &self.pool,
-            &input[..h],
-            1,
+            &last,
+            rows,
             &dec.pred_proj,
-            pred,
+            preds,
             &Epilogue::bias(&dec.pred_proj_b),
         );
     }
@@ -1521,6 +1621,52 @@ fn positions(t: usize, d: usize) -> Vec<f32> {
         }
     }
     out
+}
+
+/// Parakeet's joint and prediction networks as the biased beam search reads them, with the
+/// encoder frames from `first` on already projected for the joint.
+struct Networks<'a> {
+    model: &'a Parakeet,
+    enc_proj: Vec<f32>,
+    first: usize,
+    timings: &'a mut Timings,
+}
+
+impl tdt_beam::TdtNetwork for Networks<'_> {
+    fn state_width(&self) -> usize {
+        let c = &self.model.config;
+        c.pred_layers * 2 * c.pred_hidden
+    }
+
+    fn pred_width(&self) -> usize {
+        self.model.config.pred_hidden
+    }
+
+    fn joint(&mut self, frame: usize, preds: &[f32], out: &mut [f32]) {
+        let m = self.model;
+        let h = m.config.pred_hidden;
+        let row = &self.enc_proj[(frame - self.first) * h..(frame - self.first + 1) * h];
+        let z: Vec<f32> = preds
+            .chunks_exact(h)
+            .flat_map(|p| row.iter().zip(p).map(|(&e, &p)| (e + p).max(0.0)))
+            .collect();
+        self.timings.time("joint", || {
+            m.kernels.linear(
+                &m.pool,
+                &z,
+                preds.len() / h,
+                &m.decoder.joint,
+                out,
+                &Epilogue::bias(&m.decoder.joint_b),
+            )
+        });
+    }
+
+    fn predict(&mut self, tokens: &[usize], states: &mut [f32], preds: &mut [f32]) {
+        let m = self.model;
+        self.timings
+            .time("predict", || m.predict_rows(tokens, states, preds));
+    }
 }
 
 fn sigmoid(x: f32) -> f32 {

@@ -1,6 +1,7 @@
-//! Turns token ids back into text, for the BPE vocabularies of Hugging Face `tokenizer.json`
-//! files that use a Metaspace (`▁`) pre-tokenizer.
+//! Turns token ids back into text, and words into token ids, for the BPE vocabularies of Hugging
+//! Face `tokenizer.json` files that use a Metaspace (`▁`) pre-tokenizer.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::error::{Error, Result};
@@ -22,6 +23,17 @@ pub struct Tokenizer {
     /// Whether the file's decoder includes `ByteFallback`, which decodes each run of byte pieces
     /// on its own and turns a run that isn't valid UTF-8 into one U+FFFD per byte.
     byte_runs: bool,
+    /// The id of each text piece, with `▁` as a space.
+    ids: HashMap<String, u32>,
+    /// The id of each byte piece.
+    byte_ids: [Option<u32>; 256],
+    /// The BPE merges, from the ids of a pair to the merge's rank and the merged piece's id.
+    merges: HashMap<(u32, u32), (u32, u32)>,
+    /// Whether the BPE model spells characters it lacks with byte pieces.
+    byte_fallback: bool,
+    unk: Option<u32>,
+    /// Whether a run of unknown characters becomes one unknown token.
+    fuse_unk: bool,
 }
 
 impl Tokenizer {
@@ -100,7 +112,58 @@ impl Tokenizer {
                             .any(|d| d.get("type").and_then(|t| t.as_str()) == Some("ByteFallback"))
                     })
         });
-        Ok(Tokenizer { pieces, byte_runs })
+
+        let mut ids = HashMap::new();
+        let mut byte_ids = [None; 256];
+        for (id, piece) in pieces.iter().enumerate() {
+            match piece {
+                Piece::Text(text) => {
+                    ids.entry(text.clone()).or_insert(id as u32);
+                }
+                Piece::Byte(b) => byte_ids[*b as usize] = Some(id as u32),
+                Piece::Control => {}
+            }
+        }
+        let unk = model
+            .get("unk_token")
+            .and_then(|u| u.as_str())
+            .and_then(|u| vocab.iter().find(|(piece, _)| piece == u))
+            .and_then(|(_, id)| id.as_u64())
+            .map(|id| id as u32);
+        let mut merges = HashMap::new();
+        let list = model
+            .get("merges")
+            .and_then(|m| m.as_array())
+            .unwrap_or(&[]);
+        for (rank, merge) in list.iter().enumerate() {
+            // Newer files write a merge as a pair, older ones as "left right".
+            let pair = match merge {
+                json::Value::String(s) => s.split_once(' '),
+                json::Value::Array(p) if p.len() == 2 => p[0].as_str().zip(p[1].as_str()),
+                _ => None,
+            };
+            let (left, right) = pair.ok_or_else(|| bad("A merge isn't a pair of pieces."))?;
+            let (left, right) = (
+                left.replace('\u{2581}', " "),
+                right.replace('\u{2581}', " "),
+            );
+            let merged = format!("{left}{right}");
+            if let (Some(&l), Some(&r), Some(&m)) =
+                (ids.get(&left), ids.get(&right), ids.get(&merged))
+            {
+                merges.entry((l, r)).or_insert((rank as u32, m));
+            }
+        }
+        Ok(Tokenizer {
+            pieces,
+            byte_runs,
+            ids,
+            byte_ids,
+            merges,
+            byte_fallback: model.get("byte_fallback").and_then(|b| b.as_bool()) == Some(true),
+            unk,
+            fuse_unk: model.get("fuse_unk").and_then(|b| b.as_bool()) == Some(true),
+        })
     }
 
     /// The vocabulary size, added tokens included.
@@ -120,6 +183,62 @@ impl Tokenizer {
                 .iter()
                 .zip(&self.pieces)
                 .all(|(p, mine)| *mine == Piece::Control || parse_piece(p) == *mine)
+    }
+
+    /// Splits text into token ids as the BPE model does, each word with the word-start marker
+    /// `▁` before it, as the Metaspace pre-tokenizer splits text. Characters the vocabulary lacks
+    /// become byte pieces where the model falls back to bytes, and the unknown token otherwise.
+    ///
+    /// shortcut: the tokenizer file's Unicode normalization (NFKC-like) isn't applied, which only
+    /// matters for compatibility characters such as full-width letters. Apply it if callers pass
+    /// such text.
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4];
+        for word in text.split_whitespace() {
+            let mut symbols: Vec<u32> = Vec::new();
+            for c in std::iter::once(' ').chain(word.chars()) {
+                let c = &*c.encode_utf8(&mut buf);
+                if let Some(&id) = self.ids.get(c) {
+                    symbols.push(id);
+                    continue;
+                }
+                let bytes: Option<Vec<u32>> = self
+                    .byte_fallback
+                    .then(|| c.bytes().map(|b| self.byte_ids[b as usize]).collect())
+                    .flatten();
+                match bytes {
+                    Some(bytes) => symbols.extend(bytes),
+                    None if self.fuse_unk && symbols.last() == self.unk.as_ref() => {}
+                    None => symbols.extend(self.unk),
+                }
+            }
+            // Merge the pair of lowest rank, the leftmost of equals, until no pair merges.
+            while let Some((_, i, merged)) = symbols
+                .windows(2)
+                .enumerate()
+                .filter_map(|(i, p)| {
+                    let &(rank, merged) = self.merges.get(&(p[0], p[1]))?;
+                    Some((rank, i, merged))
+                })
+                .min()
+            {
+                symbols[i] = merged;
+                symbols.remove(i + 1);
+            }
+            out.extend(symbols);
+        }
+        out
+    }
+
+    /// Whether a word may end just before token `id`: it starts a word, or it holds no letter
+    /// or digit (punctuation, a special token).
+    pub fn is_word_boundary(&self, id: u32) -> bool {
+        match self.pieces.get(id as usize) {
+            Some(Piece::Text(t)) => t.starts_with(' ') || !t.chars().any(char::is_alphanumeric),
+            Some(Piece::Byte(b)) => b.is_ascii() && !b.is_ascii_alphanumeric(),
+            Some(Piece::Control) | None => true,
+        }
     }
 
     /// Joins the pieces of `ids` into text. Special tokens are left out, byte pieces are joined
