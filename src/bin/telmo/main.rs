@@ -36,9 +36,7 @@ Options
                    model directory or a GGUF file
   --threads N      Threads to use (default all cores)
   --isa I          scalar, avx2, avx512 or neon (default TELMO_ISA if set,
-                   else avx2 where the CPU has it, else scalar). AVX-512 and
-                   NEON are untested on real hardware, so they run only when
-                   asked for.
+                   else the fastest this CPU runs)
   --precision P    f32, f16, bf16, int8 or q8_0, for pack and for a model that
                    isn't a pack yet (default int8 for Granite and q8_0 for
                    Parakeet)

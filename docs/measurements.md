@@ -258,6 +258,62 @@ registers (8 x 16 with AVX-512) and walks the weights in blocks of 256 inputs. f
 weights are widened in registers when all rows fit in one tile, and otherwise into a buffer that
 stays in L1 while every row reuses it.
 
+## Instruction sets
+
+Telmo uses AVX-512 where the CPU has it, then AVX2, NEON on aarch64 and the plain Rust (scalar)
+kernels elsewhere. `TELMO_ISA`, `--isa` or `Options::isa` picks another. These numbers come from
+two rented machines with Ubuntu 26.04 and Rust 1.97.1.
+
+- 4 cores (8 vCPUs) of an Intel Xeon (Cascade Lake) with AVX-512F, Vultr's vhp-8c-16gb-intel, with
+  16 GB of memory
+- 8 cores of an AWS Graviton4 (Neoverse V2, c8g), with 15 GB of memory
+
+Every instruction set gives the same transcripts of the golden clips and of the first 300
+utterances of the test-clean subset above (Granite in int8 1.26%, Parakeet in q8_0 1.60%), on
+both machines and on the one above. The golden tests pass with each, with layer errors of the size
+in the tables above.
+
+Times real time, best of 3, with the packs `telmo` downloads.
+
+| Machine | Model | Kernels | 5 s, 1 thread | 60 s, 1 thread | 5 s, 8 threads | 60 s, 8 threads |
+|---|---|---|---:|---:|---:|---:|
+| Xeon | Granite | AVX2 | 4.2 | 3.7 | 30.1 | 26.9 |
+| Xeon | Granite | AVX-512 | 4.8 | 3.9 | 31.6 | 28.1 |
+| Xeon | Parakeet | AVX2 | 3.6 | 3.0 | 23.6 | 21.7 |
+| Xeon | Parakeet | AVX-512 | 3.9 | 3.1 | 24.2 | 20.9 |
+| Graviton4 | Granite | scalar | 0.46 | 0.46 | 3.3 | 3.3 |
+| Graviton4 | Granite | NEON | 3.4 | 3.6 | 20.7 | 20.6 |
+| Graviton4 | Parakeet | scalar | 0.39 | 0.38 | 2.8 | 2.6 |
+| Graviton4 | Parakeet | NEON | 2.9 | 2.8 | 17.0 | 16.6 |
+
+With AVX-512 Granite runs 4 to 15% faster than with AVX2, and Parakeet 1 to 8% faster on one to
+four threads. On all 8 vCPUs, two to a core, times vary by about 10% from run to run, and
+Parakeet's 20 and 60 s passes came out 4 to 6% slower in this run and 12 to 16% faster in another.
+NEON runs both models 6 to 8 times faster than the scalar kernels.
+
+The matrix product in GFLOPS (`cargo bench --bench matmul`) on the Xeon and on Graviton4.
+
+| m | k | n | AVX2, 1 thread | AVX-512, 1 thread | AVX2, 8 threads | AVX-512, 8 threads |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 1024 | 4096 | 46 | 62 | 313 | 424 |
+| 128 | 1024 | 4096 | 65 | 73 | 451 | 585 |
+| 512 | 1024 | 4096 | 61 | 63 | 445 | 507 |
+| 8 | 4096 | 1024 | 50 | 61 | 344 | 462 |
+| 128 | 4096 | 1024 | 65 | 65 | 488 | 545 |
+| 512 | 4096 | 1024 | 61 | 62 | 461 | 499 |
+
+| m | k | n | Scalar, 1 thread | NEON, 1 thread | Scalar, 8 threads | NEON, 8 threads |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 1024 | 4096 | 6.2 | 51 | 47 | 283 |
+| 128 | 1024 | 4096 | 6.7 | 53 | 48 | 332 |
+| 512 | 1024 | 4096 | 6.7 | 53 | 48 | 327 |
+| 8 | 4096 | 1024 | 6.2 | 47 | 47 | 262 |
+| 128 | 4096 | 1024 | 6.7 | 50 | 48 | 299 |
+| 512 | 4096 | 1024 | 6.7 | 53 | 47 | 295 |
+
+AVX-512's tile has 8 rows because 12, which its 32 registers would also hold, made products of 512
+rows up to 15% slower than AVX2 on the Xeon.
+
 ## Memory and loading
 
 A pack is mapped, so its weights count as shared file memory, and loading takes milliseconds

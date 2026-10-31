@@ -3,8 +3,7 @@
 //! Every function here is compiled with those features enabled. The table in [`kernels`] is
 //! only built after detection confirms them, which makes the safe wrappers sound.
 //!
-//! These kernels compile, and the tests compare them with the scalar kernels on any CPU with
-//! AVX-512, but they haven't run on real AVX-512 hardware yet.
+//! The tests compare them with the scalar kernels on any CPU with AVX-512.
 
 use std::arch::x86_64::*;
 

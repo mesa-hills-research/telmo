@@ -83,11 +83,8 @@ the other measurements and the hardware are in [docs/measurements.md](docs/measu
   use.
 - Streaming is experimental. Its API may change, and its accuracy is a little below offline
   transcription of the same audio.
-- The AVX2 and plain Rust kernels are the defaults. AVX-512 and NEON kernels exist and pass the
-  tests against the plain ones, but they haven't run on real hardware yet, so they're used only
-  when you ask for them (`--isa avx512` or `neon`, `Options::isa`, or the `TELMO_ISA`
-  environment variable). On Apple silicon that means the plain kernels by default, which are
-  slower.
+- Telmo uses the fastest kernels the CPU has (AVX-512, AVX2 or NEON) and plain Rust elsewhere.
+  `--isa`, `Options::isa` or the `TELMO_ISA` environment variable picks others.
 - Output is bit-identical at every thread count, because threads split the matrix products by
   output columns.
 
