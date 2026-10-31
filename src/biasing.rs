@@ -203,26 +203,23 @@ impl SpecialWords {
     /// Code"). Words of one or two letters or digits are refused, since favouring them would
     /// turn short ordinary words into them.
     pub fn add(&mut self, word: &str) -> Result<(), Rejection> {
-        if word.chars().filter(|c| c.is_alphanumeric()).count() <= 2 {
-            return Err(if word.chars().any(char::is_alphanumeric) {
-                Rejection::TooShort
-            } else {
-                Rejection::Empty
-            });
+        let word = normalize(word)?;
+        match word.chars().filter(|c| c.is_alphanumeric()).count() {
+            0 => Err(Rejection::Empty),
+            1 | 2 => Err(Rejection::TooShort),
+            _ => self.insert(word),
         }
-        self.add_code_word(word)
     }
 
     /// Adds a word seen in code, a path or an identifier, which keeps it even when it has only
     /// one or two letters.
     pub fn add_code_word(&mut self, word: &str) -> Result<(), Rejection> {
-        let parts: Vec<&str> = word.split_whitespace().collect();
-        let word = parts.join(" ");
+        self.insert(normalize(word)?)
+    }
+
+    fn insert(&mut self, word: String) -> Result<(), Rejection> {
         if !word.chars().any(char::is_alphanumeric) {
             return Err(Rejection::Empty);
-        }
-        if word.chars().count() > SpecialWords::MAX_CHARS || parts.len() > SpecialWords::MAX_PARTS {
-            return Err(Rejection::TooLong);
         }
         if word
             .chars()
@@ -259,6 +256,37 @@ impl SpecialWords {
     pub fn set_boost(&mut self, boost: Boost) {
         self.boost = boost;
     }
+}
+
+/// `word` with each run of whitespace as one space and none at its ends. It stops at the first
+/// part or character past [`SpecialWords::MAX_PARTS`] and [`SpecialWords::MAX_CHARS`], so a long
+/// input costs no more than a short one.
+fn normalize(word: &str) -> Result<String, Rejection> {
+    let mut out = String::new();
+    let (mut chars, mut parts, mut space) = (0, 0, false);
+    for c in word.chars() {
+        if c.is_whitespace() {
+            space = !out.is_empty();
+            continue;
+        }
+        if space || out.is_empty() {
+            if space {
+                out.push(' ');
+                chars += 1;
+                space = false;
+            }
+            parts += 1;
+            if parts > SpecialWords::MAX_PARTS {
+                return Err(Rejection::TooLong);
+            }
+        }
+        out.push(c);
+        chars += 1;
+        if chars > SpecialWords::MAX_CHARS {
+            return Err(Rejection::TooLong);
+        }
+    }
+    Ok(out)
 }
 
 /// Combining marks, which a word should hold composed instead (NFC), as the models write it.
@@ -699,6 +727,20 @@ pub(crate) mod tests {
         assert_eq!(words.add_code_word("rg"), Err(Rejection::Duplicate));
         assert_eq!(words.add(&"x".repeat(65)), Err(Rejection::TooLong));
         assert_eq!(words.add("a b c d e f"), Err(Rejection::TooLong));
+        assert_eq!(
+            words.add(&"word ".repeat(1_000_000)),
+            Err(Rejection::TooLong)
+        );
+        assert_eq!(
+            words.add_code_word(&"x".repeat(10_000_000)),
+            Err(Rejection::TooLong)
+        );
+        assert_eq!(
+            normalize("  Visual \t Studio\nCode  "),
+            Ok("Visual Studio Code".to_string())
+        );
+        assert_eq!(normalize(&"x".repeat(64)).map(|w| w.len()), Ok(64));
+        assert_eq!(normalize("a b c d e"), Ok("a b c d e".to_string()));
         assert_eq!(
             words.add("cafe\u{301}"),
             Err(Rejection::UnsupportedCharacters)
