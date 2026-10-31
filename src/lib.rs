@@ -16,9 +16,8 @@
 //! ```
 //!
 //! Offline transcription is what Telmo does today. Streaming ([`stream`]) is experimental. The
-//! kernels use AVX2 or plain Rust by default. AVX-512 and NEON kernels exist but haven't run on
-//! real hardware, so they're used only when named in [`Options::isa`] or the `TELMO_ISA`
-//! environment variable.
+//! kernels use AVX-512, AVX2 or NEON where the CPU has them and plain Rust elsewhere, unless
+//! [`Options::isa`] or the `TELMO_ISA` environment variable names others.
 
 pub mod error;
 pub mod features;

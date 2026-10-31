@@ -3,8 +3,7 @@
 //! Every function here is compiled with NEON enabled. The table in [`kernels`] is only built
 //! after detection confirms it, which makes the safe wrappers sound.
 //!
-//! These kernels compile, and the tests compare them with the scalar kernels on any aarch64
-//! CPU, but they haven't run on real hardware yet.
+//! The tests compare them with the scalar kernels on any aarch64 CPU.
 
 use std::arch::aarch64::*;
 use std::arch::asm;
@@ -19,7 +18,7 @@ pub(crate) fn kernels() -> Kernels {
         tile_rows: TILE_ROWS,
         tile,
         widen,
-        tile_narrow: None,
+        tile_narrow: Some(tile_narrow),
         store: |acc, c, bias, act, scale, accumulate| unsafe {
             store(acc, c, bias, act, scale, accumulate)
         },
@@ -108,6 +107,140 @@ unsafe fn tile_rows<const R: usize>(
     for (r, acc) in acc.iter().enumerate() {
         for (q, v) in acc.iter().enumerate() {
             unsafe { vst1q_f32(out.add(r * PANEL + q * 4), *v) };
+        }
+    }
+}
+
+/// # Safety
+/// As for `tile`, with `b` holding `k` runs of 16 narrow values and `scales` as `widen` takes
+/// them, and the CPU must have NEON.
+unsafe fn tile_narrow(
+    precision: Precision,
+    k: usize,
+    a: *const f32,
+    lda: usize,
+    rows: usize,
+    b: *const u8,
+    scales: *const f32,
+    out: *mut f32,
+    load: bool,
+) {
+    macro_rules! rows {
+        ($p:expr) => {
+            match rows {
+                6 => tile_narrow_rows::<6, { $p }>(k, a, lda, b, scales, out, load),
+                5 => tile_narrow_rows::<5, { $p }>(k, a, lda, b, scales, out, load),
+                4 => tile_narrow_rows::<4, { $p }>(k, a, lda, b, scales, out, load),
+                3 => tile_narrow_rows::<3, { $p }>(k, a, lda, b, scales, out, load),
+                2 => tile_narrow_rows::<2, { $p }>(k, a, lda, b, scales, out, load),
+                1 => tile_narrow_rows::<1, { $p }>(k, a, lda, b, scales, out, load),
+                _ => unreachable!("tiles have 1 to 6 rows"),
+            }
+        };
+    }
+    // SAFETY: passed on from the caller.
+    unsafe {
+        match precision {
+            Precision::F32 => unreachable!("f32 weights use the plain tile"),
+            Precision::F16 => rows!(F16),
+            Precision::Bf16 => rows!(BF16),
+            Precision::Int8 => rows!(INT8),
+            Precision::Q8_0 => rows!(Q8_0),
+        }
+    }
+}
+
+const F16: u8 = 0;
+const BF16: u8 = 1;
+const INT8: u8 = 2;
+const Q8_0: u8 = 3;
+
+/// An `R x 16` register tile over narrow weights, each input's 16 values widened once in
+/// registers (int8 times its scale) and shared by the `R` rows. The values and the order of the
+/// fused multiply-adds are those of `widen` followed by `tile_rows`, so the sums are identical.
+#[target_feature(enable = "neon")]
+unsafe fn tile_narrow_rows<const R: usize, const P: u8>(
+    k: usize,
+    a: *const f32,
+    lda: usize,
+    b: *const u8,
+    scales: *const f32,
+    out: *mut f32,
+    load: bool,
+) {
+    let mut acc = [[vdupq_n_f32(0.0); 4]; R];
+    // SAFETY: the caller guarantees `out` holds R rows of 16, `a` R rows of `k` values, `b`
+    // `k` runs of 16 values, and the scales.
+    unsafe {
+        if load {
+            for (r, acc) in acc.iter_mut().enumerate() {
+                *acc = load16(out.add(r * PANEL));
+            }
+        }
+        let mut rows = [a; R];
+        for (r, row) in rows.iter_mut().enumerate() {
+            *row = a.add(r * lda);
+        }
+        let step = if P == F16 || P == BF16 { 32 } else { 16 };
+        let mut s = [vdupq_n_f32(1.0); 4];
+        if P == INT8 {
+            s = load16(scales);
+        }
+        let mut i = 0;
+        while i < k {
+            let end = if P == Q8_0 {
+                s = load16(scales.add(i / Q8_BLOCK * PANEL));
+                (i + Q8_BLOCK).min(k)
+            } else {
+                k
+            };
+            while i < end {
+                let p = b.add(i * step);
+                let w = if P == F16 {
+                    let (lo, hi) = (
+                        vld1q_u16(p as *const u16),
+                        vld1q_u16(p.add(16) as *const u16),
+                    );
+                    [
+                        f16_low_to_f32(lo),
+                        f16_high_to_f32(lo),
+                        f16_low_to_f32(hi),
+                        f16_high_to_f32(hi),
+                    ]
+                } else if P == BF16 {
+                    let (lo, hi) = (
+                        vld1q_u16(p as *const u16),
+                        vld1q_u16(p.add(16) as *const u16),
+                    );
+                    [
+                        vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(lo))),
+                        vreinterpretq_f32_u32(vshll_high_n_u16::<16>(lo)),
+                        vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(hi))),
+                        vreinterpretq_f32_u32(vshll_high_n_u16::<16>(hi)),
+                    ]
+                } else {
+                    let q = vld1q_s8(p as *const i8);
+                    let (lo, hi) = (vmovl_s8(vget_low_s8(q)), vmovl_high_s8(q));
+                    [
+                        vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(lo))), s[0]),
+                        vmulq_f32(vcvtq_f32_s32(vmovl_high_s16(lo)), s[1]),
+                        vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(hi))), s[2]),
+                        vmulq_f32(vcvtq_f32_s32(vmovl_high_s16(hi)), s[3]),
+                    ]
+                };
+                for r in 0..R {
+                    let av = *rows[r].add(i);
+                    for q in 0..4 {
+                        acc[r][q] = vfmaq_n_f32(acc[r][q], w[q], av);
+                    }
+                }
+                i += 1;
+            }
+        }
+        for (r, acc) in acc.iter().enumerate() {
+            for (q, v) in acc.iter().enumerate() {
+                vst1q_f32(out.add(r * PANEL + q * 4), *v);
+            }
         }
     }
 }

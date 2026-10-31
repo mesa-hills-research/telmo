@@ -28,7 +28,7 @@ pub(crate) mod scalar;
 /// Output columns per weight panel, the width of the matrix product's register tile.
 pub const PANEL: usize = 16;
 /// Rows of the matrix product's register tile on AVX2, on NEON and in the scalar kernels.
-/// AVX-512 uses 12 (see [`Kernels::tile_rows`]).
+/// AVX-512 uses 8 (see [`Kernels::tile_rows`]).
 pub const TILE_ROWS: usize = 6;
 /// Inputs per block of the matrix product (a 16 KB block of a weight panel).
 const KC: usize = 256;
@@ -50,39 +50,25 @@ impl Isa {
 
     /// The instruction set used unless a caller names one: the one the `TELMO_ISA`
     /// environment variable names (`scalar`, `avx2`, `avx512` or `neon`) if this CPU runs it,
-    /// otherwise AVX2 where the CPU has it and the scalar kernels elsewhere.
-    ///
-    /// The AVX-512 and NEON kernels are compared with the scalar ones by the tests but haven't
-    /// run on real hardware yet, so they are used only when named, here or in `Options::isa`.
+    /// otherwise the fastest one this CPU runs.
     pub fn detect() -> Isa {
         Isa::choose(std::env::var("TELMO_ISA").ok().as_deref())
     }
 
     /// The default for a value of `TELMO_ISA`.
     fn choose(requested: Option<&str>) -> Isa {
-        if let Some(isa) = requested.and_then(Isa::from_name)
-            && isa.is_supported()
-        {
-            return isa;
-        }
-        if Isa::Avx2.is_supported() {
-            Isa::Avx2
-        } else {
-            Isa::Scalar
+        match requested.and_then(Isa::from_name) {
+            Some(isa) if isa.is_supported() => isa,
+            _ => Isa::fastest(),
         }
     }
 
-    /// The fastest instruction set this CPU supports, AVX-512 and NEON included.
+    /// The fastest instruction set this CPU supports.
     pub fn fastest() -> Isa {
         [Isa::Avx512, Isa::Avx2, Isa::Neon]
             .into_iter()
             .find(|isa| isa.is_supported())
             .unwrap_or(Isa::Scalar)
-    }
-
-    /// Whether the kernels have run on real hardware. The others are opt-in.
-    pub fn is_verified(self) -> bool {
-        matches!(self, Isa::Scalar | Isa::Avx2)
     }
 
     /// Whether this CPU can run the instruction set. Those of other architectures never run.
@@ -861,15 +847,19 @@ mod tests {
     }
 
     #[test]
-    fn only_kernels_run_on_real_hardware_are_chosen_unless_named() {
+    fn the_fastest_kernels_are_chosen_unless_others_are_named() {
         let default = Isa::choose(None);
-        assert!(default.is_verified() && default.is_supported());
-        assert_eq!(default == Isa::Avx2, Isa::Avx2.is_supported());
+        assert_eq!(default, Isa::fastest());
+        if Isa::Avx512.is_supported() {
+            assert_eq!(default, Isa::Avx512);
+        } else if Isa::Avx2.is_supported() {
+            assert_eq!(default, Isa::Avx2);
+        }
+        assert_eq!(default == Isa::Neon, Isa::Neon.is_supported());
         assert_eq!(Isa::choose(Some("scalar")), Isa::Scalar);
         assert_eq!(Isa::choose(Some("bogus")), default);
-        for name in ["avx512", "neon"] {
+        for name in ["scalar", "avx2", "avx512", "neon"] {
             let isa = Isa::from_name(name).unwrap();
-            assert!(!isa.is_verified());
             let want = if isa.is_supported() { isa } else { default };
             assert_eq!(Isa::choose(Some(name)), want);
         }
