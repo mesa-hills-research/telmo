@@ -20,7 +20,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! telmo = { version = "0.2", default-features = false }
+//! telmo = { version = "0.3", default-features = false }
 //! ```
 //!
 //! [`Model::transcribe_biased`] favours a list of [`SpecialWords`], such as names and technical
