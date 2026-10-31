@@ -11,12 +11,13 @@ use crate::sha256;
 /// How long a connection may send nothing before the download gives up.
 pub const STALL: Duration = Duration::from_secs(30);
 
-/// A client that names Telmo and its version, follows redirects, uses a proxy from the
-/// environment (`HTTPS_PROXY` and the like) and gives up on a connection that sends nothing for
-/// `stall`.
+/// A client that names Telmo and its version, follows redirects, uses the proxy that
+/// `ALL_PROXY`, `HTTPS_PROXY` and `NO_PROXY` describe, and gives up on a lookup, a connection or
+/// a read or write that takes longer than `stall`.
 pub fn agent(stall: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .user_agent(concat!("telmo/", env!("CARGO_PKG_VERSION")))
+        .timeout_resolve(Some(stall))
         .timeout_connect(Some(stall))
         .timeout_per_read(Some(stall))
         .timeout_per_write(Some(stall))
@@ -87,55 +88,94 @@ pub fn fetch(
     Ok(())
 }
 
-fn download(agent: &ureq::Agent, url: &str, path: &Path, size: u64) -> Result<(), Error> {
-    // A file longer than it should be can't be resumed.
-    let have = fs::metadata(path).map_or(0, |m| m.len());
-    let resume_at = if have < size { have } else { 0 };
-    let mut request = agent.get(url);
-    if resume_at > 0 {
-        request = request.header("Range", format!("bytes={resume_at}-"));
-    }
-    let response = request.call().map_err(failed)?;
-    let status = response.status();
-    let start = match status.as_u16() {
-        // The whole file, also from a server that ignores Range.
-        200 => 0,
-        206 if range_start(&response) == Some(resume_at) => resume_at,
-        206 => {
-            return Err(Error::Failed {
-                reason: "the server sent a part that wasn't asked for".into(),
-                retry: false,
-            });
-        }
-        // The server has less than the partial file, so that file can't be resumed.
-        416 if resume_at > 0 => {
-            drop(response);
-            fs::remove_file(path)
-                .map_err(|e| Error::File(format!("Couldn't delete {} ({e}).", path.display())))?;
-            eprintln!("The server couldn't resume the download, so Telmo starts it over.");
-            return download(agent, url, path, size);
-        }
-        code => {
-            return Err(Error::Failed {
-                reason: format!(
-                    "the server answered {code} {}",
-                    status.canonical_reason().unwrap_or("")
-                )
-                .trim_end()
-                .into(),
-                retry: matches!(code, 408 | 429 | 500..),
-            });
-        }
-    };
-    let write_error =
-        |e: io::Error| Error::File(format!("Couldn't write {} ({e}).", path.display()));
-    let mut file = if start == 0 {
-        File::create(path)
-    } else {
-        OpenOptions::new().append(true).open(path)
-    }
-    .map_err(write_error)?;
+type Response = ureq::http::Response<ureq::Body>;
 
+/// Gets what `path` is missing. A partial file is resumed with a Range request. When the server
+/// sends the whole file instead, it goes into a replacement, which takes the partial's place
+/// only once it holds more of the file, so a failure never loses what the partial had.
+fn download(agent: &ureq::Agent, url: &str, path: &Path, size: u64) -> Result<(), Error> {
+    let have = fs::metadata(path).map_or(0, |m| m.len());
+    // A file longer than it should be can't be resumed.
+    if have == 0 || have > size {
+        let response = agent.get(url).call().map_err(failed)?;
+        return receive_whole(response, path, path, size);
+    }
+    let response = agent
+        .get(url)
+        .header("Range", format!("bytes={have}-"))
+        .call()
+        .map_err(failed)?;
+    let mut replacement = path.as_os_str().to_owned();
+    replacement.push(".new");
+    let replacement = Path::new(&replacement);
+    match response.status().as_u16() {
+        206 => {
+            let rest = size - have;
+            if content_range(&response) != Some((have, size - 1, size))
+                || content_length(&response).is_some_and(|n| n != rest)
+            {
+                return Err(Error::Failed {
+                    reason: "the server sent a part that wasn't asked for".into(),
+                    retry: false,
+                });
+            }
+            let file = OpenOptions::new()
+                .append(true)
+                .open(path)
+                .map_err(|e| write_error(path, e))?;
+            receive(response, file, path, have, size)
+        }
+        // The server ignored the Range header.
+        200 => receive_whole(response, path, replacement, size),
+        // The server has less than the partial file.
+        416 => {
+            drop(response);
+            eprintln!("The server couldn't resume the download, so Telmo starts it over.");
+            let response = agent.get(url).call().map_err(failed)?;
+            receive_whole(response, path, replacement, size)
+        }
+        _ => Err(status_error(&response)),
+    }
+}
+
+/// Receives the whole file from a 200 response into `into`, which becomes `path` (if it isn't
+/// already) once it holds more than `path` does.
+fn receive_whole(response: Response, path: &Path, into: &Path, size: u64) -> Result<(), Error> {
+    if response.status() != 200 {
+        return Err(status_error(&response));
+    }
+    if let Some(n) = content_length(&response).filter(|&n| n != size) {
+        return Err(Error::Failed {
+            reason: format!("the server's file is {n} bytes instead of {size}"),
+            retry: false,
+        });
+    }
+    let file = File::create(into).map_err(|e| write_error(into, e))?;
+    let result = receive(response, file, into, 0, size);
+    if into != path {
+        let length = |p: &Path| fs::metadata(p).map_or(0, |m| m.len());
+        if length(into) > length(path) {
+            let moved = fs::rename(into, path);
+            // A failed download matters more than a failed move after it.
+            if let (Ok(()), Err(e)) = (&result, moved) {
+                let (from, to) = (into.display(), path.display());
+                return Err(Error::File(format!("Couldn't move {from} to {to} ({e}).")));
+            }
+        } else {
+            let _ = fs::remove_file(into);
+        }
+    }
+    result
+}
+
+/// Writes the body of `response` to `file`, which already holds `start` of the `size` bytes.
+fn receive(
+    response: Response,
+    mut file: File,
+    path: &Path,
+    start: u64,
+    size: u64,
+) -> Result<(), Error> {
     let mut body = response.into_body().into_reader().take(size - start);
     let mut progress = Progress::new(start, size);
     let mut buffer = vec![0; 1 << 16];
@@ -151,7 +191,7 @@ fn download(agent: &ureq::Agent, url: &str, path: &Path, size: u64) -> Result<()
             Ok(0) => break Ok(()),
             Ok(n) => {
                 if let Err(e) = file.write_all(&buffer[..n]) {
-                    break Err(write_error(e));
+                    break Err(write_error(path, e));
                 }
                 done += n as u64;
                 progress.show(done);
@@ -164,11 +204,36 @@ fn download(agent: &ureq::Agent, url: &str, path: &Path, size: u64) -> Result<()
     result
 }
 
-/// The first byte of a 206 response's `Content-Range: bytes FIRST-LAST/SIZE`.
-fn range_start(response: &ureq::http::Response<ureq::Body>) -> Option<u64> {
-    let range = response.headers().get("Content-Range")?.to_str().ok()?;
-    let (first, _) = range.strip_prefix("bytes ")?.split_once('-')?;
-    first.parse().ok()
+fn write_error(path: &Path, e: io::Error) -> Error {
+    Error::File(format!("Couldn't write {} ({e}).", path.display()))
+}
+
+fn status_error(response: &Response) -> Error {
+    let status = response.status();
+    let reason = status.canonical_reason().unwrap_or("");
+    Error::Failed {
+        reason: format!("the server answered {} {reason}", status.as_u16())
+            .trim_end()
+            .into(),
+        retry: matches!(status.as_u16(), 408 | 429 | 500..),
+    }
+}
+
+fn header<'a>(response: &'a Response, name: &str) -> Option<&'a str> {
+    response.headers().get(name)?.to_str().ok()
+}
+
+fn content_length(response: &Response) -> Option<u64> {
+    header(response, "Content-Length")?.parse().ok()
+}
+
+/// `(FIRST, LAST, SIZE)` from a 206 response's `Content-Range: bytes FIRST-LAST/SIZE`.
+fn content_range(response: &Response) -> Option<(u64, u64, u64)> {
+    let (range, size) = header(response, "Content-Range")?
+        .strip_prefix("bytes ")?
+        .split_once('/')?;
+    let (first, last) = range.split_once('-')?;
+    Some((first.parse().ok()?, last.parse().ok()?, size.parse().ok()?))
 }
 
 /// What went wrong in a request, in words for a message, and whether running it again may help.
@@ -264,6 +329,10 @@ mod tests {
         Body,
         /// Sends the whole body and ignores a Range header.
         IgnoreRange,
+        /// Answers like `IgnoreRange`, but closes the connection after `n` bytes.
+        IgnoreRangeDropAfter(usize),
+        /// Sends a 206 with this Content-Range and this many bytes of the body.
+        Part(&'static str, usize),
         /// Answers like `Body`, but closes the connection after `n` bytes.
         DropAfter(usize),
         /// Answers like `Body`, but sends nothing after `n` bytes until the client hangs up.
@@ -361,6 +430,15 @@ mod tests {
             Reply::IgnoreRange => {
                 send(head("200 OK", body, "").as_bytes());
                 send(body);
+            }
+            Reply::IgnoreRangeDropAfter(n) => {
+                send(head("200 OK", body, "").as_bytes());
+                send(&body[..n]);
+            }
+            Reply::Part(content_range, n) => {
+                let extra = format!("Content-Range: {content_range}\r\n");
+                send(head("206 Partial Content", &body[..n], &extra).as_bytes());
+                send(&body[..n]);
             }
             Reply::DropAfter(n) => {
                 send(head(status, part, &content_range).as_bytes());
@@ -493,8 +571,98 @@ mod tests {
             fetch_from(&server, &path, &body),
             failure("the server answered 416 Range Not Satisfiable", false)
         );
-        assert!(!path.exists());
+        assert_eq!(fs::read(&path).unwrap(), [0; 1000], "the partial is kept");
         assert_eq!(server.ranges(), [Some("bytes=1000-".to_string()), None]);
+
+        let server = Server::start(
+            body.clone(),
+            vec![Reply::Status(416), Reply::DropAfter(500)],
+        );
+        assert_eq!(
+            fetch_from(&server, &path, &body),
+            failure("the connection closed early", true)
+        );
+        assert_eq!(fs::read(&path).unwrap(), [0; 1000], "the partial is kept");
+        assert!(!dir.join("model.bin.new").exists());
+        server.ranges();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_restart_takes_the_partials_place_only_once_it_holds_more() {
+        let dir = crate::tests::temp_dir("download-replace");
+        let path = dir.join("model.bin");
+        let body = body();
+        fs::write(&path, &body[..100_000]).unwrap();
+        let server = Server::start(body.clone(), vec![Reply::IgnoreRangeDropAfter(50_000)]);
+        assert_eq!(
+            fetch_from(&server, &path, &body),
+            failure("the connection closed early", true)
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            &body[..100_000],
+            "the partial is kept"
+        );
+        assert!(!dir.join("model.bin.new").exists());
+        server.ranges();
+
+        let server = Server::start(
+            body.clone(),
+            vec![Reply::IgnoreRangeDropAfter(150_000), Reply::Body],
+        );
+        assert_eq!(fetch_from(&server, &path, &body), Ok(()));
+        assert_eq!(fs::read(&path).unwrap(), body);
+        assert_eq!(
+            server.ranges(),
+            [
+                Some("bytes=100000-".to_string()),
+                Some("bytes=150000-".to_string())
+            ]
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_part_other_than_the_rest_of_the_file_leaves_the_partial_alone() {
+        let dir = crate::tests::temp_dir("download-bad-range");
+        let path = dir.join("model.bin");
+        let body = body();
+        for (content_range, length) in [
+            ("bytes 0-299999/300000", 300_000),
+            ("bytes 1000-1999/300000", 1000),
+            ("bytes 1000-999/300000", 0),
+            ("bytes 1000-299999/400000", 299_000),
+            ("bytes 1000-299999/300000", 1000),
+            ("bytes 1000-299999", 299_000),
+            ("1000-299999/300000", 299_000),
+        ] {
+            fs::write(&path, &body[..1000]).unwrap();
+            let server = Server::start(body.clone(), vec![Reply::Part(content_range, length)]);
+            assert_eq!(
+                fetch_from(&server, &path, &body),
+                failure("the server sent a part that wasn't asked for", false),
+                "{content_range}, {length} bytes"
+            );
+            assert_eq!(fs::read(&path).unwrap(), &body[..1000]);
+            server.ranges();
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_whole_file_of_the_wrong_length_is_refused() {
+        let dir = crate::tests::temp_dir("download-wrong-length");
+        let path = dir.join("model.bin");
+        let body = body();
+        let server = Server::start(body[..1000].to_vec(), vec![Reply::Body]);
+        let agent = agent(Duration::from_secs(1));
+        assert_eq!(
+            fetch(&agent, &server.url, &path, 300_000, &digest(&body)),
+            failure("the server's file is 1000 bytes instead of 300000", false)
+        );
+        assert!(!path.exists());
+        server.ranges();
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -618,15 +786,18 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_start_of_a_content_range() {
+    fn reads_a_content_range() {
         let response = |range: &str| {
             ureq::http::Response::builder()
                 .header("Content-Range", range)
                 .body(ureq::Body::builder().data(""))
                 .unwrap()
         };
-        assert_eq!(range_start(&response("bytes 1000-1999/2000")), Some(1000));
-        assert_eq!(range_start(&response("bytes */2000")), None);
-        assert_eq!(range_start(&response("items 0-1/2")), None);
+        let range = |r| content_range(&response(r));
+        assert_eq!(range("bytes 1000-1999/2000"), Some((1000, 1999, 2000)));
+        assert_eq!(range("bytes */2000"), None);
+        assert_eq!(range("bytes 0-1/*"), None);
+        assert_eq!(range("bytes 0-1"), None);
+        assert_eq!(range("items 0-1/2"), None);
     }
 }
