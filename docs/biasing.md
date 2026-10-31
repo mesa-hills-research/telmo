@@ -102,6 +102,18 @@ LibriSpeech utterances ("and" became "json" once) and 5 times in the 600 Europea
 utterances, where short identifiers resemble foreign words ("MP" became "mcp"). Parakeet did so 5 times, all in one
 test-other chapter whose character Wicker it heard as "waker" (a Rust type on the list).
 
+### Streaming
+
+50 utterances of the reporting half went through `UtteranceStream` in steps of half a second,
+with a pass after each step and a final pass at the end.
+
+| | Granite | Granite with the list | Parakeet | Parakeet with the list |
+|---|---:|---:|---:|---:|
+| Rare words transcribed right, streamed | 66.7% | 85.7% | 38.1% | 71.4% |
+| Rare words transcribed right, offline | 66.7% | 85.7% | 39.7% | 74.6% |
+| Word error rate, streamed | 4.58% | 3.65% | 6.52% | 4.97% |
+| Word error rate, offline | 4.19% | 3.18% | 6.21% | 4.50% |
+
 ### Choosing the settings
 
 The settings were chosen on the tuning half and the 1,000 ordinary utterances, as the strongest
@@ -154,8 +166,10 @@ another identifier on the list. Parakeet turned some "cube control" into kubectl
 On 4 threads, Granite's spotting with 300 words adds about 30 ms per minute of audio to the
 150 ms its CTC head and greedy decoding take, and Parakeet's beam search takes about 470 ms per
 minute of audio where greedy decoding takes 210 ms. The encoders take 4.5 to 6 seconds per
-minute of audio, so the list adds under 1% to Granite's time and about 5% to Parakeet's. The
-machine is the one in [measurements.md](measurements.md#machine), with other work running.
+minute of audio, so the list adds under 1% to Granite's time and about 5% to Parakeet's. In the
+streaming test above, the passes took 2% longer with the list for Granite and 12% longer for
+Parakeet, whose passes decode the whole utterance again. The machine is the one in
+[measurements.md](measurements.md#machine), with other work running.
 
 ## Limits
 
