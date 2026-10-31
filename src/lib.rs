@@ -15,6 +15,14 @@
 //! # Ok::<(), telmo::Error>(())
 //! ```
 //!
+//! The default `download` feature is for the `telmo` command, which downloads models over
+//! HTTPS. Turn it off and the library builds with no dependencies.
+//!
+//! ```toml
+//! [dependencies]
+//! telmo = { version = "0.1", default-features = false }
+//! ```
+//!
 //! Offline transcription is what Telmo does today. Streaming ([`stream`]) is experimental. The
 //! kernels use AVX2 or plain Rust by default. AVX-512 and NEON kernels exist but haven't run on
 //! real hardware, so they're used only when named in [`Options::isa`] or the `TELMO_ISA`

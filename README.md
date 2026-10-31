@@ -1,7 +1,7 @@
 # Telmo
 
-Telmo is a speech recognition engine in pure Rust that runs on the CPU, with no dependencies.
-It transcribes with two open models, both with punctuation and capitals.
+Telmo is a speech recognition engine in pure Rust that runs on the CPU, in a library with no
+dependencies. It transcribes with two open models, both with punctuation and capitals.
 
 - IBM's [Granite Speech 5.0 470M TurboCTC](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc),
   for English, French, German, Spanish, Portuguese, Italian and Japanese. It's the default, with
@@ -19,6 +19,9 @@ own weight file, which loads in milliseconds by mapping it into memory.
 ```text
 cargo install telmo
 ```
+
+The `telmo` command downloads models over HTTPS with [ureq](https://crates.io/crates/ureq) and
+[rustls](https://crates.io/crates/rustls).
 
 ## Transcribe
 
@@ -42,6 +45,14 @@ telmo transcribe --model granite-int8.pack speech.wav
 ```
 
 ## Use it as a library
+
+The default `download` feature is for the command. Turn it off and the library builds with no
+dependencies.
+
+```toml
+[dependencies]
+telmo = { version = "0.1", default-features = false }
+```
 
 ```rust
 use telmo::{Model, Options};
