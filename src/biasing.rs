@@ -32,6 +32,7 @@ pub struct Boost {
     beam: usize,
     spotting_bonus: f32,
     spotting_margin: f32,
+    short_word_margin: f32,
 }
 
 impl Default for Boost {
@@ -41,9 +42,14 @@ impl Default for Boost {
             beam: 4,
             spotting_bonus: 4.0,
             spotting_margin: 2.0,
+            short_word_margin: SHORT_WORD_MARGIN,
         }
     }
 }
+
+/// The default extra spotting margin for each letter a word has below
+/// [`Boost::SHORT_WORD_LETTERS`].
+const SHORT_WORD_MARGIN: f32 = 3.0;
 
 impl Boost {
     /// The largest bonus a token may earn, in log probability.
@@ -52,6 +58,8 @@ impl Boost {
     pub const MAX_BEAM: usize = 16;
     /// The largest spotting margin, in log probability.
     pub const MAX_MARGIN: f32 = 50.0;
+    /// Spotted words with fewer letters or digits than this need a larger margin.
+    pub const SHORT_WORD_LETTERS: usize = 5;
 
     /// Settings for both models. `bonus` is Parakeet's bonus for each token of a special word and
     /// `beam` the hypotheses its beam search keeps. `spotting_bonus` is Granite's bonus for each
@@ -88,6 +96,23 @@ impl Boost {
             beam,
             spotting_bonus,
             spotting_margin,
+            ..Boost::default()
+        })
+    }
+
+    /// Sets how much more a spotted word must beat the greedy words for each letter or digit it
+    /// has below [`Boost::SHORT_WORD_LETTERS`], from 0 to [`Boost::MAX_MARGIN`]. A short word
+    /// carries little sound, so it needs a stronger case to replace a common word.
+    pub fn with_short_word_margin(self, margin: f32) -> Result<Boost> {
+        if !(0.0..=Boost::MAX_MARGIN).contains(&margin) {
+            return Err(Error::Setting(format!(
+                "The short-word margin must be from 0 to {}.",
+                Boost::MAX_MARGIN
+            )));
+        }
+        Ok(Boost {
+            short_word_margin: margin,
+            ..self
         })
     }
 
@@ -105,6 +130,10 @@ impl Boost {
 
     pub fn spotting_margin(&self) -> f32 {
         self.spotting_margin
+    }
+
+    pub fn short_word_margin(&self) -> f32 {
+        self.short_word_margin
     }
 }
 
@@ -489,6 +518,8 @@ pub(crate) struct Form {
     columns: Vec<usize>,
     /// The bonus for spotting it.
     bonus: f32,
+    /// How much a spotting of it must beat the greedy words by.
+    margin: f32,
 }
 
 impl Form {
@@ -528,6 +559,7 @@ impl Compiled {
     ) -> (Compiled, Vec<(String, Rejection)>) {
         let boost = words.boost;
         let mut forms: Vec<Vec<u32>> = Vec::new();
+        let mut letters: Vec<usize> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut unusable = Vec::new();
         for word in words.words() {
@@ -548,6 +580,7 @@ impl Compiled {
                     usable = true;
                     if seen.insert(tokens.clone()) {
                         forms.push(tokens);
+                        letters.push(spelling.chars().filter(|c| c.is_alphanumeric()).count());
                     }
                 }
             }
@@ -572,13 +605,16 @@ impl Compiled {
         tokens.dedup();
         let forms = forms
             .into_iter()
-            .map(|t| {
+            .zip(letters)
+            .map(|(t, letters)| {
                 let share = if t.len() == 1 {
                     SINGLE_PIECE_SHARE
                 } else {
                     1.0
                 };
+                let missing = Boost::SHORT_WORD_LETTERS.saturating_sub(letters);
                 Form {
+                    margin: boost.spotting_margin + boost.short_word_margin * missing as f32,
                     columns: t
                         .iter()
                         .map(|id| 2 + tokens.binary_search(id).expect("a form's token is listed"))

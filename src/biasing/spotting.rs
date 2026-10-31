@@ -97,7 +97,6 @@ pub(crate) fn spot(
     };
 
     let mut spots = Vec::new();
-    let margin = words.boost.spotting_margin;
     for (index, form) in words.forms.iter().enumerate() {
         // The best path to each state, apart for paths that have covered a word's frame and
         // paths that haven't, so a cheaper path over blanks can't hide one that may replace.
@@ -145,7 +144,7 @@ pub(crate) fn spot(
                 continue;
             }
             for s in [states - 2, states - 1] {
-                let gain = form.bonus - cost_of[s][1] - margin;
+                let gain = form.bonus - cost_of[s][1] - form.margin;
                 if gain > 0.0 {
                     let spot = Spot {
                         form: index,
@@ -264,6 +263,7 @@ fn align(form: &Form, first: usize, last: usize, cost: &dyn Fn(usize, usize) -> 
 
 #[cfg(test)]
 mod tests {
+    use super::super::Boost;
     use super::super::tests::{special, tokenizer};
     use super::*;
 
@@ -346,6 +346,25 @@ mod tests {
         let ids: Vec<u32> = out.iter().map(|t| t.id).collect();
         assert_eq!(ids, vec![6, 1, 2, 3]);
         assert_eq!(ranges, vec![1..4]);
+    }
+
+    #[test]
+    fn a_short_word_needs_a_larger_margin() {
+        let tok = tokenizer();
+        // "kub" has three letters in two tokens, "▁ku" and "b".
+        assert_eq!(tok.encode("kub"), vec![1, 14]);
+        let best = [6, 0, 4, 4, 0, 0];
+        let greedy = ctc(&best);
+        let set = [(2, 1, -1.0), (3, 14, -1.0)];
+        let spotted = |short: f32| {
+            let mut list = special(&["kub"]);
+            list.set_boost(Boost::default().with_short_word_margin(short).unwrap());
+            let (c, _) = Compiled::new(&list, &tok);
+            spot(&c, &tok, &greedy, &scores(&c, &best, &set), 0).1.len()
+        };
+        assert_eq!(spotted(0.0), 1);
+        assert_eq!(spotted(1.0), 1);
+        assert_eq!(spotted(2.5), 0);
     }
 
     #[test]
