@@ -20,7 +20,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! telmo = { version = "0.1", default-features = false }
+//! telmo = { version = "0.2", default-features = false }
 //! ```
 //!
 //! Offline transcription is what Telmo does today. Streaming ([`stream`]) is experimental. The
