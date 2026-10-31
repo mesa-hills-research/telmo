@@ -4,11 +4,10 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use telmo::model::ModelType;
 
-use crate::sha256;
+use crate::download::{self, megabytes};
 
 /// A file of a model on Hugging Face.
 #[derive(Debug, PartialEq)]
@@ -98,10 +97,6 @@ pub const KNOWN_MODELS: [&KnownModel; 2] = [&GRANITE, &PARAKEET];
 /// The command that runs curl in the steps printed for a manual install. PowerShell has `curl`
 /// as an alias of another command.
 const CURL: &str = if cfg!(windows) { "curl.exe" } else { "curl" };
-
-fn megabytes(bytes: u64) -> u64 {
-    (bytes + 500_000) / 1_000_000
-}
 
 impl KnownModel {
     pub fn named(name: &str) -> Option<&'static KnownModel> {
@@ -222,39 +217,27 @@ fn download_and_pack(model: &KnownModel, cache: &Path) -> Result<PathBuf, String
     let downloads = cache.join("downloads");
     let dir = downloads.join(model.download_dir_name());
     fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create {} ({e}).", dir.display()))?;
+    let agent = download::agent(download::STALL);
     for file in model.files {
         let path = dir.join(file.name);
-        let have = fs::metadata(&path).map_or(0, |m| m.len());
-        if have != file.bytes {
-            // A file larger than it should be can't be resumed.
-            if have > file.bytes {
-                fs::remove_file(&path)
-                    .map_err(|e| format!("Couldn't delete {} ({e}).", path.display()))?;
+        let url = model.url(file.name);
+        let Err(e) = download::fetch(&agent, &url, &path, file.bytes, file.sha256) else {
+            continue;
+        };
+        let name = file.name;
+        return Err(match e {
+            download::Error::Failed { reason, retry } if retry => {
+                format!("Couldn't download {name} ({reason}). Run the command again to resume.")
             }
-            match megabytes(file.bytes) {
-                0 => eprintln!("{}", file.name),
-                mb => eprintln!("{} ({mb} MB)", file.name),
-            }
-            download(&model.url(file.name), &path).map_err(|e| match e {
-                Download::NoCurl => format!(
-                    "Telmo downloads models with curl, which isn't installed. Install curl, or install the model by hand.\n\n{}",
-                    manual_steps(model, cache)
-                ),
-                Download::Failed => format!(
-                    "Couldn't download {}. Run the command again to resume.",
-                    file.name
-                ),
-            })?;
-        }
-        let digest = sha256::file_hex(&path)
-            .map_err(|e| format!("Couldn't read {} ({e}).", path.display()))?;
-        if digest != file.sha256 {
-            let _ = fs::remove_file(&path);
-            return Err(format!(
-                "{} didn't match its SHA-256 checksum, so Telmo deleted it. Run the command again to download it.",
-                file.name
-            ));
-        }
+            download::Error::Failed { reason, .. } => format!(
+                "Couldn't download {name} ({reason}).\n\n{}",
+                manual_steps(model, cache)
+            ),
+            download::Error::File(message) => message,
+            download::Error::Checksum => format!(
+                "{name} didn't match its SHA-256 checksum, so Telmo deleted it. Run the command again to download it."
+            ),
+        });
     }
     let pack = cache.join(model.pack_file);
     eprintln!("Packing {} into {}.", model.title, pack.display());
@@ -269,33 +252,6 @@ fn download_and_pack(model: &KnownModel, cache: &Path) -> Result<PathBuf, String
     // Only removes the directory once no other model's files are in it.
     let _ = fs::remove_dir(&downloads);
     Ok(pack)
-}
-
-enum Download {
-    NoCurl,
-    Failed,
-}
-
-/// Downloads `url` to `path` with curl, resuming what's there. curl shows the progress, and
-/// its errors.
-fn download(url: &str, path: &Path) -> Result<(), Download> {
-    let status = Command::new("curl")
-        .args([
-            "--fail",
-            "--location",
-            "--continue-at",
-            "-",
-            "--progress-bar",
-            "--output",
-        ])
-        .arg(path)
-        .arg(url)
-        .status();
-    match status {
-        Ok(status) if status.success() => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Download::NoCurl),
-        _ => Err(Download::Failed),
-    }
 }
 
 /// The installed models and where they are.
@@ -382,6 +338,21 @@ mod tests {
         assert!(
             steps.contains("telmo pack parakeet-tdt-0.6b-v3/parakeet-tdt-0.6b-v3.q8_0.gguf \"")
         );
+    }
+
+    #[test]
+    #[ignore = "downloads from Hugging Face"]
+    fn downloads_a_pinned_file_from_hugging_face() {
+        let dir = crate::tests::temp_dir("hugging-face");
+        let file = GRANITE.files.iter().min_by_key(|f| f.bytes).unwrap();
+        let path = dir.join(file.name);
+        let agent = download::agent(download::STALL);
+        let url = GRANITE.url(file.name);
+        assert_eq!(
+            download::fetch(&agent, &url, &path, file.bytes, file.sha256),
+            Ok(())
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

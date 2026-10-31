@@ -17,7 +17,18 @@ exclude = ["tests/goldens/", "examples/wer/scripts/"]
 [lib]
 name = "telmo"
 
+# The command downloads models over HTTPS with ureq. The library needs none of it, so it has no
+# dependencies with default features off.
+[[bin]]
+name = "telmo"
+required-features = ["download"]
+
+[features]
+default = ["download"]
+download = ["dep:ureq"]
+
 [dependencies]
+ureq = { version = "3.5", default-features = false, features = ["rustls"], optional = true }
 
 [profile.release]
 debug = "line-tables-only"
