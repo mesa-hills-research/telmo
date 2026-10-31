@@ -8,7 +8,7 @@
 //! The score of a hypothesis that can still emit holds the provisional bonus of a special word
 //! under way. A hypothesis that reaches the end of the audio takes its final score at once.
 
-use super::{Compiled, MatchState};
+use super::{Compiled, MatchState, Matcher};
 use crate::parakeet::Token;
 
 /// The networks a TDT beam search reads.
@@ -105,9 +105,36 @@ fn ids<'a>(hyps: &'a [Hyp], c: &'a Candidate) -> impl Iterator<Item = u32> + 'a 
     hyps[c.parent].tokens.iter().map(|t| t.id).chain(emitted)
 }
 
+/// A candidate that lands on `key` with `score`. One that reaches the end of the audio can't
+/// emit again, so it takes its final score there, and all that reach the end with the same text
+/// are the same state.
+fn land(
+    m: &Matcher,
+    frames: usize,
+    parent: usize,
+    step: Step,
+    mut key: Key,
+    mut score: f32,
+) -> Candidate {
+    if key.frame >= frames {
+        score += m.finish(key.matcher);
+        key.matcher = MatchState::START;
+        key.frame = frames;
+        key.on_frame = 0;
+    }
+    Candidate {
+        parent,
+        step,
+        key,
+        score,
+    }
+}
+
 /// Decodes the encoder frames `start.frame..frames` with a beam search of `words.boost.beam`
-/// hypotheses that favours `words`. Each hypothesis expands to the blank and to the tokens
-/// whose logit plus change in bonus is among its best `beam`, each with every duration.
+/// hypotheses that favours `words`. Each hypothesis expands to the blank and to the `beam`
+/// tokens whose best landing scores highest, each with every duration. A landing's score holds
+/// the logit, the change in bonus, the duration and, for a landing at the end of the audio, the
+/// bonus of an unfinished word given back.
 /// Returns the tokens of the hypothesis with the best final score per token, as NVIDIA's NeMo
 /// chooses, since a path that skips speech with long blanks can score as well as the right text.
 /// Token frames count from the same origin as `start.frame`.
@@ -181,15 +208,37 @@ pub(crate) fn beam_search(
                 let mut key = hyp.key;
                 key.frame = t + d.max(1);
                 key.on_frame = 0;
-                candidates.push(Candidate {
-                    parent: i,
-                    step: Step::Blank,
-                    key,
-                    score: hyp.score + row[shape.blank] - token_lse + dl - duration_lse,
-                });
+                let score = hyp.score + row[shape.blank] - token_lse + dl - duration_lse;
+                candidates.push(land(m, frames, i, Step::Blank, key, score));
             }
-            // The best tokens by logit plus change in bonus. Tokens that neither continue nor
-            // start a special word change it by one of two amounts, and the matcher lists the rest.
+            // Where a token lands with each duration: the frame, the tokens on it, and whether
+            // that's the end of the audio.
+            let after: Vec<(usize, usize)> = shape
+                .durations
+                .iter()
+                .map(|&d| {
+                    if d > 0 {
+                        (t + d, 0)
+                    } else if hyp.key.on_frame + 1 >= shape.max_symbols {
+                        (t + 1, 0)
+                    } else {
+                        (t, hyp.key.on_frame + 1)
+                    }
+                })
+                .collect();
+            let (mut live_dl, mut end_dl) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+            for (&(frame, _), &dl) in after.iter().zip(&row[vocab..]) {
+                let best = if frame >= frames {
+                    &mut end_dl
+                } else {
+                    &mut live_dl
+                };
+                *best = best.max(dl);
+            }
+            // The best tokens by the score of their best landing: logit, change in bonus and
+            // duration, and the final take-back for a landing at the end. A token that neither
+            // continues nor starts a special word changes the bonus by one of two amounts and
+            // has nothing to take back, and the matcher lists the rest.
             let state = hyp.key.matcher;
             for tok in m.special_tokens(state) {
                 let tok = tok as usize;
@@ -199,6 +248,7 @@ pub(crate) fn beam_search(
                 }
             }
             let (boundary_step, other_step) = m.default_steps(state);
+            let any_dl = live_dl.max(end_dl);
             top.clear();
             for (tok, &logit) in row[..vocab].iter().enumerate() {
                 if tok == shape.blank || special[tok] {
@@ -209,11 +259,13 @@ pub(crate) fn beam_search(
                 } else {
                     other_step
                 };
-                push_top(&mut top, beam, logit + delta, tok);
+                push_top(&mut top, beam, logit + delta + any_dl, tok);
             }
             for &tok in &marked {
                 if tok != shape.blank {
-                    push_top(&mut top, beam, row[tok] + m.step(state, tok as u32).1, tok);
+                    let (next, delta) = m.step(state, tok as u32);
+                    let landing = live_dl.max(end_dl + m.finish(next));
+                    push_top(&mut top, beam, row[tok] + delta + landing, tok);
                 }
                 special[tok] = false;
             }
@@ -222,37 +274,17 @@ pub(crate) fn beam_search(
                 let (matcher, delta) = m.step(state, tok as u32);
                 let base = hyp.score + row[tok] - token_lse + delta;
                 let hash = (hyp.key.hash ^ (tok as u64 + 1)).wrapping_mul(0x0100_0000_01b3);
-                for (&d, &dl) in durations.clone() {
-                    let (frame, on_frame) = if d > 0 {
-                        (t + d, 0)
-                    } else if hyp.key.on_frame + 1 >= shape.max_symbols {
-                        (t + 1, 0)
-                    } else {
-                        (t, hyp.key.on_frame + 1)
+                for ((&d, &dl), &(frame, on_frame)) in durations.clone().zip(&after) {
+                    let key = Key {
+                        hash,
+                        len: hyp.key.len + 1,
+                        frame,
+                        on_frame,
+                        matcher,
                     };
-                    candidates.push(Candidate {
-                        parent: i,
-                        step: Step::Emit(tok as u32, d as u32),
-                        key: Key {
-                            hash,
-                            len: hyp.key.len + 1,
-                            frame,
-                            on_frame,
-                            matcher,
-                        },
-                        score: base + dl - duration_lse,
-                    });
+                    let step = Step::Emit(tok as u32, d as u32);
+                    candidates.push(land(m, frames, i, step, key, base + dl - duration_lse));
                 }
-            }
-        }
-        // A hypothesis that reaches the end can't emit again, so it takes its final score, and
-        // all that reach the end with the same text are the same state.
-        for c in candidates.iter_mut() {
-            if !matches!(c.step, Step::Keep) && c.key.frame >= frames {
-                c.score += m.finish(c.key.matcher);
-                c.key.matcher = MatchState::START;
-                c.key.frame = frames;
-                c.key.on_frame = 0;
             }
         }
         // The best distinct states survive.
@@ -497,5 +529,34 @@ mod tests {
             _ => set(row, 0, 0.0, [-20.0, 0.0, -20.0]),
         };
         assert_eq!(search(script, 2, &["kubectl"], 1.5, 1), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn an_unfinished_word_at_the_end_doesnt_crowd_out_an_ordinary_token() {
+        // On the last frame "▁ku" with its bonus looks better than "▁the", but the audio ends
+        // there, so it would give the bonus back, and "▁the" is likelier.
+        let script = |frame: usize, last: u32, row: &mut [f32]| match (frame, last) {
+            (0, NONE) => {
+                set(row, 6, 0.0, [-20.0, 0.0, -20.0]);
+                row[1] = -0.5;
+            }
+            _ => set(row, 0, 0.0, [-20.0, 0.0, -20.0]),
+        };
+        assert_eq!(search(script, 1, &["kubectl"], 1.5, 1), vec![6]);
+    }
+
+    #[test]
+    fn a_token_that_may_land_live_or_at_the_end_keeps_its_live_landing() {
+        // "▁ku" may land on the next frame, where "kube" can complete, or at the end, where it
+        // can't. Its live landing keeps the bonus and beats "▁the".
+        let script = |frame: usize, last: u32, row: &mut [f32]| match (frame, last) {
+            (0, NONE) => {
+                set(row, 1, 0.0, [-20.0, 0.0, 0.0]);
+                row[6] = 0.1;
+            }
+            (1, 1) => set(row, 2, 0.0, [-20.0, 0.0, -20.0]),
+            _ => set(row, 0, 0.0, [-20.0, 0.0, -20.0]),
+        };
+        assert_eq!(search(script, 2, &["kube"], 1.5, 1), vec![1, 2]);
     }
 }
