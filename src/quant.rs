@@ -1,5 +1,5 @@
-//! Weight precisions: f16 and bf16 conversion, 8-bit quantization, and the panel layout the
-//! matrix product reads.
+//! Weight precisions, covering f16 and bf16 conversion, 8-bit quantization, and the panel layout
+//! the matrix product reads.
 //!
 //! A weight matrix of `n` outputs and `k` inputs is stored as panels of 16 outputs, with the
 //! inputs running inside each panel, so panel `p` holds `k` runs of 16 values. Outputs past `n`
@@ -107,7 +107,7 @@ pub fn f32_to_f16(x: f32) -> u16 {
         return sign | 0x7c00;
     }
     if e <= 0 {
-        // A subnormal half: the value is m * 2^-24.
+        // A subnormal half, whose value is m * 2^-24.
         let shift = (126 - exp) as u32;
         if shift > 24 {
             return sign;
@@ -166,14 +166,14 @@ pub fn bf16_to_f32(h: u16) -> f32 {
 /// A row-major `[n, k]` weight matrix before it is laid out in panels.
 pub enum Rows<'a> {
     F32(&'a [f32]),
-    /// Q8_0 blocks: `d` holds `n * k / 32` scales, `q` the `n * k` values.
+    /// Q8_0 blocks. `d` holds `n * k / 32` scales, `q` the `n * k` values.
     Q8_0 {
         d: &'a [f32],
         q: &'a [i8],
     },
 }
 
-/// Quantizes one block the way GGUF's reference `quantize_row_q8_0` does: the scale is the
+/// Quantizes one block the way GGUF's reference `quantize_row_q8_0` does. The scale is the
 /// largest magnitude over 127, stored as f16, and the values are rounded with the unrounded
 /// scale's reciprocal.
 pub fn quantize_q8_0_block(x: &[f32], q: &mut [i8]) -> f32 {
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn halves_round_to_nearest_even() {
-        // Exactly between 1.0 and the next half (2^-10 apart): ties go to the even one.
+        // Exactly between 1.0 and the next half (2^-10 apart), so ties go to the even one.
         let one_and_half_ulp = 1.0 + 2f32.powi(-11);
         assert_eq!(f32_to_f16(one_and_half_ulp), 0x3c00);
         let next = 1.0 + 3.0 * 2f32.powi(-11);

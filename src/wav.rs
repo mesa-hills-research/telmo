@@ -1,4 +1,4 @@
-//! A reader for WAV files: integer PCM of 8, 16, 24 or 32 bits and 32 or 64-bit float,
+//! A reader for WAV files. It takes integer PCM of 8, 16, 24 or 32 bits and 32 or 64-bit float,
 //! plain or in WAVE_FORMAT_EXTENSIBLE, with any number of channels.
 
 use std::path::Path;

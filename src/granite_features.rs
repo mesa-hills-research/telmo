@@ -1,6 +1,6 @@
 //! Log-mel features as Granite Speech's front end computes them.
 //!
-//! These are torchaudio's `MelSpectrogram` defaults: a centered STFT with reflect padding (FFT of
+//! These are torchaudio's `MelSpectrogram` defaults, a centered STFT with reflect padding (FFT of
 //! 512, a 400-sample periodic Hann window centered in it, hop 160), the power spectrum and 80 HTK
 //! mel filters from 0 to 8 kHz without normalization. Then `log10(max(x, 1e-10))`, a floor 8 below
 //! the utterance's largest value, `/ 4 + 1`, and deltas over 3 frames with the edge frames
@@ -57,7 +57,7 @@ impl GraniteFrontEnd {
         }
     }
 
-    /// Values per row: the mels and their deltas for two frames.
+    /// Values per row, the mels and their deltas for two frames.
     pub fn width(&self) -> usize {
         2 * STACK * self.n_mels
     }
@@ -132,9 +132,9 @@ impl GraniteFrontEnd {
         }
     }
 
-    /// Writes rows `first..last` of the features from the log10 frames in `logs`: each value
-    /// floored 8 below `peak`, divided by 4 plus 1, with its delta over three frames (the first
-    /// and the last frame of `logs` repeat at the edges), two frames to a row.
+    /// Writes rows `first..last` of the features from the log10 frames in `logs`. Each value is
+    /// floored 8 below `peak`, divided by 4 plus 1, and given its delta over three frames (the
+    /// first and the last frame of `logs` repeat at the edges), with two frames to a row.
     pub(crate) fn stack_rows(
         &self,
         logs: &[f32],

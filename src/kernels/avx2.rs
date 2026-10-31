@@ -57,7 +57,7 @@ unsafe fn tile(
     }
 }
 
-/// An `R x 16` register tile: for each input, two 8-wide loads of the panel and one broadcast
+/// An `R x 16` register tile. For each input, two 8-wide loads of the panel and one broadcast
 /// per row feed `2R` fused multiply-adds.
 #[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn tile_rows<const R: usize>(
@@ -368,7 +368,7 @@ unsafe fn store(
 ) {
     let cols = c.len();
     if cols < PANEL {
-        // A partial panel at the right edge: no need for masked loads.
+        // A partial panel at the right edge. No need for masked loads.
         for (j, out) in c.iter_mut().enumerate() {
             let v = acc[j] + bias.map_or(0.0, |b| b[j]);
             let v = match act {

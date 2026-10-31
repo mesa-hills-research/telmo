@@ -1,6 +1,6 @@
-//! Memory that weights live in: a heap allocation aligned to 64 bytes, or a read-only mapping of
-//! a file. Views into a region keep it alive through an `Arc`, so a model's weights can point
-//! into one mapped pack without copying.
+//! Memory that weights live in, either a heap allocation aligned to 64 bytes or a read-only
+//! mapping of a file. Views into a region keep it alive through an `Arc`, so a model's weights can
+//! point into one mapped pack without copying.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::fs::File;

@@ -189,9 +189,9 @@ impl Tokenizer {
     /// `▁` before it, as the Metaspace pre-tokenizer splits text. Characters the vocabulary lacks
     /// become byte pieces where the model falls back to bytes, and the unknown token otherwise.
     ///
-    /// shortcut: the tokenizer file's Unicode normalization (NFKC-like) isn't applied, which only
-    /// matters for compatibility characters such as full-width letters. Apply it if callers pass
-    /// such text.
+    /// This takes a shortcut. The tokenizer file's Unicode normalization (NFKC-like) isn't applied,
+    /// which only matters for compatibility characters such as full-width letters. Apply it if
+    /// callers pass such text.
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut out = Vec::new();
         let mut buf = [0u8; 4];
@@ -231,8 +231,8 @@ impl Tokenizer {
         out
     }
 
-    /// Whether a word may end just before token `id`: it starts a word, or it holds no letter
-    /// or digit (punctuation, a special token).
+    /// Whether a word may end just before token `id`, which it may if the token starts a word or
+    /// holds no letter or digit (punctuation, a special token).
     pub fn is_word_boundary(&self, id: u32) -> bool {
         match self.pieces.get(id as usize) {
             Some(Piece::Text(t)) => t.starts_with(' ') || !t.chars().any(char::is_alphanumeric),
@@ -279,9 +279,9 @@ impl Tokenizer {
         text
     }
 
-    /// Whether text may be split before token `id`, which follows `prev`: where a word starts
-    /// (a `▁` piece), or next to a CJK character, since Japanese and Chinese have no spaces.
-    /// Never inside the bytes of one character.
+    /// Whether text may be split before token `id`, which follows `prev`. That holds where a word
+    /// starts (a `▁` piece), or next to a CJK character, since Japanese and Chinese have no
+    /// spaces. Never inside the bytes of one character.
     pub fn may_split_before(&self, prev: Option<u32>, id: u32) -> bool {
         let piece = |id: u32| self.pieces.get(id as usize);
         match piece(id) {

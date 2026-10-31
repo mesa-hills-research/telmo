@@ -48,7 +48,7 @@ pub enum Isa {
 impl Isa {
     pub const ALL: [Isa; 4] = [Isa::Scalar, Isa::Avx2, Isa::Avx512, Isa::Neon];
 
-    /// The instruction set used unless a caller names one: the one the `TELMO_ISA`
+    /// The instruction set used unless a caller names one. That is the one the `TELMO_ISA`
     /// environment variable names (`scalar`, `avx2`, `avx512` or `neon`) if this CPU runs it,
     /// otherwise the fastest one this CPU runs.
     pub fn detect() -> Isa {
@@ -170,8 +170,8 @@ impl Drop for AlignedBuf {
     }
 }
 
-/// A weight matrix of `n` outputs and `k` inputs in the panel layout of [`crate::quant`]: panels
-/// of 16 outputs with the inputs running inside each panel, in any [`Precision`]. The values
+/// A weight matrix of `n` outputs and `k` inputs in the panel layout of [`crate::quant`] (panels
+/// of 16 outputs with the inputs running inside each panel), in any [`Precision`]. The values
 /// live in shared bytes, which may be a mapped pack.
 #[derive(Clone)]
 pub struct PackedWeights {
@@ -286,7 +286,7 @@ impl PackedWeights {
     }
 }
 
-/// The right-hand side of a matrix product, `[k, n]`, as a set of 16-column panels: column
+/// The right-hand side of a matrix product, `[k, n]`, as a set of 16-column panels. Column
 /// block `p` at input `i` is the 16 values at element `p * panel_stride + i * k_stride`.
 /// Activations are f32. Packed weights may be narrower, and are then contiguous panels.
 #[derive(Clone, Copy)]
@@ -354,8 +354,8 @@ pub enum Act {
     Silu,
 }
 
-/// What the matrix product does with each sum before storing it:
-/// `c = (accumulate ? c : 0) + scale * act(sum + bias)`.
+/// What the matrix product does with each sum before storing it
+/// (`c = (accumulate ? c : 0) + scale * act(sum + bias)`).
 #[derive(Clone, Copy)]
 pub struct Epilogue<'a> {
     pub bias: Option<&'a [f32]>,

@@ -588,7 +588,7 @@ mod tests {
             let mut out = Vec::new();
             r.process(&input, &mut out);
             r.flush(&mut out);
-            // Each output straight from the kernel: output n is centered on input
+            // Each output straight from the kernel. Output n is centered on input
             // (n - delay) * down / up, and the kernel is evaluated at every input's offset.
             let filter = Filter::new(from, to, r.up);
             let (up, down, delay) = (r.up as i64, r.down as i64, r.delay as i64);

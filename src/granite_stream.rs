@@ -187,7 +187,7 @@ impl GraniteStream {
         model.logits_of(self.encoder_output(model, first, rows), rows)
     }
 
-    /// Encodes the audio pushed since the last update. With `finished`, the audio is complete:
+    /// Encodes the audio pushed since the last update. With `finished`, the audio is complete, so
     /// its end is padded as the offline front end pads it, and no audio may follow.
     pub fn update(&mut self, model: &Granite, finished: bool, timings: &mut Timings) {
         assert!(!self.finished, "the stream already finished");

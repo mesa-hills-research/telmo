@@ -1,4 +1,4 @@
-//! NVIDIA's Parakeet TDT: a FastConformer encoder and a token-and-duration transducer (TDT)
+//! NVIDIA's Parakeet TDT, a FastConformer encoder and a token-and-duration transducer (TDT)
 //! decoder, run with greedy decoding.
 //!
 //! Weights are read from the Hugging Face `model.safetensors` (the `ParakeetForTDT` layout),
@@ -236,8 +236,8 @@ pub struct DecodeTrace {
     pub joints: Vec<(usize, Vec<f32>)>,
 }
 
-/// Where greedy decoding stands after a token: the prediction network's state and output, and
-/// the encoder frame (counted from the utterance's start) decoding continues at.
+/// Where greedy decoding stands after a token, given by the prediction network's state and
+/// output, and the encoder frame (counted from the utterance's start) decoding continues at.
 #[derive(Debug, Clone)]
 pub struct DecoderState {
     lstm: Vec<f32>,

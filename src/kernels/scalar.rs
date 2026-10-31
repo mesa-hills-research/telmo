@@ -158,7 +158,7 @@ fn silu(x: &mut [f32]) {
     }
 }
 
-/// One output frame of a depthwise convolution with "same" zero padding: for each channel,
+/// One output frame of a depthwise convolution with "same" zero padding. Each channel gets
 /// `bias + sum over j of w[j][c] * input[t + j - kernel/2][c]`. Weights are `[kernel, channels]`.
 #[inline(always)]
 pub(crate) fn dwconv1d_frame(

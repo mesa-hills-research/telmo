@@ -1,4 +1,4 @@
-//! IBM's Granite Speech 5.0 TurboCTC: a Conformer encoder with attention inside blocks of
+//! IBM's Granite Speech 5.0 TurboCTC, a Conformer encoder with attention inside blocks of
 //! frames and a CTC head, run with greedy decoding.
 //!
 //! Weights come from a pack, or from the Hugging Face `model.safetensors` (the
@@ -1059,7 +1059,7 @@ impl Granite {
     }
 }
 
-/// Collapses per-frame ids into tokens: repeats merge and blanks drop out. A blank between two
+/// Collapses per-frame ids into tokens. Repeats merge and blanks drop out. A blank between two
 /// equal ids separates them.
 pub fn ctc_tokens(ids: &[u32], blank: usize) -> Vec<Token> {
     let mut tokens: Vec<Token> = Vec::new();

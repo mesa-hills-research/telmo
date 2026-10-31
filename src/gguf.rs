@@ -124,7 +124,7 @@ impl TensorInfo {
     }
 }
 
-/// A tensor's values: floats, or Q8_0 blocks with their scales widened to f32.
+/// A tensor's values, either floats or Q8_0 blocks with their scales widened to f32.
 pub enum Data {
     F32(Vec<f32>),
     Q8_0 { d: Vec<f32>, q: Vec<i8> },

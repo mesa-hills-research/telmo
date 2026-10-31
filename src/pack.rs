@@ -1,5 +1,5 @@
-//! The engine's own weight file, a pack: a model converted once into the layout and precision
-//! the kernels read, so that loading maps the file and builds views without copying.
+//! The engine's own weight file, a pack, holds a model converted once into the layout and
+//! precision the kernels read, so that loading maps the file and builds views without copying.
 //!
 //! A pack holds named entries of three kinds: weight matrices in panels (see [`crate::quant`]),
 //! f32 tensors, and raw bytes (the model's `config.json` and `tokenizer.json`). The file is
@@ -373,7 +373,7 @@ fn bad(message: &str) -> Error {
     Error::Model(format!("The pack file isn't usable. {message}"))
 }
 
-/// Where a model's converter puts its entries: a pack in memory, or a file.
+/// Where a model's converter puts its entries, either a pack in memory or a file.
 pub trait Sink {
     /// A weight matrix, laid out in panels in `precision`.
     fn matrix(

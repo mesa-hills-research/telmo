@@ -1,5 +1,5 @@
-//! Weights as downloaded, read by their PyTorch names for conversion into a pack: a safetensors
-//! file in any float type, or a GGUF file whose 8-bit blocks are kept as they are.
+//! Weights as downloaded, read by their PyTorch names for conversion into a pack, from a
+//! safetensors file in any float type or a GGUF file whose 8-bit blocks are kept as they are.
 
 use crate::error::{Error, Result};
 use crate::gguf::{self, Gguf};
@@ -9,7 +9,7 @@ use crate::safetensors::{Dtype, SafeTensors};
 /// A row-major `[n, k]` weight matrix as a source stores it.
 pub enum Matrix {
     F32(Vec<f32>),
-    /// Q8_0 blocks: `d` holds `n * k / 32` scales, `q` the `n * k` values.
+    /// Q8_0 blocks. `d` holds `n * k / 32` scales, `q` the `n * k` values.
     Q8_0 {
         d: Vec<f32>,
         q: Vec<i8>,
@@ -51,7 +51,7 @@ impl Matrix {
         Matrix::F32(parts.into_iter().flat_map(Matrix::into_f32).collect())
     }
 
-    /// `[a | b]` for each of `n` rows: the inputs of `b` follow those of `a`. Q8_0 blocks stay
+    /// `[a | b]` for each of `n` rows, with the inputs of `b` after those of `a`. Q8_0 blocks stay
     /// blocks when both have them and `a`'s inputs fill whole blocks.
     pub fn concat_inputs(a: Matrix, ka: usize, b: Matrix, kb: usize, n: usize) -> Matrix {
         match (a, b) {

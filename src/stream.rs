@@ -230,8 +230,8 @@ impl UtteranceStream {
         let tokenizer = model.tokenizer();
         let hyp = self.drop_repeats(tokenizer, config, hyp);
         let words = split_words(tokenizer, self.last_settled, &hyp);
-        // Where the model last heard speech: the last token with a letter or digit, since
-        // punctuation often comes in the silence after the words.
+        // Where the model last heard speech, taken as the last token with a letter or digit,
+        // since punctuation often comes in the silence after the words.
         let last_word_end = hyp
             .iter()
             .rev()
@@ -497,7 +497,7 @@ struct Active {
     stream: UtteranceStream,
     /// The stream's sample (16 kHz) the utterance's audio starts at.
     start: u64,
-    /// Where voice activity ended it, if it has: the end of speech and where it was decided.
+    /// Where voice activity ended it, if it has, as the end of speech and where it was decided.
     end: Option<(u64, u64)>,
     /// Whether the end is a cut of an utterance too long, which needs no confirmation.
     cut: bool,
@@ -685,8 +685,8 @@ impl Streamer {
             .is_some_and(|a| a.stream.audio().len() >= a.seen + FRAME)
     }
 
-    /// Runs the next pass: the final pass of an ended utterance, or a tentative pass over the
-    /// current one.
+    /// Runs the next pass, which is the final pass of an ended utterance or a tentative pass over
+    /// the current one.
     pub fn pass(&mut self) -> Result<Vec<Event>> {
         let mut events = Vec::new();
         if let Some(mut a) = self.closing.pop_front() {
@@ -993,8 +993,8 @@ fn split_words(tokenizer: &Tokenizer, before: Option<u32>, hyp: &[Hyp]) -> Vec<W
 /// The most settled words a pass may repeat.
 const MAX_REPEAT: usize = 3;
 
-/// Whether `heard` looks like the end of `word` heard again: it isn't longer than `word`, and
-/// they end with the same five letters or more, at least half of `heard`.
+/// Whether `heard` looks like the end of `word` heard again, meaning it isn't longer than `word`,
+/// and they end with the same five letters or more, at least half of `heard`.
 fn shares_end(heard: &str, word: &str) -> bool {
     let common = heard
         .chars()
@@ -1126,7 +1126,7 @@ mod tests {
 
     #[test]
     fn ctc_runs_collapse_and_resume_where_they_end() {
-        // blank 0: frames "0 5 5 0 5 7 7 0"
+        // With blank 0, the frames are "0 5 5 0 5 7 7 0"
         let ids = [0, 5, 5, 0, 5, 7, 7, 0];
         let hyp = ctc_hypothesis(&ids, 0, u32::MAX, 0);
         let got: Vec<(u32, usize)> = hyp.iter().map(|h| (h.id, h.end_frame)).collect();

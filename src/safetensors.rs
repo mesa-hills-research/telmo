@@ -79,7 +79,7 @@ impl TensorInfo {
     }
 }
 
-/// A checked header: the tensors in file order and the free-form metadata.
+/// A checked header, holding the tensors in file order and the free-form metadata.
 #[derive(Debug, Clone)]
 pub struct Header {
     pub tensors: Vec<TensorInfo>,
