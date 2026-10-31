@@ -39,6 +39,49 @@ fn overlap(a: &Spot, b: &Spot) -> bool {
     a.first <= b.last && b.first <= a.last
 }
 
+/// Whether `a` dominates `b`: as good a gain over frames inside `b`'s. A dominated spot can never
+/// win, since whatever overlaps the better one overlaps it too.
+fn dominates(a: &Spot, b: &Spot) -> bool {
+    a.gain >= b.gain && b.first <= a.first && a.last <= b.last
+}
+
+/// Adds `spot` to `spots`, whose part from `from` on holds the spots of its form in the order
+/// their last frames came, unless one of them dominates it, and drops those it dominates.
+fn keep(spots: &mut Vec<Spot>, from: usize, spot: Spot) {
+    // Earlier spots of the form end no later, so only those still under way at its first frame
+    // can be inside it or hold it.
+    let mut i = spots.len();
+    while i > from && spots[i - 1].last >= spot.first {
+        i -= 1;
+        if dominates(&spots[i], &spot) {
+            return;
+        }
+    }
+    let mut j = i;
+    for k in i..spots.len() {
+        if !dominates(&spot, &spots[k]) {
+            spots[j] = spots[k];
+            j += 1;
+        }
+    }
+    spots.truncate(j);
+    spots.push(spot);
+}
+
+/// The spots that win, in frame order: the best first, then each next best that overlaps none
+/// chosen before it.
+fn choose(mut spots: Vec<Spot>) -> Vec<Spot> {
+    spots.sort_by(|a, b| b.gain.total_cmp(&a.gain));
+    let mut chosen: Vec<Spot> = Vec::new();
+    for s in spots {
+        if chosen.iter().all(|c| !overlap(c, &s)) {
+            chosen.push(s);
+        }
+    }
+    chosen.sort_by_key(|s| s.first);
+    chosen
+}
+
 /// Replaces greedy CTC tokens with special words where an alignment of a word, plus its bonus,
 /// beats the greedy path over the same frames by the margin. `greedy` holds the greedy tokens of
 /// frames `first..` (each a run of frames), `scores` the rows of [`score_row`] for every frame
@@ -105,8 +148,8 @@ pub(crate) fn spot(
         let mut start = vec![[0usize; 2]; states];
         let mut next_cost = cost_of.clone();
         let mut next_start = start.clone();
-        // Spots of this form that overlap keep only the best, which bounds them by the words.
-        let mut last: Option<Spot> = None;
+        // This form's spots start here in `spots`.
+        let from = spots.len();
         for f in first..frames {
             let i = f - first;
             for s in 0..states {
@@ -152,34 +195,15 @@ pub(crate) fn spot(
                         last: f,
                         gain,
                     };
-                    match last {
-                        Some(l) if overlap(&l, &spot) => {
-                            if spot.gain > l.gain {
-                                last = Some(spot);
-                            }
-                        }
-                        _ => {
-                            spots.extend(last);
-                            last = Some(spot);
-                        }
-                    }
+                    keep(&mut spots, from, spot);
                 }
             }
         }
-        spots.extend(last);
     }
     if spots.is_empty() {
         return (greedy.to_vec(), Vec::new());
     }
-    // The best spots that don't overlap win.
-    spots.sort_by(|a, b| b.gain.total_cmp(&a.gain));
-    let mut chosen: Vec<Spot> = Vec::new();
-    for s in spots {
-        if chosen.iter().all(|c| !overlap(c, &s)) {
-            chosen.push(s);
-        }
-    }
-    chosen.sort_by_key(|s| s.first);
+    let chosen = choose(spots);
     let mut out = Vec::with_capacity(greedy.len());
     let mut ranges = Vec::with_capacity(chosen.len());
     let mut next = chosen.iter().peekable();
@@ -346,6 +370,32 @@ mod tests {
         let ids: Vec<u32> = out.iter().map(|t| t.id).collect();
         assert_eq!(ids, vec![6, 1, 2, 3]);
         assert_eq!(ranges, vec![1..4]);
+    }
+
+    #[test]
+    fn overlapping_spots_of_one_word_stay_until_the_choice() {
+        let spot = |first, last, gain| Spot {
+            form: 0,
+            first,
+            last,
+            gain,
+        };
+        // Each overlaps the one before and gains more, but the first and the last don't overlap.
+        let mut spots = Vec::new();
+        for s in [spot(0, 3, 1.0), spot(2, 5, 2.0), spot(4, 7, 3.0)] {
+            keep(&mut spots, 0, s);
+        }
+        assert_eq!(spots.len(), 3);
+        let chosen: Vec<(usize, usize)> = choose(spots).iter().map(|s| (s.first, s.last)).collect();
+        assert_eq!(chosen, vec![(0, 3), (4, 7)]);
+        // A spot inside another with as good a gain makes the other useless, and the other way
+        // round a worse spot inside a better one is.
+        let mut spots = Vec::new();
+        keep(&mut spots, 0, spot(0, 7, 1.0));
+        keep(&mut spots, 0, spot(2, 7, 1.5));
+        keep(&mut spots, 0, spot(1, 7, 0.5));
+        let left: Vec<(usize, usize)> = spots.iter().map(|s| (s.first, s.last)).collect();
+        assert_eq!(left, vec![(2, 7)]);
     }
 
     #[test]
