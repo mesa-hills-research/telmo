@@ -25,7 +25,7 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::biasing::{self, Compiled, SpecialWords, Spoken};
+use crate::biasing::{self, Compiled, SpecialWords, Spoken, normalized_words};
 use crate::error::Result;
 use crate::features::LogMelStream;
 use crate::granite::{self, Granite};
@@ -131,6 +131,16 @@ struct Hyp {
     heard_end: usize,
 }
 
+/// A settled word, kept to recognize its audio when a later pass hears it again.
+#[derive(Debug, Clone)]
+struct SettledWord {
+    /// The normalized words of each way a pass may hear it, as written, as heard, and for a word
+    /// with spoken forms, as each form.
+    spellings: Vec<Vec<String>>,
+    /// The frame of its first heard token, and the frame after its last.
+    heard: Range<usize>,
+}
+
 /// One utterance's audio and the text settled from it so far. Experimental, like the rest of
 /// this module.
 pub struct UtteranceStream {
@@ -139,9 +149,8 @@ pub struct UtteranceStream {
     resume: Resume,
     /// The last settled token as heard, for deciding where words split.
     last_settled: Option<u32>,
-    /// The last few settled words as heard, normalized, to recognize them when a pass repeats
-    /// them.
-    recent: Vec<String>,
+    /// The last few settled words, to recognize them when a pass hears them again.
+    recent: Vec<SettledWord>,
     /// The previous pass's unsettled words, as token ids.
     previous: Vec<Vec<u32>>,
     granite: Option<GraniteStream>,
@@ -232,24 +241,26 @@ impl UtteranceStream {
     /// follow it.
     pub fn pass(&mut self, model: &Model, config: &PassConfig, mode: PassMode) -> Result<PassText> {
         self.passes += 1;
-        let hyp = match model {
+        let heard = match model {
             Model::Parakeet(m) => self.parakeet_hypothesis(m, config, mode == PassMode::Final)?,
             Model::Granite(m) => self.granite_hypothesis(m, mode == PassMode::Final)?,
         };
-        Ok(self.settle(model.tokenizer(), hyp, config, mode))
+        Ok(self.settle(model.tokenizer(), heard, config, mode))
     }
 
-    /// Settles what a pass heard, `heard`. Repeats of the settled text go and the stream's
-    /// timing is read on the tokens as heard, and spoken forms are written as their words last,
-    /// so a form's word never splits and the settled text's audio stays known.
+    /// Settles what a pass heard. Repeats of the settled text go and the stream's timing is
+    /// read on the tokens as heard, and spoken forms are written as their words last, so a
+    /// form's word never splits and the settled text's audio stays known.
     fn settle(
         &mut self,
         tokenizer: &Tokenizer,
-        heard: Vec<Hyp>,
+        heard: Heard,
         config: &PassConfig,
         mode: PassMode,
     ) -> PassText {
-        let heard = self.drop_repeats(tokenizer, config, heard);
+        let mut context = heard.tokens;
+        let heard = context.split_off(heard.new);
+        let heard = self.drop_repeats(tokenizer, config, heard, &context);
         let none = Spoken::default();
         let spoken = self.words.as_ref().map_or(&none, |w| &w.spoken);
         let hyp = write_spoken(spoken, tokenizer, &heard);
@@ -293,12 +304,31 @@ impl UtteranceStream {
         let settled_tokens = words.get(settle.wrapping_sub(1)).map_or(0, |w| w.end);
         let settled_ids: Vec<u32> = hyp[..settled_tokens].iter().map(|h| h.id).collect();
         let tentative_ids: Vec<u32> = hyp[settled_tokens..].iter().map(|h| h.id).collect();
-        let settled_heard = &heard[..hyp[..settled_tokens].last().map_or(0, |h| h.heard_end)];
-        for w in &split_words(tokenizer, self.last_settled, settled_heard) {
-            self.recent
-                .push(normalized(tokenizer, &word_ids(settled_heard, w)));
+        let mut from: usize = 0;
+        for w in &words[..settle] {
+            let to = hyp[w.end - 1].heard_end;
+            let prev = from
+                .checked_sub(1)
+                .map_or(self.last_settled, |i| Some(heard[i].id));
+            let word = &heard[from..to];
+            let as_heard = split_words(tokenizer, prev, word)
+                .iter()
+                .map(|w| normalized(tokenizer, &word_ids(word, w)))
+                .collect();
+            let written = normalized_words(&tokenizer.decode(&word_ids(&hyp, w)));
+            let mut spellings = vec![written.clone(), as_heard];
+            for s in spoken.spellings(&written) {
+                if !spellings.contains(s) {
+                    spellings.push(s.clone());
+                }
+            }
+            self.recent.push(SettledWord {
+                spellings,
+                heard: word[0].frame..word[word.len() - 1].end_frame,
+            });
+            from = to;
         }
-        if let Some(h) = settled_heard.last() {
+        if let Some(h) = heard[..from].last() {
             self.resume = h.resume.clone();
             self.last_settled = Some(h.id);
         }
@@ -316,16 +346,19 @@ impl UtteranceStream {
         }
     }
 
-    /// Drops what a pass hears again of the settled text. A model can place a word slightly
-    /// earlier near the end of its audio than it does once more audio follows, so a settled
-    /// word, or its end, may show up again just after the settled text. Leading tokens that
-    /// can't start a word are such ends, and so are leading words equal to the last settled ones
-    /// (or, for one word, ending like it) that end within `config.repeat_window` of them.
+    /// Drops what a pass hears again of the settled text, from the tokens it heard. A model can
+    /// place a word slightly earlier near the end of its audio than it does once more audio
+    /// follows, so a settled word, or its end, may show up again just after the settled text,
+    /// and spelled another way, as written or as one of its spoken forms. Leading tokens that
+    /// can't start a word are such ends, and so are leading words that repeat the last settled
+    /// ones, as [`repeats`] finds them, and end within `config.repeat_window` of them.
+    /// `context` holds what the pass heard of the settled audio before `hyp`.
     fn drop_repeats(
         &self,
         tokenizer: &Tokenizer,
         config: &PassConfig,
         mut hyp: Vec<Hyp>,
+        context: &[Hyp],
     ) -> Vec<Hyp> {
         if self.last_settled.is_none() {
             return hyp;
@@ -339,19 +372,21 @@ impl UtteranceStream {
             skip += 1;
         }
         let words = split_words(tokenizer, prev, &hyp[skip..]);
+        let texts: Vec<String> = words
+            .iter()
+            .map(|w| normalized(tokenizer, &word_ids(&hyp[skip..], w)))
+            .collect();
         let window = (config.repeat_window.as_secs_f64() * SAMPLE_RATE as f64 / FRAME as f64).ceil()
             as usize;
         let limit = self.resume.frame() + window;
-        for n in (1..=MAX_REPEAT.min(words.len()).min(self.recent.len())).rev() {
+        for n in (1..=MAX_REPEAT.min(self.recent.len())).rev() {
             let tail = &self.recent[self.recent.len() - n..];
-            let same = words[..n].iter().zip(tail).enumerate().all(|(i, (w, t))| {
-                let w = normalized(tokenizer, &word_ids(&hyp[skip..], w));
-                // The last settled word may come back split differently, with only its end
-                // the same ("themselves" heard again as "inselves").
-                w == *t || (i == n - 1 && n == 1 && shares_end(&w, t))
-            });
-            if same && hyp[skip + words[n - 1].end - 1].end_frame <= limit {
-                skip += words[n - 1].end;
+            let start = |i: usize| hyp[skip + words[i].start].frame;
+            let in_place = |s: &SettledWord, before| heard_in_place(tokenizer, context, s, before);
+            if let Some(k) = repeats(tail, &texts, start, in_place)
+                && hyp[skip + words[k - 1].end - 1].end_frame <= limit
+            {
+                skip += words[k - 1].end;
                 break;
             }
         }
@@ -373,7 +408,7 @@ impl UtteranceStream {
         model: &Parakeet,
         config: &PassConfig,
         finished: bool,
-    ) -> Result<Vec<Hyp>> {
+    ) -> Result<Heard> {
         let boundary = self.resume.frame();
         let log_mel = self
             .log_mel
@@ -393,7 +428,10 @@ impl UtteranceStream {
         let (first, ready) = (start / HOP, log_mel.frames());
         // The encoder needs a frame of 80 ms.
         if ready < first + FRAME / HOP {
-            return Ok(Vec::new());
+            return Ok(Heard {
+                tokens: Vec::new(),
+                new: 0,
+            });
         }
         let features = timings.time("features", || log_mel.normalize(first..ready));
         let encoded = model.encode(&features.data, features.frames, timings, &mut |_, _, _| {});
@@ -426,7 +464,7 @@ impl UtteranceStream {
 
     /// Encodes the new audio, recomputing only the attention blocks it reaches, and decodes
     /// CTC frames from the last settled one.
-    fn granite_hypothesis(&mut self, model: &Granite, finished: bool) -> Result<Vec<Hyp>> {
+    fn granite_hypothesis(&mut self, model: &Granite, finished: bool) -> Result<Heard> {
         let blocks = self.granite.as_mut().expect("Granite keeps its blocks");
         // The blocks take audio only when a pass runs, so the end of an utterance can still be
         // trimmed until then.
@@ -436,9 +474,21 @@ impl UtteranceStream {
             unreachable!("Granite resumes from a CTC frame")
         };
         let ids = blocks.frame_ids();
-        let hyp = ctc_hypothesis(ids, frame, prev, model.config().blank as u32);
+        let blank = model.config().blank as u32;
+        // The settled words' frames as this pass aligns them, to tell a word heard again from
+        // one said again.
+        let from = self
+            .recent
+            .first()
+            .map_or(frame, |w| w.heard.start)
+            .min(frame);
+        let before = from.checked_sub(1).map_or(u32::MAX, |f| ids[f]);
+        let mut heard = ctc_hypothesis(&ids[..frame.min(ids.len())], from, before, blank);
+        let new = heard.len();
+        let hyp = ctc_hypothesis(ids, frame, prev, blank);
         let Some(words) = self.words.as_ref().filter(|w| !w.forms.is_empty()) else {
-            return Ok(hyp);
+            heard.extend(hyp);
+            return Ok(Heard { tokens: heard, new });
         };
         let greedy: Vec<Token> = hyp
             .iter()
@@ -457,7 +507,8 @@ impl UtteranceStream {
                 frame,
             )
         });
-        Ok(spotted_hypothesis(&tokens, &spotted, ids))
+        heard.extend(spotted_hypothesis(&tokens, &spotted, ids));
+        Ok(Heard { tokens: heard, new })
     }
 
     /// The decoder's position after the settled text, in encoder frames from the start.
@@ -960,12 +1011,45 @@ fn spotted_hypothesis(tokens: &[Token], spotted: &[Range<usize>], ids: &[u32]) -
         .collect()
 }
 
-/// The tokens of a window decoded from before the settled text's end, at frame `boundary`, that
-/// may be new. A token placed a frame earlier than the settled text's end in an earlier window
-/// still counts as new. What it repeats of the settled text is dropped later.
-fn after_settled(heard: impl Iterator<Item = Hyp>, boundary: usize) -> Vec<Hyp> {
+/// A pass's tokens as heard.
+struct Heard {
+    tokens: Vec<Hyp>,
+    /// Where the tokens that may be new start, after those the pass heard of the settled audio.
+    new: usize,
+}
+
+/// A window decoded from before the settled text's end, at frame `boundary`. Its tokens from a
+/// frame before that end may be new, since a token placed a frame earlier than the settled
+/// text's end in an earlier window still counts as new. What they repeat of the settled text is
+/// dropped later.
+fn after_settled(heard: impl Iterator<Item = Hyp>, boundary: usize) -> Heard {
+    let tokens: Vec<Hyp> = heard.collect();
     let from = boundary.saturating_sub(1);
-    heard.filter(|h| boundary == 0 || h.frame >= from).collect()
+    let new = if boundary == 0 {
+        0
+    } else {
+        tokens.partition_point(|h| h.frame < from)
+    };
+    Heard { tokens, new }
+}
+
+/// Whether `context`, what a pass heard of the settled audio, holds the settled word `s` on its
+/// own frames, in one of its spellings, ending before frame `before`.
+fn heard_in_place(tokenizer: &Tokenizer, context: &[Hyp], s: &SettledWord, before: usize) -> bool {
+    let words = split_words(tokenizer, None, context);
+    let texts: Vec<String> = words
+        .iter()
+        .map(|w| normalized(tokenizer, &word_ids(context, w)))
+        .collect();
+    words.iter().enumerate().any(|(k, w)| {
+        let end = context[w.end - 1].end_frame;
+        let overlaps = context[w.start].frame < s.heard.end && end > s.heard.start;
+        overlaps
+            && end < before
+            && s.spellings
+                .iter()
+                .any(|sp| !sp.is_empty() && texts[k..].starts_with(sp))
+    })
 }
 
 /// The tokens heard, `heard`, with spoken forms written as their words. A word's tokens take
@@ -1070,6 +1154,57 @@ fn split_words(tokenizer: &Tokenizer, before: Option<u32>, hyp: &[Hyp]) -> Vec<W
 
 /// The most settled words a pass may repeat.
 const MAX_REPEAT: usize = 3;
+
+/// How many leading words of a pass, normalized as `texts`, hear the settled words `settled`
+/// again, each by one of its spellings, or none. A first word starting, at frame `start(i)` for
+/// word `i`, inside the first settled word's heard frames is that audio heard again. One starting
+/// after them was spoken again ("no, no") if `in_place(word, frame)` says the pass also heard the
+/// settled word on its own frames, ending before that frame. Otherwise it's the settled word
+/// placed a little later than the pass before placed it. The first may also be just the end of a
+/// spelling ("control" of "cube control"), as the pass's window began inside it, and one word may
+/// come back split differently, with only its end the same ("themselves" heard again as
+/// "inselves").
+fn repeats(
+    settled: &[SettledWord],
+    texts: &[String],
+    start: impl Fn(usize) -> usize,
+    in_place: impl Fn(&SettledWord, usize) -> bool,
+) -> Option<usize> {
+    let first = settled.first()?;
+    if texts.is_empty() || start(0) >= first.heard.end && in_place(first, start(0)) {
+        return None;
+    }
+    let mut at = 0;
+    for (j, s) in settled.iter().enumerate() {
+        let rest = &texts[at..];
+        let whole = s
+            .spellings
+            .iter()
+            .filter(|sp| !sp.is_empty() && rest.starts_with(sp))
+            .map(Vec::len)
+            .max();
+        // The end of a spelling comes from a window that began inside the word.
+        let tail = || {
+            if j > 0 || start(at) >= s.heard.end {
+                return None;
+            }
+            let ends = s
+                .spellings
+                .iter()
+                .flat_map(|sp| (1..sp.len()).map(|t| &sp[t..]));
+            ends.filter(|end| rest.starts_with(end))
+                .map(<[String]>::len)
+                .max()
+        };
+        let same_end = || {
+            let single = settled.len() == 1 && !rest.is_empty();
+            let ends_like = |sp: &Vec<String>| sp.len() == 1 && shares_end(&rest[0], &sp[0]);
+            (single && s.spellings.iter().any(ends_like)).then_some(1)
+        };
+        at += whole.or_else(tail).or_else(same_end)?;
+    }
+    Some(at)
+}
 
 /// Whether `heard` looks like the end of `word` heard again, meaning it isn't longer than `word`,
 /// and they end with the same five letters or more, at least half of `heard`.
@@ -1206,9 +1341,9 @@ mod tests {
         (stream, tok)
     }
 
-    /// A Parakeet window's tokens as (id, frame), each lasting a frame, after the settled text.
-    fn window(s: &UtteranceStream, tokens: &[(u32, usize)]) -> Vec<Hyp> {
-        let heard = tokens.iter().map(|&(id, frame)| Hyp {
+    /// Tokens as (id, frame), each lasting a frame.
+    fn hyps(tokens: &[(u32, usize)]) -> impl Iterator<Item = Hyp> + '_ {
+        tokens.iter().map(|&(id, frame)| Hyp {
             id,
             frame,
             end_frame: frame + 1,
@@ -1216,8 +1351,12 @@ mod tests {
             joined: false,
             open: false,
             heard_end: 0,
-        });
-        after_settled(heard, s.resume.frame())
+        })
+    }
+
+    /// A Parakeet window of tokens as (id, frame), each lasting a frame.
+    fn window(s: &UtteranceStream, tokens: &[(u32, usize)]) -> Heard {
+        after_settled(hyps(tokens), s.resume.frame())
     }
 
     #[test]
@@ -1239,6 +1378,105 @@ mod tests {
             (third.settled.as_str(), third.tentative.as_str()),
             ("", " the")
         );
+    }
+
+    /// A stream that settled "the kubectl", heard as `heard`, after two passes.
+    fn settled_kubectl(heard: &[(u32, usize)]) -> (UtteranceStream, Tokenizer) {
+        let mut words = SpecialWords::new();
+        words.add_spoken("kubectl", "cube control").unwrap();
+        let (mut s, tok) = stream_with(&words, 50);
+        let config = PassConfig::default();
+        s.settle(&tok, window(&s, heard), &config, PassMode::Tentative);
+        let second = s.settle(&tok, window(&s, heard), &config, PassMode::Tentative);
+        assert_eq!(second.settled, " the kubectl");
+        assert_eq!(s.resume.frame(), 5);
+        (s, tok)
+    }
+
+    #[test]
+    fn a_settled_word_is_recognized_in_its_other_spellings() {
+        let config = PassConfig::default();
+        let written = [(6, 0), (1, 2), (2, 3), (3, 4), (6, 40)];
+        let spoken = [(6, 0), (4, 2), (5, 4), (6, 40)];
+        // Written as heard, then heard as its spoken form, whose last word the window keeps.
+        let (mut s, tok) = settled_kubectl(&written);
+        let next = s.settle(&tok, window(&s, &spoken), &config, PassMode::Tentative);
+        assert_eq!(next.tentative, " the");
+        // Heard as its spoken form, then heard as written, on the window's first frame.
+        let (mut s, tok) = settled_kubectl(&spoken);
+        let again = [(6, 0), (1, 4), (2, 4), (3, 4), (6, 40)];
+        let next = s.settle(&tok, window(&s, &again), &config, PassMode::Tentative);
+        assert_eq!(next.tentative, " the");
+    }
+
+    #[test]
+    fn the_end_of_a_settled_form_said_again_later_is_new() {
+        let (mut s, tok) = settled_kubectl(&[(6, 0), (4, 2), (5, 4), (6, 40)]);
+        // "control" at frame 8 comes after the settled form's audio, so it's new speech.
+        let next = s.settle(
+            &tok,
+            window(&s, &[(5, 8), (6, 40)]),
+            &PassConfig::default(),
+            PassMode::Tentative,
+        );
+        assert_eq!(next.tentative, " control the");
+    }
+
+    #[test]
+    fn a_word_spoken_again_after_it_settled_stays() {
+        let config = PassConfig::default();
+        // Each case settles the first words over two passes, then a later pass hears more.
+        let stream = |first: &[(u32, usize)], later: Heard| {
+            let (mut s, tok) = stream_with(&SpecialWords::new(), 50);
+            s.settle(&tok, window(&s, first), &config, PassMode::Tentative);
+            s.settle(&tok, window(&s, first), &config, PassMode::Tentative);
+            s.settle(&tok, later, &config, PassMode::Tentative)
+                .tentative
+        };
+        let at = |tokens: &[(u32, usize)], boundary| after_settled(hyps(tokens), boundary);
+        // A Parakeet window hears "the", settled on frame 0, there again, and on frame 3 too
+        // ("No | no").
+        let the = [(6, 0), (42, 40)];
+        assert_eq!(stream(&the, at(&[(6, 0), (6, 3), (42, 40)], 1)), " the New");
+        // With no "the" on frame 0, the window placed the settled one later.
+        assert_eq!(stream(&the, at(&[(6, 3), (42, 40)], 1)), " New");
+        // Two words said again after them ("that's a good | that's a good").
+        let both = [(6, 0), (4, 2), (42, 40)];
+        let again = [(6, 0), (4, 2), (6, 4), (4, 5), (42, 40)];
+        assert_eq!(stream(&both, at(&again, 3)), " the cube New");
+    }
+
+    #[test]
+    fn a_copy_right_after_the_settled_word_heard_on_its_frames_is_the_same_word() {
+        // Granite settled "the" on frames 0 and 1, and a later pass hears more after it.
+        let tentative = |tokens: &[(u32, usize, usize)]| {
+            let (mut s, tok) = stream_with(&SpecialWords::new(), 50);
+            s.recent = vec![SettledWord {
+                spellings: vec![vec!["the".to_string()]; 2],
+                heard: 0..2,
+            }];
+            s.resume = Resume::Ctc { frame: 2, prev: 6 };
+            s.last_settled = Some(6);
+            let tokens = tokens
+                .iter()
+                .map(|&(id, frame, end_frame)| Hyp {
+                    id,
+                    frame,
+                    end_frame,
+                    resume: Resume::Frame(end_frame),
+                    joined: false,
+                    heard_end: 0,
+                })
+                .collect();
+            let heard = Heard { tokens, new: 1 };
+            s.settle(&tok, heard, &PassConfig::default(), PassMode::Tentative)
+                .tentative
+        };
+        // The pass aligns "the" on frames 0 to 2, so the frames after the settled text start with
+        // the rest of that run.
+        assert_eq!(tentative(&[(6, 0, 2), (6, 2, 3), (42, 40, 41)]), " New");
+        // After a frame of something else, "the" was said again.
+        assert_eq!(tentative(&[(6, 0, 2), (6, 3, 4), (42, 40, 41)]), " the New");
     }
 
     #[test]

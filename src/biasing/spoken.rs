@@ -3,6 +3,7 @@
 //! the tokens of its word ("Nginx") on the same frames, so the transcript's text stays the
 //! decoding of its tokens.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::parakeet::Token;
@@ -19,13 +20,24 @@ struct Node {
     word: u32,
 }
 
-/// Spoken forms in a tree of their bytes with ASCII letters in lower case, and the tokens of the
-/// words they stand for.
+/// Spoken forms in a tree of their bytes with ASCII letters in lower case, and the words they
+/// stand for.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Spoken {
     /// The tree, empty without forms. The root is node 0.
     nodes: Vec<Node>,
-    words: Vec<Vec<u32>>,
+    words: Vec<Word>,
+    /// Each word's index by its spelling.
+    by_text: HashMap<String, u32>,
+    /// The first word's index by its spelling's [`normalized_words`].
+    by_spelling: HashMap<Vec<String>, u32>,
+}
+
+#[derive(Debug, Clone)]
+struct Word {
+    tokens: Vec<u32>,
+    /// The word's spelling and its forms, as [`normalized_words`].
+    spellings: Vec<Vec<String>>,
 }
 
 /// A spoken form found in a transcript.
@@ -41,14 +53,38 @@ pub(crate) struct Replacement {
 }
 
 impl Spoken {
-    /// Adds a word's tokens, and returns its index for [`Spoken::insert`].
-    pub fn add_word(&mut self, tokens: Vec<u32>) -> u32 {
-        self.words.push(tokens);
-        self.words.len() as u32 - 1
+    /// Adds a word spelled `spelling` with tokens `tokens`, unless it's there already, and
+    /// returns its index for [`Spoken::insert`].
+    pub fn add_word(&mut self, spelling: &str, tokens: Vec<u32>) -> u32 {
+        if let Some(&i) = self.by_text.get(spelling) {
+            return i;
+        }
+        let i = self.words.len() as u32;
+        let key = normalized_words(spelling);
+        self.by_text.insert(spelling.to_string(), i);
+        self.by_spelling.entry(key.clone()).or_insert(i);
+        self.words.push(Word {
+            tokens,
+            spellings: vec![key],
+        });
+        i
+    }
+
+    /// The spellings of the word spelled as `words` ([`normalized_words`]), which are its
+    /// spelling and its forms, or none if it has no spoken form.
+    pub fn spellings(&self, words: &[String]) -> &[Vec<String>] {
+        self.by_spelling
+            .get(words)
+            .map_or(&[], |&i| &self.words[i as usize].spellings)
     }
 
     /// Writes word `word` for `form`, unless an earlier word has the form.
     pub fn insert(&mut self, form: &str, word: u32) {
+        let spelling = normalized_words(form);
+        let spellings = &mut self.words[word as usize].spellings;
+        if !spellings.contains(&spelling) {
+            spellings.push(spelling);
+        }
         if self.nodes.is_empty() {
             self.nodes.push(Node {
                 children: Vec::new(),
@@ -84,7 +120,7 @@ impl Spoken {
 
     /// The tokens of the word written in place of `r`.
     pub fn word(&self, r: &Replacement) -> &[u32] {
-        &self.words[r.word as usize]
+        &self.words[r.word as usize].tokens
     }
 
     fn child(&self, node: u32, b: u8) -> Option<u32> {
@@ -240,6 +276,20 @@ fn continuation(tokenizer: &Tokenizer, rest: &[u8]) -> Option<Vec<u32>> {
     let rest = std::str::from_utf8(rest).ok()?;
     let tokens = tokenizer.encode_continuation(rest);
     (tokenizer.decode_raw(&tokens) == rest).then_some(tokens)
+}
+
+/// The words of `text` in lower case, each with only its letters and digits, as streams compare
+/// words.
+pub(crate) fn normalized_words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
 }
 
 /// The frame of token `k` of `n` written in place of a form whose tokens start at frames

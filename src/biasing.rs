@@ -27,7 +27,7 @@ use std::fmt;
 use crate::error::{Error, Result};
 use crate::tokenizer::Tokenizer;
 
-pub(crate) use spoken::Spoken;
+pub(crate) use spoken::{Spoken, normalized_words};
 pub(crate) use spotting::{score_row, spot};
 
 /// How strongly the decoders favour special words. The defaults were tuned on LibriSpeech.
@@ -696,7 +696,7 @@ impl Compiled {
                 }
             }
             if usable {
-                let word = spoken.add_word(word);
+                let word = spoken.add_word(written, word);
                 spoken.insert(form, word);
             } else {
                 unusable.push((
