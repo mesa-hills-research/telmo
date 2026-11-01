@@ -27,7 +27,7 @@ use std::fmt;
 use crate::error::{Error, Result};
 use crate::tokenizer::Tokenizer;
 
-pub(crate) use spoken::{Spoken, place};
+pub(crate) use spoken::Spoken;
 pub(crate) use spotting::{score_row, spot};
 
 /// How strongly the decoders favour special words. The defaults were tuned on LibriSpeech.
@@ -808,13 +808,13 @@ pub(crate) mod tests {
     use super::*;
 
     /// "▁ku" 1, "be" 2, "ctl" 3, "▁cube" 4, "▁control" 5, "▁the" 6, "," 7, "▁Ku" 8, "▁ng" 9,
-    /// "inx" 10, "▁" 11, "▁New" 42, "▁York" 43, "▁city" 44, "s" 47, "▁C" 58, plus letters and
-    /// merges.
+    /// "inx" 10, "▁" 11, "▁New" 42, "▁York" 43, "▁city" 44, "s" 47, "▁C" 58, "be." 59, "." 60,
+    /// "—" 61, plus letters and merges.
     pub(crate) fn tokenizer() -> Tokenizer {
         let json = r#"{"added_tokens":[{"id":0,"content":"<blank>","special":true}],
             "model":{"type":"BPE","vocab":{"<blank>":0,"▁ku":1,"be":2,"ctl":3,"▁cube":4,"▁control":5,"▁the":6,",":7,"▁Ku":8,"▁ng":9,"inx":10,"▁":11,
               "k":12,"u":13,"b":14,"e":15,"c":16,"t":17,"l":18,"K":19,"n":20,"g":21,"i":22,"x":23,"o":24,"r":25,"h":26,"▁k":27,"▁K":28,"▁n":29,"▁c":30,"▁t":31,"ct":32,"▁co":33,"▁con":34,"ro":35,"▁cu":36,"nt":37,"ntro":38,"ntrol":39,"in":40,"▁th":41,
-              "▁New":42,"▁York":43,"▁city":44,"▁Ne":45,"w":46,"s":47,"N":48,"Y":49,"▁N":50,"▁Y":51,"▁Yo":52,"▁Yor":53,"▁ci":54,"▁cit":55,"y":56,"C":57,"▁C":58},
+              "▁New":42,"▁York":43,"▁city":44,"▁Ne":45,"w":46,"s":47,"N":48,"Y":49,"▁N":50,"▁Y":51,"▁Yo":52,"▁Yor":53,"▁ci":54,"▁cit":55,"y":56,"C":57,"▁C":58,"be.":59,".":60,"—":61},
               "merges":[["▁","k"],["▁k","u"],["b","e"],["c","t"],["ct","l"],["▁","K"],["▁K","u"],["▁","n"],["▁n","g"],["i","n"],["in","x"],
                 ["▁","c"],["▁c","u"],["▁cu","be"],["▁c","o"],["▁co","n"],["n","t"],["r","o"],["nt","ro"],["ntro","l"],["▁con","trol"],["▁","t"],["▁t","h"],["▁th","e"],
                 ["▁","N"],["▁N","e"],["▁Ne","w"],["▁","Y"],["▁Y","o"],["▁Yo","r"],["▁Yor","k"],["▁c","i"],["▁ci","t"],["▁cit","y"],["▁","C"]]}}"#;

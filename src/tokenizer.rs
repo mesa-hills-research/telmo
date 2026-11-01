@@ -194,41 +194,55 @@ impl Tokenizer {
     /// callers pass such text.
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut out = Vec::new();
-        let mut buf = [0u8; 4];
         for word in text.split_whitespace() {
-            let mut symbols: Vec<u32> = Vec::new();
-            for c in std::iter::once(' ').chain(word.chars()) {
-                let c = &*c.encode_utf8(&mut buf);
-                if let Some(&id) = self.ids.get(c) {
-                    symbols.push(id);
-                    continue;
-                }
-                let bytes: Option<Vec<u32>> = self
-                    .byte_fallback
-                    .then(|| c.bytes().map(|b| self.byte_ids[b as usize]).collect())
-                    .flatten();
-                match bytes {
-                    Some(bytes) => symbols.extend(bytes),
-                    None if self.fuse_unk && symbols.last() == self.unk.as_ref() => {}
-                    None => symbols.extend(self.unk),
-                }
-            }
-            // Merge the pair of lowest rank, the leftmost of equals, until no pair merges.
-            while let Some((_, i, merged)) = symbols
-                .windows(2)
-                .enumerate()
-                .filter_map(|(i, p)| {
-                    let &(rank, merged) = self.merges.get(&(p[0], p[1]))?;
-                    Some((rank, i, merged))
-                })
-                .min()
-            {
-                symbols[i] = merged;
-                symbols.remove(i + 1);
-            }
-            out.extend(symbols);
+            self.encode_word(word, true, &mut out);
         }
         out
+    }
+
+    /// Splits text without spaces into token ids as the end of a word, without the word-start
+    /// marker, such as the punctuation after a word.
+    pub(crate) fn encode_continuation(&self, text: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        self.encode_word(text, false, &mut out);
+        out
+    }
+
+    /// Appends the tokens of `word`, with the word-start marker if `start`.
+    fn encode_word(&self, word: &str, start: bool, out: &mut Vec<u32>) {
+        let mut buf = [0u8; 4];
+        let mut symbols: Vec<u32> = Vec::new();
+        let marker = start.then_some(' ');
+        for c in marker.into_iter().chain(word.chars()) {
+            let c = &*c.encode_utf8(&mut buf);
+            if let Some(&id) = self.ids.get(c) {
+                symbols.push(id);
+                continue;
+            }
+            let bytes: Option<Vec<u32>> = self
+                .byte_fallback
+                .then(|| c.bytes().map(|b| self.byte_ids[b as usize]).collect())
+                .flatten();
+            match bytes {
+                Some(bytes) => symbols.extend(bytes),
+                None if self.fuse_unk && symbols.last() == self.unk.as_ref() => {}
+                None => symbols.extend(self.unk),
+            }
+        }
+        // Merge the pair of lowest rank, the leftmost of equals, until no pair merges.
+        while let Some((_, i, merged)) = symbols
+            .windows(2)
+            .enumerate()
+            .filter_map(|(i, p)| {
+                let &(rank, merged) = self.merges.get(&(p[0], p[1]))?;
+                Some((rank, i, merged))
+            })
+            .min()
+        {
+            symbols[i] = merged;
+            symbols.remove(i + 1);
+        }
+        out.extend(symbols);
     }
 
     /// Whether a word may end just before token `id`, which it may if the token starts a word or

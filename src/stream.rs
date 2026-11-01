@@ -947,9 +947,9 @@ fn spotted_hypothesis(tokens: &[Token], spotted: &[Range<usize>], ids: &[u32]) -
         .collect()
 }
 
-/// `hyp` with its spoken forms written as their words. A word's tokens take the frames the form
-/// took, as [`biasing::place`] gives them, are joined so they settle together, and resume where
-/// the form ends. Tokens from where a form could still be under way on are open.
+/// `hyp` with its spoken forms written as their words. A word's tokens take the frames
+/// [`Spoken::written`] gives them, are joined so they settle together, and resume where the form
+/// ends. Tokens from where a form could still be under way on are open.
 fn write_spoken(spoken: &Spoken, tokenizer: &Tokenizer, hyp: Vec<Hyp>) -> Vec<Hyp> {
     if spoken.is_empty() {
         return hyp;
@@ -969,11 +969,14 @@ fn write_spoken(spoken: &Spoken, tokenizer: &Tokenizer, hyp: Vec<Hyp>) -> Vec<Hy
             continue;
         };
         let (first, last) = (&hyp[r.heard.start], &hyp[r.heard.end - 1]);
-        let word = spoken.word(&r);
-        for (k, &id) in word.iter().enumerate() {
+        for (k, (id, frame)) in spoken
+            .written(&r, first.frame, last.frame)
+            .into_iter()
+            .enumerate()
+        {
             out.push(Hyp {
                 id,
-                frame: biasing::place(first.frame, last.frame, word.len(), k),
+                frame,
                 end_frame: last.end_frame,
                 resume: last.resume.clone(),
                 joined: k > 0 || first.joined,

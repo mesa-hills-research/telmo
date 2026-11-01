@@ -35,6 +35,9 @@ pub(crate) struct Replacement {
     pub heard: Range<usize>,
     /// The word written in its place.
     pub word: u32,
+    /// The tokens of what follows the form in its last token, written after the word, such as
+    /// the period of a token "5." where the form ends in "5".
+    pub rest: Vec<u32>,
 }
 
 impl Spoken {
@@ -94,10 +97,10 @@ impl Spoken {
 
     /// The spoken forms in `ids`, in any case of their ASCII letters, leftmost first and the
     /// longest of those starting at one token. A form starts at a token that starts a word, and
-    /// ends at the end of a token followed by a word boundary or by nothing. Also returns the
-    /// first token where a form could still be under way if more tokens followed, or
-    /// `ids.len()`. Punctuation at the end doesn't stop a form there, since a model often closes
-    /// a sentence where its audio ends and drops the punctuation once more audio comes.
+    /// ends where the text has no letter or digit before the next space, which may be inside a
+    /// token. Also returns the first token where a form could still be under way if more tokens
+    /// followed, or `ids.len()`. Punctuation at the end doesn't stop a form there, since a model
+    /// often closes a sentence where its audio ends and drops the punctuation once more comes.
     pub fn find(&self, tokenizer: &Tokenizer, ids: &[u32]) -> (Vec<Replacement>, usize) {
         let mut found = Vec::new();
         let mut open = ids.len();
@@ -105,17 +108,13 @@ impl Spoken {
             return (found, open);
         }
         let mut text = Vec::new();
-        // The end of each token's bytes in `text`, and of the last token with a letter or digit.
+        // The end of each token's bytes in `text`.
         let mut ends = Vec::with_capacity(ids.len());
-        let mut last_word_end = 0;
         for &id in ids {
-            let piece = tokenizer.piece_bytes(id);
-            text.extend_from_slice(piece);
+            text.extend_from_slice(tokenizer.piece_bytes(id));
             ends.push(text.len());
-            if piece.iter().any(u8::is_ascii_alphanumeric) || !piece.is_ascii() {
-                last_word_end = text.len();
-            }
         }
+        let last_word_end = last_alphanumeric_end(&text);
         let mut i = 0;
         while i < ids.len() {
             let start = if i == 0 { 0 } else { ends[i - 1] };
@@ -143,14 +142,13 @@ impl Spoken {
                 }
                 let word = self.nodes[node as usize].word;
                 if word != NONE
-                    && ends[token] == p + 1
-                    && ids
-                        .get(token + 1)
-                        .is_none_or(|&t| tokenizer.is_word_boundary(t))
+                    && ends_word(&text[p + 1..])
+                    && let Some(rest) = continuation(tokenizer, &text[p + 1..ends[token]])
                 {
                     longest = Some(Replacement {
                         heard: i..token + 1,
                         word,
+                        rest,
                     });
                 }
             }
@@ -168,8 +166,20 @@ impl Spoken {
         (found, open)
     }
 
-    /// `tokens` with each spoken form written as its word. The word's tokens take the frames
-    /// the form took, as [`place`] gives them.
+    /// The tokens written for `r` with their frames, given the frames of the first and last token
+    /// heard for it. The word's tokens spread over those frames as [`place`] puts them, and the
+    /// rest of the last heard token keeps that token's frame.
+    pub fn written(&self, r: &Replacement, first: usize, last: usize) -> Vec<(u32, usize)> {
+        let word = self.word(r);
+        let spread = word
+            .iter()
+            .enumerate()
+            .map(|(k, &id)| (id, place(first, last, word.len(), k)));
+        spread.chain(r.rest.iter().map(|&id| (id, last))).collect()
+    }
+
+    /// `tokens` with each spoken form written as its word, on the frames given by
+    /// [`Spoken::written`]. The last token lasts to the end of the form.
     pub fn rewrite(&self, tokenizer: &Tokenizer, tokens: Vec<Token>) -> Vec<Token> {
         if self.is_empty() {
             return tokens;
@@ -183,22 +193,18 @@ impl Spoken {
         let mut next = 0;
         for r in &found {
             out.extend_from_slice(&tokens[next..r.heard.start]);
-            let heard = &tokens[r.heard.clone()];
-            let (first, last) = (heard[0], heard[heard.len() - 1]);
-            let word = self.word(r);
-            let frame = |k| place(first.frame as usize, last.frame as usize, word.len(), k) as u32;
-            out.extend(word.iter().enumerate().map(|(k, &id)| {
-                let end = if k + 1 == word.len() {
-                    last.frame + last.duration
-                } else {
-                    frame(k + 1)
-                };
-                Token {
+            let (first, last) = (tokens[r.heard.start], tokens[r.heard.end - 1]);
+            let written = self.written(r, first.frame as usize, last.frame as usize);
+            for (k, &(id, frame)) in written.iter().enumerate() {
+                let end = written
+                    .get(k + 1)
+                    .map_or(last.frame + last.duration, |&(_, f)| f as u32);
+                out.push(Token {
                     id,
-                    frame: frame(k),
-                    duration: end - frame(k),
-                }
-            }));
+                    frame: frame as u32,
+                    duration: end - frame as u32,
+                });
+            }
             next = r.heard.end;
         }
         out.extend_from_slice(&tokens[next..]);
@@ -206,10 +212,40 @@ impl Spoken {
     }
 }
 
+/// Whether a word ends at the start of `text`, meaning no letter or digit comes before the next
+/// space.
+fn ends_word(text: &[u8]) -> bool {
+    let until_space = &text[..text.iter().position(|&b| b == b' ').unwrap_or(text.len())];
+    !String::from_utf8_lossy(until_space)
+        .chars()
+        .any(char::is_alphanumeric)
+}
+
+/// Where the last letter or digit of `text` ends, or 0. Text cut inside a character's bytes
+/// counts as letters to its end.
+fn last_alphanumeric_end(text: &[u8]) -> usize {
+    match std::str::from_utf8(text) {
+        Ok(text) => text
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_alphanumeric())
+            .map_or(0, |(i, c)| i + c.len_utf8()),
+        Err(_) => text.len(),
+    }
+}
+
+/// The tokens of `rest`, the end of a token after a form, written as part of the word before
+/// it, if the vocabulary spells it.
+fn continuation(tokenizer: &Tokenizer, rest: &[u8]) -> Option<Vec<u32>> {
+    let rest = std::str::from_utf8(rest).ok()?;
+    let tokens = tokenizer.encode_continuation(rest);
+    (tokenizer.decode_raw(&tokens) == rest).then_some(tokens)
+}
+
 /// The frame of token `k` of `n` written in place of a form whose tokens start at frames
 /// `first` to `last`. The first takes the form's first frame, the last the frame of its last
 /// token, and those between spread evenly over the frames between.
-pub(crate) fn place(first: usize, last: usize, n: usize, k: usize) -> usize {
+fn place(first: usize, last: usize, n: usize, k: usize) -> usize {
     if n == 1 {
         first
     } else {
@@ -254,6 +290,9 @@ mod tests {
     const S: u32 = 47;
     const NEW: u32 = 42;
     const YORK: u32 = 43;
+    const BE_DOT: u32 = 59;
+    const DOT: u32 = 60;
+    const DASH: u32 = 61;
 
     #[test]
     fn whole_words_of_a_form_are_found_in_any_capitals() {
@@ -318,6 +357,94 @@ mod tests {
         assert_eq!(f, vec![(0..2, vec![1, 2, 3])]);
         let (f, _) = found(&c, &[THE, CUBE, THE, CUBE, CONTROL, THE, COMMA]);
         assert_eq!(f, vec![(0..2, vec![NEW, YORK]), (2..5, vec![YORK])]);
+    }
+
+    #[test]
+    fn a_form_may_end_inside_a_token_before_punctuation() {
+        let c = spoken(&[("New York", "the cube")]);
+        let tok = tokenizer();
+        let token = |id, frame| Token {
+            id,
+            frame,
+            duration: 1,
+        };
+        // "▁the ▁cu be." spells "the cube." with the period in the form's last token, which
+        // stays after the word on that token's frame.
+        let heard = vec![token(THE, 0), token(36, 2), token(BE_DOT, 4)];
+        assert_eq!(tok.decode(&[THE, 36, BE_DOT]), "the cube.");
+        let out = c.spoken.rewrite(&tok, heard);
+        assert_eq!(
+            out,
+            vec![
+                Token {
+                    id: NEW,
+                    frame: 0,
+                    duration: 4
+                },
+                Token {
+                    id: YORK,
+                    frame: 4,
+                    duration: 0
+                },
+                token(DOT, 4)
+            ]
+        );
+        let ids: Vec<u32> = out.iter().map(|t| t.id).collect();
+        assert_eq!(tok.decode(&ids), "New York.");
+    }
+
+    #[test]
+    fn punctuation_in_the_last_token_at_the_end_leaves_a_form_open() {
+        let c = spoken(&[("kubectl", "cube control")]);
+        assert_eq!(found(&c, &[THE, 36, BE_DOT]), (vec![], 1));
+    }
+
+    #[test]
+    fn punctuation_outside_ascii_at_the_end_leaves_a_form_open() {
+        let c = spoken(&[("kubectl", "cube control")]);
+        assert_eq!(found(&c, &[THE, CUBE, DASH]), (vec![], 1));
+        assert_eq!(found(&c, &[THE, CUBE, DASH, THE]), (vec![], 4));
+    }
+
+    /// Granite's tokenizer, from the model named by `GRANITE_SPEECH_DIR`.
+    fn granite_tokenizer() -> Tokenizer {
+        let dir = std::env::var_os("GRANITE_SPEECH_DIR").expect("set GRANITE_SPEECH_DIR");
+        Tokenizer::load(&std::path::Path::new(&dir).join("tokenizer.json")).unwrap()
+    }
+
+    #[test]
+    #[ignore = "needs a model, named by GRANITE_SPEECH_DIR"]
+    fn granites_digit_and_period_pieces_end_a_form_inside_them() {
+        let tok = granite_tokenizer();
+        let mut list = SpecialWords::new();
+        list.add_spoken("Haiku 5.5", "Haiku 5.5").unwrap();
+        list.add_spoken("Gemini 3.8 Flash", "Gemini 3.8 Flash")
+            .unwrap();
+        list.add_spoken("kubectl", "cube control").unwrap();
+        let (c, unusable) = Compiled::new(&list, &tok);
+        assert!(unusable.is_empty());
+        // Granite spells "haiku 5.5." with the last period in the piece "5.".
+        let ids = tok.encode("haiku 5.5.");
+        let tokens = ids
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| Token {
+                id,
+                frame: i as u32,
+                duration: 1,
+            })
+            .collect();
+        let out: Vec<u32> = c
+            .spoken
+            .rewrite(&tok, tokens)
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(tok.decode(&out), "Haiku 5.5.");
+        // "Gemini 3.8." ends in the piece "8.", and a period at the end may go once more audio
+        // comes, so "Gemini 3.8 Flash" could still be under way.
+        assert_eq!(c.spoken.find(&tok, &tok.encode("Gemini 3.8.")).1, 0);
+        assert_eq!(c.spoken.find(&tok, &tok.encode("cube—")).1, 0);
     }
 
     #[test]
