@@ -62,8 +62,10 @@ capitals, is refused as a `Duplicate`. Forms count toward `MAX_WORDS` with the w
 `add_spoken` doesn't favour the word itself, which `add` does, so a short word such as `rg` can
 have "rip grep" without being favoured as two letters.
 
-In a stream, the word written for a form settles whole. Words from where a form could still be
-under way wait until it completes, stops matching or the utterance ends.
+In a stream, the word written for a form settles whole. A word doesn't settle while a form
+starting at or before it still matches up to the words that may still change, so it waits until
+the form completes, stops matching in words that won't change, or the utterance ends. A form
+holds back at most its own words.
 
 Every occurrence of a form is rewritten, so a form that is also an everyday phrase changes that
 phrase too. With "read me" for README, "read me a story" would become "README a story", and
@@ -291,10 +293,9 @@ WER changed by at most +0.01 points (the upper end of the interval at most +0.03
 words didn't change, and one utterance in 6,608 had a false rewrite, "Bee Shire" heard as "zee
 shell" and written as zsh. On LibriSpeech test, "standard in the art" became "stdin the art".
 Streamed in steps of half a second, the terms of two voices' 320 utterances came out as spelled
-85.9% of the time with Granite and 90.9% with Parakeet, against 88.1% and 91.6% offline. In one
-Granite utterance the words of "Gemini 3.8 Flash" settled in separate passes, since earlier
-passes heard "3.5" and "3.84" and so stopped matching its form. The text came out right, but a
-name can settle a word at a time like this.
+87.5% of the time with Granite and 91.6% with Parakeet, against 88.1% and 91.6% offline. Holding
+back a form's start while its later words may still change made 3% of Granite's words and 2% of
+Parakeet's settle later, by half a second at the median and two seconds at most.
 
 ### Streaming
 
