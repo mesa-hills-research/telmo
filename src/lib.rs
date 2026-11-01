@@ -24,7 +24,7 @@
 //! ```
 //!
 //! [`Model::transcribe_biased`] favours a list of [`SpecialWords`], such as names and technical
-//! terms, while it transcribes.
+//! terms, while it transcribes, and writes their spoken forms ("engine x") as the words.
 //!
 //! Offline transcription is what Telmo does today. Streaming ([`stream`]) is experimental. The
 //! kernels use AVX-512, AVX2 or NEON where the CPU has them and plain Rust elsewhere, unless

@@ -241,6 +241,15 @@ impl Tokenizer {
         }
     }
 
+    /// The bytes token `id` adds to the text, with a space for `▁`. Special tokens add none.
+    pub(crate) fn piece_bytes(&self, id: u32) -> &[u8] {
+        match self.pieces.get(id as usize) {
+            Some(Piece::Text(t)) => t.as_bytes(),
+            Some(Piece::Byte(b)) => std::slice::from_ref(b),
+            Some(Piece::Control) | None => &[],
+        }
+    }
+
     /// Joins the pieces of `ids` into text. Special tokens are left out, byte pieces are joined
     /// into UTF-8, and the space the first word's `▁` stands for is dropped.
     ///

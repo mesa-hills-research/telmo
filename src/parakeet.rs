@@ -843,8 +843,9 @@ impl Parakeet {
         self.transcribe_biased(samples, &SpecialWords::new())
     }
 
-    /// Transcribes 16 kHz mono samples, favouring special words with a beam search. With no
-    /// words, it decodes greedily as [`Parakeet::transcribe`] does.
+    /// Transcribes 16 kHz mono samples, favouring special words with a beam search and writing
+    /// spoken forms as their words. With no words, it decodes greedily as
+    /// [`Parakeet::transcribe`] does.
     pub fn transcribe_biased(&self, samples: &[f32], words: &SpecialWords) -> Result<Transcript> {
         let mut timings = Timings::default();
         let features = timings.time("features", || self.front_end.compute(samples))?;
@@ -1295,8 +1296,8 @@ impl Parakeet {
         tokens
     }
 
-    /// Decodes with a beam search that favours special words, as
-    /// [`Parakeet::transcribe_biased`] does. With no words, it's [`Parakeet::decode`].
+    /// Decodes with a beam search that favours special words, then writes spoken forms as their
+    /// words, as [`Parakeet::transcribe_biased`] does. With no words, it's [`Parakeet::decode`].
     pub fn decode_biased(
         &self,
         encoded: &Encoded,
@@ -1304,11 +1305,13 @@ impl Parakeet {
         timings: &mut Timings,
     ) -> Vec<Token> {
         let (words, _) = Compiled::new(words, &self.tokenizer);
-        if words.is_empty() {
-            return self.decode(encoded, timings, None);
-        }
-        let start = self.initial_decoder_state(timings);
-        self.beam_search(encoded, 0, &start, &words, timings)
+        let tokens = if words.forms.is_empty() {
+            self.decode(encoded, timings, None)
+        } else {
+            let start = self.initial_decoder_state(timings);
+            self.beam_search(encoded, 0, &start, &words, timings)
+        };
+        words.spoken.rewrite(&self.tokenizer, tokens)
     }
 
     /// The decoder's state before any token, as NeMo starts it (the blank token's input).

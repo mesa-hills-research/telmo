@@ -9,8 +9,10 @@
 //! last settled one.
 //!
 //! A word settles once two passes in a row agree on it, together with every word before it, it
-//! ends at least a second before the audio does, and the model has heard a word after it.
-//! Settled words never change. When the utterance ends, one last pass settles everything.
+//! ends at least a second before the audio does, and the model has heard a word after it. A
+//! spoken form written as its word settles whole, and words where a spoken form could still be
+//! under way wait. Settled words never change. When the utterance ends, one last pass settles
+//! everything.
 //!
 //! [`Stream`] runs it all on a thread of its own. Audio of any sample rate goes in as it comes,
 //! voice activity splits it into utterances, passes run as often as the computer keeps up with,
@@ -23,7 +25,7 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::biasing::{self, Compiled, SpecialWords};
+use crate::biasing::{self, Compiled, SpecialWords, Spoken};
 use crate::error::Result;
 use crate::features::LogMelStream;
 use crate::granite::{self, Granite};
@@ -119,8 +121,11 @@ struct Hyp {
     end_frame: usize,
     resume: Resume,
     /// Whether the token belongs to the word before it whatever the tokenizer says, as the
-    /// tokens of a spotted special word do, so they settle together.
+    /// tokens of a spotted special word or of a spoken form's word do, so they settle together.
     joined: bool,
+    /// Whether a spoken form could be under way from this token or one before it, so it can't
+    /// settle yet.
+    open: bool,
 }
 
 /// One utterance's audio and the text settled from it so far. Experimental, like the rest of
@@ -162,7 +167,7 @@ impl UtteranceStream {
             Model::Parakeet(m) => (Resume::Frame(0), None, Some(m.front_end().stream())),
             Model::Granite(m) => {
                 let mut blocks = GraniteStream::new(m);
-                if let Some(words) = &words {
+                if let Some(words) = words.as_ref().filter(|w| !w.forms.is_empty()) {
                     blocks.keep_spotting_scores(&words.tokens);
                 }
                 (
@@ -228,6 +233,10 @@ impl UtteranceStream {
             Model::Granite(m) => self.granite_hypothesis(m, mode == PassMode::Final)?,
         };
         let tokenizer = model.tokenizer();
+        let hyp = match &self.words {
+            Some(words) => write_spoken(&words.spoken, tokenizer, hyp),
+            None => hyp,
+        };
         let hyp = self.drop_repeats(tokenizer, config, hyp);
         let words = split_words(tokenizer, self.last_settled, &hyp);
         // Where the model last heard speech, taken as the last token with a letter or digit,
@@ -261,6 +270,7 @@ impl UtteranceStream {
                 && settle < self.previous.len()
                 && word_ids(&hyp, &words[settle]) == self.previous[settle]
                 && hyp[words[settle].end - 1].end_frame * FRAME <= limit
+                && !hyp[words[settle].end - 1].open
             {
                 settle += 1;
             }
@@ -373,8 +383,10 @@ impl UtteranceStream {
         let mut state = model.initial_decoder_state(timings);
         state.frame = start / FRAME;
         let tokens: Vec<Token> = match &self.words {
-            Some(words) => model.beam_search(&encoded, start / FRAME, &state, words, timings),
-            None => model
+            Some(words) if !words.forms.is_empty() => {
+                model.beam_search(&encoded, start / FRAME, &state, words, timings)
+            }
+            _ => model
                 .decode_from(&encoded, start / FRAME, &state, timings)
                 .into_iter()
                 .map(|(t, _)| t)
@@ -394,6 +406,7 @@ impl UtteranceStream {
                     end_frame,
                     resume: Resume::Frame(end_frame),
                     joined: false,
+                    open: false,
                 }
             })
             .collect())
@@ -412,7 +425,7 @@ impl UtteranceStream {
         };
         let ids = blocks.frame_ids();
         let hyp = ctc_hypothesis(ids, frame, prev, model.config().blank as u32);
-        let Some(words) = &self.words else {
+        let Some(words) = self.words.as_ref().filter(|w| !w.forms.is_empty()) else {
             return Ok(hyp);
         };
         let greedy: Vec<Token> = hyp
@@ -928,9 +941,48 @@ fn spotted_hypothesis(tokens: &[Token], spotted: &[Range<usize>], ids: &[u32]) -
                     prev: ids[end_frame - 1],
                 },
                 joined,
+                open: false,
             }
         })
         .collect()
+}
+
+/// `hyp` with its spoken forms written as their words. A word's tokens take the frames the form
+/// took, as [`biasing::place`] gives them, are joined so they settle together, and resume where
+/// the form ends. Tokens from where a form could still be under way on are open.
+fn write_spoken(spoken: &Spoken, tokenizer: &Tokenizer, hyp: Vec<Hyp>) -> Vec<Hyp> {
+    if spoken.is_empty() {
+        return hyp;
+    }
+    let ids: Vec<u32> = hyp.iter().map(|h| h.id).collect();
+    let (found, open) = spoken.find(tokenizer, &ids);
+    let mut found = found.into_iter().peekable();
+    let mut out = Vec::with_capacity(hyp.len());
+    let mut i = 0;
+    while i < hyp.len() {
+        let Some(r) = found.next_if(|r| r.heard.start == i) else {
+            out.push(Hyp {
+                open: i >= open,
+                ..hyp[i].clone()
+            });
+            i += 1;
+            continue;
+        };
+        let (first, last) = (&hyp[r.heard.start], &hyp[r.heard.end - 1]);
+        let word = spoken.word(&r);
+        for (k, &id) in word.iter().enumerate() {
+            out.push(Hyp {
+                id,
+                frame: biasing::place(first.frame, last.frame, word.len(), k),
+                end_frame: last.end_frame,
+                resume: last.resume.clone(),
+                joined: k > 0 || first.joined,
+                open: r.heard.end > open,
+            });
+        }
+        i = r.heard.end;
+    }
+    out
 }
 
 /// CTC greedy decoding of `ids` from `frame` on, where the frame before had `prev`. Repeats
@@ -946,6 +998,7 @@ fn ctc_hypothesis(ids: &[u32], frame: usize, prev: u32, blank: u32) -> Vec<Hyp> 
                 frame: f,
                 end_frame: f + 1,
                 joined: false,
+                open: false,
                 resume: Resume::Ctc {
                     frame: f + 1,
                     prev: id,
@@ -1048,6 +1101,62 @@ mod tests {
         // Without the spot, each word stands alone.
         let plain = spotted_hypothesis(&tokens, &[], &frame_ids);
         assert_eq!(split_words(&tok, None, &plain).len(), 5);
+    }
+
+    #[test]
+    fn a_spoken_form_settles_whole_and_waits_while_it_could_complete() {
+        let tok = crate::biasing::tests::tokenizer();
+        let mut words = SpecialWords::new();
+        words.add_spoken("kubectl", "cube control").unwrap();
+        let spoken = Compiled::new(&words, &tok).0.spoken;
+        // "▁the ▁cube ▁control ▁the", two frames each.
+        let heard = |ids: &[u32]| -> Vec<Hyp> {
+            ids.iter()
+                .enumerate()
+                .map(|(i, &id)| Hyp {
+                    id,
+                    frame: 2 * i,
+                    end_frame: 2 * i + 2,
+                    resume: Resume::Frame(2 * i + 2),
+                    joined: false,
+                    open: false,
+                })
+                .collect()
+        };
+        let hyp = write_spoken(&spoken, &tok, heard(&[6, 4, 5, 6]));
+        let got: Vec<(u32, usize, bool, bool)> = hyp
+            .iter()
+            .map(|h| (h.id, h.frame, h.joined, h.open))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (6, 0, false, false),
+                (1, 2, false, false),
+                (2, 3, true, false),
+                (3, 4, true, false),
+                (6, 6, false, false)
+            ]
+        );
+        // Each token of the word resumes where "control" ended.
+        assert!(
+            hyp[1..4]
+                .iter()
+                .all(|h| h.resume.frame() == 6 && h.end_frame == 6)
+        );
+        let words: Vec<(usize, usize)> = split_words(&tok, None, &hyp)
+            .iter()
+            .map(|w| (w.start, w.end))
+            .collect();
+        assert_eq!(words, vec![(0, 1), (1, 4), (4, 5)]);
+        // "cube" at the end may still become "cube control", so it's open.
+        let hyp = write_spoken(&spoken, &tok, heard(&[6, 4]));
+        let open: Vec<bool> = hyp.iter().map(|h| h.open).collect();
+        assert_eq!(open, vec![false, true]);
+        // A form at the end may still go on ("cube controls"), so its word is open too.
+        let hyp = write_spoken(&spoken, &tok, heard(&[6, 4, 5]));
+        let got: Vec<(u32, bool)> = hyp.iter().map(|h| (h.id, h.open)).collect();
+        assert_eq!(got, vec![(6, false), (1, true), (2, true), (3, true)]);
     }
 
     /// The special words of the active utterance and of those waiting for their final pass.

@@ -97,7 +97,7 @@ pub(crate) fn spot(
 ) -> (Vec<Token>, Vec<Range<usize>>) {
     let width = 2 + words.tokens.len();
     let frames = scores.len() / width;
-    if words.is_empty() || first >= frames {
+    if words.forms.is_empty() || first >= frames {
         return (greedy.to_vec(), Vec::new());
     }
     // Words and punctuation of the greedy text, as spans of frames.

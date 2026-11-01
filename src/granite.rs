@@ -555,7 +555,8 @@ impl Granite {
     }
 
     /// Transcribes 16 kHz mono samples, favouring special words by spotting them in the CTC
-    /// output. With no words, it's [`Granite::transcribe`].
+    /// output and writing spoken forms as their words. With no words, it's
+    /// [`Granite::transcribe`].
     pub fn transcribe_biased(&self, samples: &[f32], words: &SpecialWords) -> Result<Transcript> {
         let mut timings = Timings::default();
         let features = timed(&mut timings, "features", || self.features(samples))?;
@@ -577,9 +578,9 @@ impl Granite {
         })
     }
 
-    /// Greedy CTC decoding, then word spotting of special words as
-    /// [`Granite::transcribe_biased`] does it. A spotted word's last token lasts to the end of the
-    /// frames it took over.
+    /// Greedy CTC decoding, word spotting of special words, then spoken forms written as their
+    /// words, as [`Granite::transcribe_biased`] does it. A spotted word's last token lasts to the
+    /// end of the frames it took over.
     pub fn decode_biased(
         &self,
         encoded: &Encoded,
@@ -587,17 +588,17 @@ impl Granite {
         timings: &mut Timings,
     ) -> Vec<Token> {
         let (words, _) = Compiled::new(words, &self.tokenizer);
-        let columns = (!words.is_empty()).then_some(words.tokens.as_slice());
+        let columns = (!words.forms.is_empty()).then_some(words.tokens.as_slice());
         let (ids, scores) = timed(timings, "ctc_head", || {
             self.frame_scores(&encoded.data, encoded.frames, columns)
         });
-        let tokens = ctc_tokens(&ids, self.config.blank);
-        if words.is_empty() {
-            return tokens;
+        let mut tokens = ctc_tokens(&ids, self.config.blank);
+        if !words.forms.is_empty() {
+            tokens = timed(timings, "spotting", || {
+                biasing::spot(&words, &self.tokenizer, &tokens, &scores, 0).0
+            });
         }
-        timed(timings, "spotting", || {
-            biasing::spot(&words, &self.tokenizer, &tokens, &scores, 0).0
-        })
+        words.spoken.rewrite(&self.tokenizer, tokens)
     }
 
     /// Runs the encoder over `rows` rows of features. `tap` sees the input projection

@@ -168,7 +168,8 @@ impl Model {
     }
 
     /// The special words with no spelling this model's vocabulary can use, which decoding leaves
-    /// out, and why.
+    /// out, and why. Spoken forms are listed by the form, also when it's their word the
+    /// vocabulary can't spell.
     pub fn unusable_special_words(&self, words: &SpecialWords) -> Vec<(String, Rejection)> {
         Compiled::new(words, self.tokenizer()).1
     }

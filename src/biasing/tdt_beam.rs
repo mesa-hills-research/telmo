@@ -145,7 +145,7 @@ pub(crate) fn beam_search(
     start: Start,
     words: &Compiled,
 ) -> Vec<Token> {
-    if start.frame >= frames || words.is_empty() {
+    if start.frame >= frames || words.forms.is_empty() {
         return Vec::new();
     }
     let m = &words.matcher;

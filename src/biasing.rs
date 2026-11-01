@@ -10,10 +10,14 @@
 //!   and end. Where the alignment plus a bonus beats the greedy words over the same frames by a
 //!   margin, the special word replaces them.
 //!
+//! Spoken forms ("engine x" for "Nginx") are favoured the same way, and after decoding each
+//! whole-word match of one is replaced by its word's tokens on the same frames.
+//!
 //! Special words are words written with spaces between them. Scripts written without spaces,
 //! such as Japanese, aren't supported yet. With no special words, both models decode greedily,
 //! exactly as without biasing.
 
+mod spoken;
 mod spotting;
 pub(crate) mod tdt_beam;
 
@@ -23,6 +27,7 @@ use std::fmt;
 use crate::error::{Error, Result};
 use crate::tokenizer::Tokenizer;
 
+pub(crate) use spoken::{Spoken, place};
 pub(crate) use spotting::{score_row, spot};
 
 /// How strongly the decoders favour special words. The defaults were tuned on LibriSpeech.
@@ -137,12 +142,12 @@ impl Boost {
     }
 }
 
-/// Why a special word was left out.
+/// Why a special word or a spoken form was left out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejection {
     /// It has no letter or digit.
     Empty,
-    /// It has one or two letters or digits, and wasn't added with
+    /// It has one or two letters or digits, and is a spoken form or wasn't added with
     /// [`SpecialWords::add_code_word`].
     TooShort,
     /// It has more than [`SpecialWords::MAX_CHARS`] characters or [`SpecialWords::MAX_PARTS`]
@@ -151,9 +156,9 @@ pub enum Rejection {
     /// It has control characters, combining marks (give it composed, in NFC) or characters of a
     /// script written without spaces, such as Japanese.
     UnsupportedCharacters,
-    /// It's in the list already.
+    /// It's in the list already. A spoken form is refused when the list has it in any capitals.
     Duplicate,
-    /// The list holds [`SpecialWords::MAX_WORDS`] words already.
+    /// The list holds [`SpecialWords::MAX_WORDS`] words and spoken forms already.
     ListFull,
     /// The model's vocabulary can't spell it as written.
     NotInVocabulary,
@@ -178,15 +183,18 @@ impl fmt::Display for Rejection {
 
 impl std::error::Error for Rejection {}
 
-/// Words to favour while decoding, each in its usual spelling.
+/// Words to favour while decoding, each in its usual spelling, and spoken forms to write as
+/// words.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SpecialWords {
     words: Vec<String>,
+    /// Pairs of a word and a spoken form written as it.
+    spoken: Vec<(String, String)>,
     boost: Boost,
 }
 
 impl SpecialWords {
-    /// The most words a list holds.
+    /// The most words and spoken forms a list holds.
     pub const MAX_WORDS: usize = 1000;
     /// The most characters a word may have, spaces included.
     pub const MAX_CHARS: usize = 64;
@@ -204,11 +212,8 @@ impl SpecialWords {
     /// turn short ordinary words into them.
     pub fn add(&mut self, word: &str) -> Result<(), Rejection> {
         let word = normalize(word)?;
-        match word.chars().filter(|c| c.is_alphanumeric()).count() {
-            0 => Err(Rejection::Empty),
-            1 | 2 => Err(Rejection::TooShort),
-            _ => self.insert(word),
-        }
+        check_letters(&word)?;
+        self.insert(word)
     }
 
     /// Adds a word seen in code, a path or an identifier, which keeps it even when it has only
@@ -218,35 +223,64 @@ impl SpecialWords {
     }
 
     fn insert(&mut self, word: String) -> Result<(), Rejection> {
-        if !word.chars().any(char::is_alphanumeric) {
-            return Err(Rejection::Empty);
-        }
-        if word
-            .chars()
-            .any(|c| c.is_control() || is_combining(c) || is_unspaced_script(c))
-        {
-            return Err(Rejection::UnsupportedCharacters);
-        }
+        check_characters(&word)?;
         if self.words.contains(&word) {
             return Err(Rejection::Duplicate);
         }
-        if self.words.len() == SpecialWords::MAX_WORDS {
-            return Err(Rejection::ListFull);
-        }
+        self.check_room()?;
         self.words.push(word);
         Ok(())
     }
 
+    /// Writes `written` wherever the transcript has `spoken` as whole words, whatever the case of
+    /// its ASCII letters ("engine x", "Engine X" or "ENGINE X" for "Nginx"). A word given as its
+    /// own spoken form comes out as spelled wherever it's in other capitals ("mysql" for
+    /// "MySQL"). `spoken` follows the rules of [`SpecialWords::add`], and `written` those of
+    /// [`SpecialWords::add_code_word`]. A spoken form stands for one word, so add them in order
+    /// of priority. Adding a spoken form doesn't favour its word, which `add` does.
+    pub fn add_spoken(&mut self, written: &str, spoken: &str) -> Result<(), Rejection> {
+        let written = normalize(written)?;
+        check_characters(&written)?;
+        let spoken = normalize(spoken)?;
+        check_letters(&spoken)?;
+        check_characters(&spoken)?;
+        let lower = spoken.to_ascii_lowercase();
+        if self
+            .spoken
+            .iter()
+            .any(|(_, s)| s.to_ascii_lowercase() == lower)
+        {
+            return Err(Rejection::Duplicate);
+        }
+        self.check_room()?;
+        self.spoken.push((written, spoken));
+        Ok(())
+    }
+
+    fn check_room(&self) -> Result<(), Rejection> {
+        if self.len() == SpecialWords::MAX_WORDS {
+            return Err(Rejection::ListFull);
+        }
+        Ok(())
+    }
+
+    /// Words and spoken forms in the list, which count together toward
+    /// [`SpecialWords::MAX_WORDS`].
     pub fn len(&self) -> usize {
-        self.words.len()
+        self.words.len() + self.spoken.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.words.is_empty()
+        self.len() == 0
     }
 
     pub fn words(&self) -> impl Iterator<Item = &str> {
         self.words.iter().map(String::as_str)
+    }
+
+    /// Each word with a spoken form written as it, in the order they were added.
+    pub fn spoken(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.spoken.iter().map(|(w, s)| (w.as_str(), s.as_str()))
     }
 
     pub fn boost(&self) -> Boost {
@@ -287,6 +321,29 @@ fn normalize(word: &str) -> Result<String, Rejection> {
         }
     }
     Ok(out)
+}
+
+/// Refuses text with fewer than three letters or digits.
+fn check_letters(text: &str) -> Result<(), Rejection> {
+    match text.chars().filter(|c| c.is_alphanumeric()).count() {
+        0 => Err(Rejection::Empty),
+        1 | 2 => Err(Rejection::TooShort),
+        _ => Ok(()),
+    }
+}
+
+/// Refuses text without a letter or digit, or with characters biasing doesn't support.
+fn check_characters(text: &str) -> Result<(), Rejection> {
+    if !text.chars().any(char::is_alphanumeric) {
+        return Err(Rejection::Empty);
+    }
+    if text
+        .chars()
+        .any(|c| c.is_control() || is_combining(c) || is_unspaced_script(c))
+    {
+        return Err(Rejection::UnsupportedCharacters);
+    }
+    Ok(())
 }
 
 /// Combining marks, which a word should hold composed instead (NFC), as the models write it.
@@ -568,7 +625,7 @@ impl Form {
     }
 }
 
-/// Special words split into one model's tokens, ready for decoding.
+/// Special words and spoken forms split into one model's tokens, ready for decoding.
 #[derive(Debug, Clone)]
 pub(crate) struct Compiled {
     pub matcher: Matcher,
@@ -576,11 +633,13 @@ pub(crate) struct Compiled {
     /// The tokens of all forms, sorted. Word spotting reads their logits.
     pub tokens: Vec<u32>,
     pub boost: Boost,
+    /// The spoken forms to write as their words after decoding.
+    pub spoken: Spoken,
 }
 
 impl Compiled {
-    /// Splits the words into the tokenizer's tokens, and lists the words with no spelling the
-    /// model can use.
+    /// Splits the words and spoken forms into the tokenizer's tokens, and lists the words and
+    /// forms the model can't use.
     pub fn new(
         words: &SpecialWords,
         tokenizer: &Tokenizer,
@@ -589,32 +648,59 @@ impl Compiled {
         let mut forms: Vec<Vec<u32>> = Vec::new();
         let mut letters: Vec<usize> = Vec::new();
         let mut seen = std::collections::HashSet::new();
+        let mut favour = |tokens: Vec<u32>, spelling: &str| {
+            if seen.insert(tokens.clone()) {
+                forms.push(tokens);
+                letters.push(spelling.chars().filter(|c| c.is_alphanumeric()).count());
+            }
+        };
         let mut unusable = Vec::new();
         for word in words.words() {
-            let mut chars = word.chars();
-            let capitalized: String = chars
-                .next()
-                .map(|c| c.to_uppercase().chain(chars).collect())
-                .unwrap_or_default();
             let mut problem = None;
             let mut usable = false;
-            for spelling in [word, capitalized.as_str()] {
-                let tokens = tokenizer.encode(spelling);
-                if tokens.is_empty() || tokenizer.decode(&tokens) != spelling {
-                    problem.get_or_insert(Rejection::NotInVocabulary);
-                } else if tokens.len() > SpecialWords::MAX_TOKENS {
-                    problem = Some(Rejection::TooManyTokens);
-                } else {
-                    usable = true;
-                    if seen.insert(tokens.clone()) {
-                        forms.push(tokens);
-                        letters.push(spelling.chars().filter(|c| c.is_alphanumeric()).count());
+            for spelling in [word.to_string(), capitalized(word)] {
+                match spell(tokenizer, &spelling) {
+                    Ok(tokens) => {
+                        usable = true;
+                        favour(tokens, &spelling);
                     }
+                    Err(e) => problem = Some(worse(problem, e)),
                 }
             }
             if !usable {
                 unusable.push((
                     word.to_string(),
+                    problem.unwrap_or(Rejection::NotInVocabulary),
+                ));
+            }
+        }
+        let mut spoken = Spoken::default();
+        for (written, form) in words.spoken() {
+            let word = match spell(tokenizer, written) {
+                Ok(tokens) => tokens,
+                Err(e) => {
+                    unusable.push((form.to_string(), e));
+                    continue;
+                }
+            };
+            // The rewrite matches the form in any capitals, and decoding favours these.
+            let mut problem = None;
+            let mut usable = false;
+            for variant in capitalizations(form) {
+                match spell(tokenizer, &variant) {
+                    Ok(tokens) => {
+                        usable = true;
+                        favour(tokens, &variant);
+                    }
+                    Err(e) => problem = Some(worse(problem, e)),
+                }
+            }
+            if usable {
+                let word = spoken.add_word(word);
+                spoken.insert(form, word);
+            } else {
+                unusable.push((
+                    form.to_string(),
                     problem.unwrap_or(Rejection::NotInVocabulary),
                 ));
             }
@@ -658,14 +744,63 @@ impl Compiled {
                 forms,
                 tokens,
                 boost,
+                spoken,
             },
             unusable,
         )
     }
 
+    /// Whether there's nothing to favour and nothing to rewrite.
     pub fn is_empty(&self) -> bool {
-        self.forms.is_empty()
+        self.forms.is_empty() && self.spoken.is_empty()
     }
+}
+
+/// `spelling`'s tokens, if the model's vocabulary spells it in at most
+/// [`SpecialWords::MAX_TOKENS`].
+fn spell(tokenizer: &Tokenizer, spelling: &str) -> Result<Vec<u32>, Rejection> {
+    let tokens = tokenizer.encode(spelling);
+    if tokens.is_empty() || tokenizer.decode(&tokens) != spelling {
+        Err(Rejection::NotInVocabulary)
+    } else if tokens.len() > SpecialWords::MAX_TOKENS {
+        Err(Rejection::TooManyTokens)
+    } else {
+        Ok(tokens)
+    }
+}
+
+/// The rejection to report of `problem` and `e`, where too many tokens says more than a missing
+/// spelling.
+fn worse(problem: Option<Rejection>, e: Rejection) -> Rejection {
+    match problem {
+        Some(Rejection::TooManyTokens) => Rejection::TooManyTokens,
+        _ => e,
+    }
+}
+
+/// `text` with its first letter capitalized.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// A spoken form as given, with its first letter capitalized and in title case, each once.
+fn capitalizations(form: &str) -> Vec<String> {
+    let title = form
+        .split(' ')
+        .map(capitalized)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out: Vec<String> = Vec::new();
+    for variant in [form.to_string(), capitalized(form), title] {
+        if !out.contains(&variant) {
+            out.push(variant);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -673,15 +808,16 @@ pub(crate) mod tests {
     use super::*;
 
     /// "▁ku" 1, "be" 2, "ctl" 3, "▁cube" 4, "▁control" 5, "▁the" 6, "," 7, "▁Ku" 8, "▁ng" 9,
-    /// "inx" 10, "▁" 11, "▁New" 42, "▁York" 43, "▁city" 44, "s" 47, plus letters and merges.
+    /// "inx" 10, "▁" 11, "▁New" 42, "▁York" 43, "▁city" 44, "s" 47, "▁C" 58, plus letters and
+    /// merges.
     pub(crate) fn tokenizer() -> Tokenizer {
         let json = r#"{"added_tokens":[{"id":0,"content":"<blank>","special":true}],
             "model":{"type":"BPE","vocab":{"<blank>":0,"▁ku":1,"be":2,"ctl":3,"▁cube":4,"▁control":5,"▁the":6,",":7,"▁Ku":8,"▁ng":9,"inx":10,"▁":11,
               "k":12,"u":13,"b":14,"e":15,"c":16,"t":17,"l":18,"K":19,"n":20,"g":21,"i":22,"x":23,"o":24,"r":25,"h":26,"▁k":27,"▁K":28,"▁n":29,"▁c":30,"▁t":31,"ct":32,"▁co":33,"▁con":34,"ro":35,"▁cu":36,"nt":37,"ntro":38,"ntrol":39,"in":40,"▁th":41,
-              "▁New":42,"▁York":43,"▁city":44,"▁Ne":45,"w":46,"s":47,"N":48,"Y":49,"▁N":50,"▁Y":51,"▁Yo":52,"▁Yor":53,"▁ci":54,"▁cit":55,"y":56},
+              "▁New":42,"▁York":43,"▁city":44,"▁Ne":45,"w":46,"s":47,"N":48,"Y":49,"▁N":50,"▁Y":51,"▁Yo":52,"▁Yor":53,"▁ci":54,"▁cit":55,"y":56,"C":57,"▁C":58},
               "merges":[["▁","k"],["▁k","u"],["b","e"],["c","t"],["ct","l"],["▁","K"],["▁K","u"],["▁","n"],["▁n","g"],["i","n"],["in","x"],
                 ["▁","c"],["▁c","u"],["▁cu","be"],["▁c","o"],["▁co","n"],["n","t"],["r","o"],["nt","ro"],["ntro","l"],["▁con","trol"],["▁","t"],["▁t","h"],["▁th","e"],
-                ["▁","N"],["▁N","e"],["▁Ne","w"],["▁","Y"],["▁Y","o"],["▁Yo","r"],["▁Yor","k"],["▁c","i"],["▁ci","t"],["▁cit","y"]]}}"#;
+                ["▁","N"],["▁N","e"],["▁Ne","w"],["▁","Y"],["▁Y","o"],["▁Yo","r"],["▁Yor","k"],["▁c","i"],["▁ci","t"],["▁cit","y"],["▁","C"]]}}"#;
         Tokenizer::from_json(json.as_bytes()).unwrap()
     }
 
@@ -820,6 +956,21 @@ pub(crate) mod tests {
                 "{entries:?} {tokens:?}: final {got_done} held {got_held}, want {done} and {held}"
             );
         }
+    }
+
+    #[test]
+    fn spoken_forms_are_favoured_as_special_words() {
+        let tok = tokenizer();
+        let mut list = SpecialWords::new();
+        list.add_spoken("kubectl", "cube control").unwrap();
+        let (c, unusable) = Compiled::new(&list, &tok);
+        assert!(unusable.is_empty());
+        // The form in its capitalizations the vocabulary spells, and nothing of its word.
+        let forms: Vec<&[u32]> = c.forms.iter().map(|f| f.tokens.as_slice()).collect();
+        let form = tok.encode("cube control");
+        assert!(forms.contains(&form.as_slice()));
+        assert!(!forms.contains(&tok.encode("kubectl").as_slice()));
+        assert_eq!(walk(&c.matcher, &form), (5.0, 5.0));
     }
 
     #[test]
