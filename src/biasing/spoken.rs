@@ -134,23 +134,13 @@ impl Spoken {
     /// The spoken forms in `ids`, in any case of their ASCII letters, leftmost first and the
     /// longest of those starting at one token. A form starts at a token that starts a word, and
     /// ends before a character that isn't a letter or digit, or the end, which may be inside a
-    /// token. Also returns the first token where a form could still be under way if more tokens
-    /// followed, or `ids.len()`. Punctuation at the end doesn't stop a form there, since a model
-    /// often closes a sentence where its audio ends and drops the punctuation once more comes.
-    pub fn find(&self, tokenizer: &Tokenizer, ids: &[u32]) -> (Vec<Replacement>, usize) {
+    /// token.
+    pub fn find(&self, tokenizer: &Tokenizer, ids: &[u32]) -> Vec<Replacement> {
         let mut found = Vec::new();
-        let mut open = ids.len();
         if self.is_empty() {
-            return (found, open);
+            return found;
         }
-        let mut text = Vec::new();
-        // The end of each token's bytes in `text`.
-        let mut ends = Vec::with_capacity(ids.len());
-        for &id in ids {
-            text.extend_from_slice(tokenizer.piece_bytes(id));
-            ends.push(text.len());
-        }
-        let last_word_end = last_alphanumeric_end(&text);
+        let (text, ends) = text_of(tokenizer, ids);
         let mut i = 0;
         while i < ids.len() {
             let start = if i == 0 { 0 } else { ends[i - 1] };
@@ -161,17 +151,10 @@ impl Spoken {
             // Walk the tree from the byte after the word's space.
             let (mut node, mut token) = (0, i);
             let mut longest = None;
-            let mut at_end = true;
             for (p, &b) in text.iter().enumerate().skip(start + 1) {
-                if p == last_word_end {
-                    open = open.min(i);
-                }
                 match self.child(node, b.to_ascii_lowercase()) {
                     Some(c) => node = c,
-                    None => {
-                        at_end = false;
-                        break;
-                    }
+                    None => break,
                 }
                 while ends[token] < p + 1 {
                     token += 1;
@@ -188,9 +171,6 @@ impl Spoken {
                     });
                 }
             }
-            if at_end {
-                open = open.min(i);
-            }
             match longest {
                 Some(r) => {
                     i = r.heard.end;
@@ -199,7 +179,37 @@ impl Spoken {
                 None => i += 1,
             }
         }
-        (found, open)
+        found
+    }
+
+    /// The first token of `ids` before token `frontier` from which a spoken form could still be
+    /// under way, given that the tokens from `frontier` on may still change, or none. That's a
+    /// token starting a word whose text up to the frontier is the start of a form that goes on
+    /// with another word, since the frontier starts one.
+    pub fn open_before(
+        &self,
+        tokenizer: &Tokenizer,
+        ids: &[u32],
+        frontier: usize,
+    ) -> Option<usize> {
+        if self.is_empty() || frontier == 0 {
+            return None;
+        }
+        let (text, ends) = text_of(tokenizer, &ids[..frontier]);
+        (0..frontier).find(|&i| {
+            let start = if i == 0 { 0 } else { ends[i - 1] };
+            if text.get(start) != Some(&b' ') || start == ends[i] {
+                return false;
+            }
+            let mut node = 0;
+            for &b in &text[start + 1..] {
+                match self.child(node, b.to_ascii_lowercase()) {
+                    Some(c) => node = c,
+                    None => return false,
+                }
+            }
+            self.child(node, b' ').is_some()
+        })
     }
 
     /// The tokens written for `r` with their frames, given the frames of the first and last token
@@ -221,7 +231,7 @@ impl Spoken {
             return tokens;
         }
         let ids: Vec<u32> = tokens.iter().map(|t| t.id).collect();
-        let (found, _) = self.find(tokenizer, &ids);
+        let found = self.find(tokenizer, &ids);
         if found.is_empty() {
             return tokens;
         }
@@ -257,17 +267,15 @@ fn ends_word(text: &[u8]) -> bool {
         .is_none_or(|c| !c.is_alphanumeric())
 }
 
-/// Where the last letter or digit of `text` ends, or 0. Text cut inside a character's bytes
-/// counts as letters to its end.
-fn last_alphanumeric_end(text: &[u8]) -> usize {
-    match std::str::from_utf8(text) {
-        Ok(text) => text
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_alphanumeric())
-            .map_or(0, |(i, c)| i + c.len_utf8()),
-        Err(_) => text.len(),
+/// The text of `ids`, with a space for each `▁`, and where each token's bytes end in it.
+fn text_of(tokenizer: &Tokenizer, ids: &[u32]) -> (Vec<u8>, Vec<usize>) {
+    let mut text = Vec::new();
+    let mut ends = Vec::with_capacity(ids.len());
+    for &id in ids {
+        text.extend_from_slice(tokenizer.piece_bytes(id));
+        ends.push(text.len());
     }
+    (text, ends)
 }
 
 /// The tokens of `rest`, the end of a token after a form, written as part of the word before
@@ -322,14 +330,13 @@ mod tests {
     /// Forms found, each as the tokens it takes and its word's tokens.
     type Found = Vec<(Range<usize>, Vec<u32>)>;
 
-    /// The forms found in tokens `ids`, and where a form could still be under way.
-    fn found(c: &Compiled, ids: &[u32]) -> (Found, usize) {
-        let (found, open) = c.spoken.find(&tokenizer(), ids);
-        let found = found
+    /// The forms found in tokens `ids`.
+    fn found(c: &Compiled, ids: &[u32]) -> Found {
+        c.spoken
+            .find(&tokenizer(), ids)
             .iter()
             .map(|r| (r.heard.clone(), c.spoken.word(r).to_vec()))
-            .collect();
-        (found, open)
+            .collect()
     }
 
     // Tokens of the test vocabulary.
@@ -350,24 +357,16 @@ mod tests {
     fn whole_words_of_a_form_are_found_in_any_capitals() {
         let c = spoken(&[("kubectl", "cube control")]);
         let kubectl = || vec![(1..3, vec![1, 2, 3])];
-        assert_eq!(found(&c, &[THE, CUBE, CONTROL, COMMA, THE]), (kubectl(), 5));
-        // At the end, it's found and could still be under way, also before punctuation there,
-        // which more audio may take away.
-        assert_eq!(found(&c, &[THE, CUBE, CONTROL]), (kubectl(), 1));
-        assert_eq!(found(&c, &[THE, CUBE, CONTROL, COMMA]), (kubectl(), 1));
-        assert_eq!(found(&c, &[THE, CUBE, COMMA]), (vec![], 1));
+        assert_eq!(found(&c, &[THE, CUBE, CONTROL, COMMA, THE]), kubectl());
+        assert_eq!(found(&c, &[THE, CUBE, CONTROL]), kubectl());
         // A word that goes on isn't a whole-word match.
-        assert_eq!(found(&c, &[CUBE, CONTROL, S, THE]), (vec![], 4));
-        assert_eq!(found(&c, &[THE, CUBE, THE]), (vec![], 3));
-        // A form's start at the end could still become the form.
-        assert_eq!(found(&c, &[THE, CUBE]), (vec![], 1));
+        assert_eq!(found(&c, &[CUBE, CONTROL, S, THE]), vec![]);
+        assert_eq!(found(&c, &[THE, CUBE, THE]), vec![]);
         let tok = tokenizer();
-        let partial = tok.encode("the cube cont");
-        assert_eq!(found(&c, &partial), (vec![], 1));
         // A form spelled with other tokens than its own is found too.
         let split = [THE, 36, 2, CONTROL, COMMA];
         assert_eq!(tok.decode(&split), "the cube control,");
-        assert_eq!(found(&c, &split), (vec![(1..4, vec![1, 2, 3])], 1));
+        assert_eq!(found(&c, &split), vec![(1..4, vec![1, 2, 3])]);
         for (text, matches) in [
             ("the Cube control,", true),
             ("the Cube Control,", true),
@@ -376,7 +375,7 @@ mod tests {
         ] {
             let ids = tok.encode(text);
             assert_eq!(tok.decode(&ids), text);
-            assert_eq!(found(&c, &ids).0.len(), matches as usize, "{text}");
+            assert_eq!(found(&c, &ids).len(), matches as usize, "{text}");
         }
     }
 
@@ -390,7 +389,7 @@ mod tests {
             [THE, CUBE, CONTROL, HYPHEN],
             [THE, CUBE, CONTROL, DASH],
         ] {
-            assert_eq!(found(&c, &ids).0, kubectl(), "{}", tok.decode(&ids));
+            assert_eq!(found(&c, &ids), kubectl(), "{}", tok.decode(&ids));
         }
         let text = |ids: &[u32]| {
             let tokens = ids
@@ -427,7 +426,7 @@ mod tests {
         for text in ["the nginx,", "the Nginx,"] {
             let ids = tok.encode(text);
             assert_eq!(
-                found(&c, &ids).0,
+                found(&c, &ids),
                 vec![(1..ids.len() - 1, nginx.clone())],
                 "{text}"
             );
@@ -442,11 +441,11 @@ mod tests {
             ("New York", "the cube"),
             ("York", "the cube control"),
         ]);
-        let (f, _) = found(&c, &[THE, CUBE, CONTROL, THE, COMMA]);
+        let f = found(&c, &[THE, CUBE, CONTROL, THE, COMMA]);
         assert_eq!(f, vec![(0..3, vec![YORK])]);
-        let (f, _) = found(&c, &[CUBE, CONTROL, THE, COMMA]);
+        let f = found(&c, &[CUBE, CONTROL, THE, COMMA]);
         assert_eq!(f, vec![(0..2, vec![1, 2, 3])]);
-        let (f, _) = found(&c, &[THE, CUBE, THE, CUBE, CONTROL, THE, COMMA]);
+        let f = found(&c, &[THE, CUBE, THE, CUBE, CONTROL, THE, COMMA]);
         assert_eq!(f, vec![(0..2, vec![NEW, YORK]), (2..5, vec![YORK])]);
     }
 
@@ -485,16 +484,24 @@ mod tests {
     }
 
     #[test]
-    fn punctuation_in_the_last_token_at_the_end_leaves_a_form_open() {
+    fn a_form_is_open_while_the_words_that_may_change_could_go_on_with_it() {
+        let c = spoken(&[("kubectl", "cube control"), ("York", "cube control the")]);
+        let tok = tokenizer();
+        let open = |ids: &[u32], frontier| c.spoken.open_before(&tok, ids, frontier);
+        // "cube" before words that may still change could still become "cube control".
+        assert_eq!(open(&[THE, CUBE, NEW], 2), Some(1));
+        assert_eq!(open(&[THE, CUBE, NEW], 3), None);
+        // "cu" is a word of its own, so it can't become "cube".
+        assert_eq!(open(&[THE, 36, NEW], 2), None);
+        // A form that stopped matching before them, or ended with nothing longer to come.
+        assert_eq!(open(&[THE, CUBE, THE, NEW], 3), None);
+        assert_eq!(open(&[THE, CUBE, CONTROL, NEW], 3), Some(1));
         let c = spoken(&[("kubectl", "cube control")]);
-        assert_eq!(found(&c, &[THE, 36, BE_DOT]), (vec![], 1));
-    }
-
-    #[test]
-    fn punctuation_outside_ascii_at_the_end_leaves_a_form_open() {
-        let c = spoken(&[("kubectl", "cube control")]);
-        assert_eq!(found(&c, &[THE, CUBE, DASH]), (vec![], 1));
-        assert_eq!(found(&c, &[THE, CUBE, DASH, THE]), (vec![], 4));
+        let open = |ids: &[u32], frontier| c.spoken.open_before(&tok, ids, frontier);
+        assert_eq!(open(&[THE, CUBE, CONTROL, NEW], 3), None);
+        // The form's start in a token with punctuation.
+        assert_eq!(open(&[THE, 36, BE_DOT, NEW], 3), None);
+        assert_eq!(open(&[THE, 36, 2, NEW], 3), Some(1));
     }
 
     /// Granite's tokenizer, from the model named by `GRANITE_SPEECH_DIR`.
@@ -532,10 +539,11 @@ mod tests {
             .map(|t| t.id)
             .collect();
         assert_eq!(tok.decode(&out), "Haiku 5.5.");
-        // "Gemini 3.8." ends in the piece "8.", and a period at the end may go once more audio
-        // comes, so "Gemini 3.8 Flash" could still be under way.
-        assert_eq!(c.spoken.find(&tok, &tok.encode("Gemini 3.8.")).1, 0);
-        assert_eq!(c.spoken.find(&tok, &tok.encode("cube—")).1, 0);
+        // While "3.8." may still change, "Gemini 3.8 Flash" could still be under way.
+        let ids = tok.encode("Gemini 3.8.");
+        let frontier = ids.len() - 2;
+        assert_eq!(tok.decode(&ids[frontier..]), "3.8.");
+        assert_eq!(c.spoken.open_before(&tok, &ids, frontier), Some(0));
     }
 
     #[test]
