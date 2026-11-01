@@ -29,18 +29,59 @@ exactly as `transcribe` does.
 Special words must be written with spaces between words. Japanese, Chinese, Thai and other
 scripts written without spaces aren't supported yet, and the list refuses their characters.
 
+## Spoken forms
+
+People say some words differently from how they're written, such as "engine x" for Nginx or
+"cube control" for kubectl. A spoken form makes Telmo write the word wherever the transcript has
+the form.
+
+```rust
+words.add_code_word("kubectl")?;
+words.add_spoken("kubectl", "cube control")?;
+words.add_spoken("Nginx", "engine x")?;
+// The models often write MySQL as "Mysql" or "mysql".
+words.add_spoken("MySQL", "MySQL")?;
+```
+
+After decoding, each whole-word match of a form becomes its word, spelled exactly as given, also
+at the start of a sentence. A form matches whatever the case of its ASCII letters ("engine x",
+"Engine X" and "ENGINE X"), and a new word, punctuation or the end of the audio must follow it,
+so "cube controls" stays as it is. Where matches overlap, the one that starts first wins, then
+the longest. The word's tokens take the frames the form's tokens took, so the transcript's text
+is still the decoding of its tokens. Decoding also favours each form as it favours special
+words, as given, with its first letter capitalized and in title case, which pulls near misses
+such as "gpt6-luna" to the form.
+
+A word can be its own spoken form, so it comes out as spelled where the model writes it in other
+capitals. Give a word as its own form only when its lowercase spelling isn't an everyday word,
+or "rust" would become "Rust" everywhere.
+
+A form follows the rules of `add`, so it needs three letters or digits, and its word follows
+those of `add_code_word`. A form stands for one word, so a form the list has already, in any
+capitals, is refused as a `Duplicate`. Forms count toward `MAX_WORDS` with the words.
+`add_spoken` doesn't favour the word itself, which `add` does, so a short word such as `rg` can
+have "rip grep" without being favoured as two letters.
+
+In a stream, the word written for a form settles whole. Words from where a form could still be
+under way wait until it completes, stops matching or the utterance ends.
+
+Every occurrence of a form is rewritten, so a form that is also an everyday phrase changes that
+phrase too. With "read me" for README, "read me a story" would become "README a story", and
+"standard in" for stdin turned "standard in the art" into "stdin the art" in the test below.
+
 ## Limits
 
-`SpecialWords::add` and `add_code_word` return a `Rejection` for a word the list refuses, and
-`Model::unusable_special_words` lists the words a model's vocabulary can't spell.
+`SpecialWords::add`, `add_code_word` and `add_spoken` return a `Rejection` for a word or form the
+list refuses, and `Model::unusable_special_words` lists the words and forms a model's vocabulary
+can't spell.
 
 | Limit | Value |
 |---|---|
-| Words in a list | 1,000 (`SpecialWords::MAX_WORDS`) |
+| Words and spoken forms in a list | 1,000 (`SpecialWords::MAX_WORDS`) |
 | Characters in a word, spaces included | 64 (`MAX_CHARS`) |
 | Words separated by spaces in one entry | 5 (`MAX_PARTS`) |
 | Tokens of a spelling in the model's vocabulary | 32 (`MAX_TOKENS`), longer spellings are left out |
-| Letters or digits, unless added with `add_code_word` | at least 3 |
+| Letters or digits, unless a word is added with `add_code_word` | at least 3 |
 | Characters | no control characters, combining marks or scripts written without spaces |
 
 The tokenizer files' Unicode normalization isn't applied to the words. Decomposed accents
@@ -50,7 +91,8 @@ full-width letters aren't folded.
 ## How it works
 
 Each word is split into the model's tokens as written and capitalized ("kubectl" and
-"Kubectl"), with the word-start marker on its first token.
+"Kubectl"), with the word-start marker on its first token. Spoken forms are favoured the same
+way in three capitalizations, and the rewrite runs after decoding.
 
 Granite decodes greedily, then spots each special word in the CTC output. A dynamic program
 over the frames finds the word's best alignment with a free start and end, keeping apart the
@@ -227,6 +269,30 @@ Words heard as other words mostly stay as they are. "serde" read aloud stayed "t
 "survey", "tokio" mostly stayed "Tokyo", and "cube control" sometimes became cubecl, another
 identifier on the list.
 
+### Spoken forms
+
+85 technical terms, such as kubectl, Nginx, PostgreSQL, systemctl and GPT-6 Luna, were read in 4
+dictation-like sentences each with the term in the words people say ("Run cube control get pods
+and tell me which ones are failing"), by six neural voices of American and British English
+(Kokoro-82M and Piper). Every list held the 300 identifiers and the terms, and the terms' spoken
+forms were added. The forms were revised on half the terms, and the table gives the other half,
+the 40 terms with a usable form in 960 utterances. A term counts when it comes out exactly as
+spelled, capitals included.
+
+| | Granite | Granite with spoken forms | Parakeet | Parakeet with spoken forms |
+|---|---:|---:|---:|---:|
+| Terms written as spelled | 31.7% | 88.6% | 58.2% | 91.6% |
+| WER of those utterances | 8.09% | 2.95% | 8.31% | 2.94% |
+| Terms written as spelled, espeak's voices | 36.9% | 80.8% | 55.2% | 80.2% |
+
+Rewriting alone, without favouring the forms while decoding, got 82.0% for Granite and 86.5% for
+Parakeet. On ordinary speech the forms changed little. On LibriSpeech dev and FLEURS English the
+WER changed by at most +0.01 points (the upper end of the interval at most +0.03), recall of rare
+words didn't change, and one utterance in 6,608 had a false rewrite, "Bee Shire" heard as "zee
+shell" and written as zsh. On LibriSpeech test, "standard in the art" became "stdin the art".
+Streamed in steps of half a second, the terms of two voices' 320 utterances came out as spelled
+85.9% of the time with Granite and 91.2% with Parakeet, against 88.1% and 91.6% offline.
+
 ### Streaming
 
 50 rare-word utterances of LibriSpeech test-clean and test-other went through `UtteranceStream`
@@ -246,12 +312,14 @@ running, Granite's spotting with 300 words added about 75 ms per minute of audio
 its CTC head and greedy decoding took. Parakeet's beam search took about 860 ms per minute of
 audio where greedy decoding took 280 ms. The encoders took 6.8 and 7.5 seconds per minute of
 audio, so the list added about 1% to Granite's time and 8% to Parakeet's. In the streaming test
-above, the passes took 2% longer with the list for Granite and 5% longer for Parakeet.
+above, the passes took 2% longer with the list for Granite and 5% longer for Parakeet. With the
+spoken forms of the test above added to that list, decoding took 11% longer for Granite and 3%
+longer for Parakeet, about 0.4% of the time the encoders took.
 
 ## Gaps
 
-- A word the model hears as other words stays unfound. People say "nginx" as "engine x" and
-  "kubectl" as "cube control", and favouring the written spelling can't turn those into it.
-  The synthetic sentences above show it, where "serde" read aloud became "third" or "survey".
+- A word the model hears as an everyday word stays as heard. "serde" read aloud became "survey"
+  and "tokio" became "Tokyo", and a spoken form for either would rewrite every "survey" or
+  "Tokyo" too.
 - Scripts written without spaces, and a word boundary shared by spotting and streaming for them,
   are left for a later release.
