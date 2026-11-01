@@ -9,16 +9,17 @@ use std::ops::Range;
 use crate::parakeet::Token;
 use crate::tokenizer::Tokenizer;
 
-/// No word.
-const NONE: u32 = u32::MAX;
-
 #[derive(Debug, Clone)]
 struct Node {
     /// (byte, node), sorted by byte.
     children: Vec<(u8, u32)>,
-    /// The word a form ending here stands for, or `NONE`.
-    word: u32,
+    /// The entry a form ending here stands for.
+    entry: Option<EntryId>,
 }
+
+/// An entry of [`Spoken`], a word as written with its spoken forms, by its place in the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EntryId(u32);
 
 /// Spoken forms in a tree of their bytes with ASCII letters in lower case, and the words they
 /// stand for.
@@ -26,18 +27,17 @@ struct Node {
 pub(crate) struct Spoken {
     /// The tree, empty without forms. The root is node 0.
     nodes: Vec<Node>,
-    words: Vec<Word>,
-    /// Each word's index by its spelling.
-    by_text: HashMap<String, u32>,
-    /// The first word's index by its spelling's [`normalized_words`].
-    by_spelling: HashMap<Vec<String>, u32>,
+    entries: Vec<Entry>,
+    /// The entries by their word with ASCII letters in lower case, in the order they were added.
+    by_word: HashMap<String, Vec<EntryId>>,
 }
 
 #[derive(Debug, Clone)]
-struct Word {
+struct Entry {
+    /// The word as written.
+    word: String,
     tokens: Vec<u32>,
-    /// The word's spelling and its forms, as [`normalized_words`].
-    spellings: Vec<Vec<String>>,
+    forms: Vec<String>,
 }
 
 /// A spoken form found in a transcript.
@@ -45,50 +45,44 @@ struct Word {
 pub(crate) struct Replacement {
     /// The tokens it takes.
     pub heard: Range<usize>,
-    /// The word written in its place.
-    pub word: u32,
+    /// The entry whose word is written in its place.
+    pub entry: EntryId,
     /// The tokens of what follows the form in its last token, written after the word, such as
     /// the period of a token "5." where the form ends in "5".
     pub rest: Vec<u32>,
 }
 
 impl Spoken {
-    /// Adds a word spelled `spelling` with tokens `tokens`, unless it's there already, and
-    /// returns its index for [`Spoken::insert`].
-    pub fn add_word(&mut self, spelling: &str, tokens: Vec<u32>) -> u32 {
-        if let Some(&i) = self.by_text.get(spelling) {
-            return i;
+    /// Adds an entry for the word `word`, with tokens `tokens`, unless it has one already, and
+    /// returns it for [`Spoken::insert`].
+    pub fn add_word(&mut self, word: &str, tokens: Vec<u32>) -> EntryId {
+        let alike = self.by_word.entry(word.to_ascii_lowercase()).or_default();
+        if let Some(&id) = alike
+            .iter()
+            .find(|id| self.entries[id.0 as usize].word == word)
+        {
+            return id;
         }
-        let i = self.words.len() as u32;
-        let key = normalized_words(spelling);
-        self.by_text.insert(spelling.to_string(), i);
-        self.by_spelling.entry(key.clone()).or_insert(i);
-        self.words.push(Word {
+        let id = EntryId(self.entries.len() as u32);
+        alike.push(id);
+        self.entries.push(Entry {
+            word: word.to_string(),
             tokens,
-            spellings: vec![key],
+            forms: Vec::new(),
         });
-        i
+        id
     }
 
-    /// The spellings of the word spelled as `words` ([`normalized_words`]), which are its
-    /// spelling and its forms, or none if it has no spoken form.
-    pub fn spellings(&self, words: &[String]) -> &[Vec<String>] {
-        self.by_spelling
-            .get(words)
-            .map_or(&[], |&i| &self.words[i as usize].spellings)
-    }
-
-    /// Writes word `word` for `form`, unless an earlier word has the form.
-    pub fn insert(&mut self, form: &str, word: u32) {
-        let spelling = normalized_words(form);
-        let spellings = &mut self.words[word as usize].spellings;
-        if !spellings.contains(&spelling) {
-            spellings.push(spelling);
+    /// Writes the word of `entry` for `form`, unless an earlier entry has the form.
+    pub fn insert(&mut self, form: &str, entry: EntryId) {
+        let forms = &mut self.entries[entry.0 as usize].forms;
+        if !forms.iter().any(|f| f == form) {
+            forms.push(form.to_string());
         }
         if self.nodes.is_empty() {
             self.nodes.push(Node {
                 children: Vec::new(),
-                word: NONE,
+                entry: None,
             });
         }
         let mut node = 0;
@@ -99,7 +93,7 @@ impl Spoken {
                     let new = self.nodes.len() as u32;
                     self.nodes.push(Node {
                         children: Vec::new(),
-                        word: NONE,
+                        entry: None,
                     });
                     let children = &mut self.nodes[node as usize].children;
                     let at = children.partition_point(|&(x, _)| x < b);
@@ -108,19 +102,41 @@ impl Spoken {
                 }
             };
         }
-        let end = &mut self.nodes[node as usize].word;
-        if *end == NONE {
-            *end = word;
-        }
+        self.nodes[node as usize].entry.get_or_insert(entry);
     }
 
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 
-    /// The tokens of the word written in place of `r`.
-    pub fn word(&self, r: &Replacement) -> &[u32] {
-        &self.words[r.word as usize].tokens
+    /// The tokens of the word of `entry`.
+    pub fn tokens(&self, entry: EntryId) -> &[u32] {
+        &self.entries[entry.0 as usize].tokens
+    }
+
+    /// The entries whose word starts `text`, in any case of its ASCII letters, and where the
+    /// word ends in `text`, before a character that isn't a letter or digit, or at the end. The
+    /// longest word wins. Of entries whose words differ only in case, it's the one spelled as in
+    /// `text`, or else each of them.
+    pub fn entries_at(&self, text: &str) -> Option<(&[EntryId], usize)> {
+        let lower = text.to_ascii_lowercase();
+        let ends = text.char_indices().filter(|&(_, c)| !c.is_alphanumeric());
+        let (alike, end) = (ends.map(|(i, _)| i).chain([text.len()]))
+            .rev()
+            .find_map(|end| Some((self.by_word.get(&lower[..end])?, end)))?;
+        let exact = alike
+            .iter()
+            .find(|id| self.entries[id.0 as usize].word == text[..end]);
+        Some((exact.map_or(alike.as_slice(), std::slice::from_ref), end))
+    }
+
+    /// Each way `entry` is said, as written and as each of its forms, followed by `rest`, as
+    /// [`normalized_words`].
+    pub fn spellings(&self, entry: EntryId, rest: &str) -> impl Iterator<Item = Vec<String>> {
+        let entry = &self.entries[entry.0 as usize];
+        std::iter::once(&entry.word)
+            .chain(&entry.forms)
+            .map(move |s| normalized_words(&format!("{s}{rest}")))
     }
 
     fn child(&self, node: u32, b: u8) -> Option<u32> {
@@ -159,14 +175,13 @@ impl Spoken {
                 while ends[token] < p + 1 {
                     token += 1;
                 }
-                let word = self.nodes[node as usize].word;
-                if word != NONE
+                if let Some(entry) = self.nodes[node as usize].entry
                     && ends_word(&text[p + 1..])
                     && let Some(rest) = continuation(tokenizer, &text[p + 1..ends[token]])
                 {
                     longest = Some(Replacement {
                         heard: i..token + 1,
-                        word,
+                        entry,
                         rest,
                     });
                 }
@@ -216,7 +231,7 @@ impl Spoken {
     /// heard for it. The word's tokens spread over those frames as [`place`] puts them, and the
     /// rest of the last heard token keeps that token's frame.
     pub fn written(&self, r: &Replacement, first: usize, last: usize) -> Vec<(u32, usize)> {
-        let word = self.word(r);
+        let word = self.tokens(r.entry);
         let spread = word
             .iter()
             .enumerate()
@@ -335,7 +350,7 @@ mod tests {
         c.spoken
             .find(&tokenizer(), ids)
             .iter()
-            .map(|r| (r.heard.clone(), c.spoken.word(r).to_vec()))
+            .map(|r| (r.heard.clone(), c.spoken.tokens(r.entry).to_vec()))
             .collect()
     }
 
@@ -416,6 +431,47 @@ mod tests {
         assert_eq!(text(&[THE, CUBE, CONTROL, DASH, THE]), "the kubectl— the");
         // A letter or digit goes on with the word.
         assert_eq!(text(&[THE, CUBE, CONTROL, S, THE]), "the cube controls the");
+    }
+
+    #[test]
+    fn a_written_word_has_its_own_entrys_spellings_and_keeps_what_follows_it() {
+        let mut spoken = Spoken::default();
+        let cpp = spoken.add_word("C++", vec![58, 66, 66]);
+        spoken.insert("c plus plus", cpp);
+        let csharp = spoken.add_word("C#", vec![58, 67]);
+        spoken.insert("c sharp", csharp);
+        assert_eq!(spoken.add_word("C#", vec![58, 67]), csharp);
+        let spellings = |text: &str| {
+            let (ids, end) = spoken.entries_at(text)?;
+            let rest = &text[end..];
+            Some(
+                ids.iter()
+                    .flat_map(|&id| spoken.spellings(id, rest))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let words = |texts: &[&str]| Some(texts.iter().map(|t| normalized_words(t)).collect());
+        assert_eq!(spellings("C#"), words(&["C#", "c sharp"]));
+        assert_eq!(spellings("C++"), words(&["C++", "c plus plus"]));
+        // In other capitals, before any character that isn't a letter or digit.
+        assert_eq!(spellings("c++'s"), words(&["C++'s", "c plus plus's"]));
+        assert_eq!(spellings("c#-based"), words(&["C#-based", "c sharp-based"]));
+        assert_eq!(spellings("C#’s"), words(&["C#’s", "c sharp’s"]));
+        assert_eq!(spellings("C#."), words(&["C#.", "c sharp."]));
+        // Not where the word goes on, or doesn't start the text.
+        assert_eq!(spellings("C#s"), None);
+        assert_eq!(spellings("C"), None);
+        assert_eq!(spellings("(C#"), None);
+        // Of words that differ only in case, the one spelled as in the text, or else each.
+        let lower = spoken.add_word("c#", vec![30, 67]);
+        assert_eq!(spoken.entries_at("C#!"), Some((&[csharp][..], 2)));
+        assert_eq!(spoken.entries_at("c#'s"), Some((&[lower][..], 2)));
+        let kubectl = spoken.add_word("kubectl", vec![1, 2, 3]);
+        let capital = spoken.add_word("Kubectl", vec![8, 2, 3]);
+        assert_eq!(
+            spoken.entries_at("KUBECTL"),
+            Some((&[kubectl, capital][..], 7))
+        );
     }
 
     #[test]

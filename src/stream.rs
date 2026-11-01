@@ -25,7 +25,7 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::biasing::{self, Compiled, SpecialWords, Spoken, normalized_words};
+use crate::biasing::{self, Compiled, EntryId, SpecialWords, Spoken, normalized_words};
 use crate::error::Result;
 use crate::features::LogMelStream;
 use crate::granite::{self, Granite};
@@ -126,13 +126,16 @@ struct Hyp {
     /// How many of the pass's heard tokens this token and those before it stand for, which
     /// differs from their count once spoken forms are written as their words.
     heard_end: usize,
+    /// The entry of the spoken form whose word starts with this token.
+    entry: Option<EntryId>,
 }
 
 /// A settled word, kept to recognize its audio when a later pass hears it again.
 #[derive(Debug, Clone)]
 struct SettledWord {
     /// The normalized words of each way a pass may hear it, as written, as heard, and for a word
-    /// with spoken forms, as each form.
+    /// with spoken forms, as its entry's word and each of its forms, each followed by what came
+    /// after the word.
     spellings: Vec<Vec<String>>,
     /// The frame of its first heard token, and the frame after its last.
     heard: Range<usize>,
@@ -325,11 +328,27 @@ impl UtteranceStream {
                 .iter()
                 .map(|w| normalized(tokenizer, &word_ids(word, w)))
                 .collect();
-            let written = normalized_words(&tokenizer.decode(&word_ids(&hyp, w)));
-            let mut spellings = vec![written.clone(), as_heard];
-            for s in spoken.spellings(&written) {
-                if !spellings.contains(s) {
-                    spellings.push(s.clone());
+            let ids = word_ids(&hyp, w);
+            let text = tokenizer.decode(&ids);
+            let mut spellings = vec![normalized_words(&text), as_heard];
+            // The entry whose word was written for a spoken form here, or else those whose word
+            // the text starts with, each with the text after its word.
+            let entries = match hyp[w.start].entry {
+                Some(id) => {
+                    let rest = ids.get(spoken.tokens(id).len()..).unwrap_or_default();
+                    vec![(id, tokenizer.decode_raw(rest))]
+                }
+                None => spoken.entries_at(&text).map_or(Vec::new(), |(ids, end)| {
+                    ids.iter()
+                        .map(|&id| (id, text[end..].to_string()))
+                        .collect()
+                }),
+            };
+            for (id, rest) in entries {
+                for s in spoken.spellings(id, &rest) {
+                    if !spellings.contains(&s) {
+                        spellings.push(s);
+                    }
                 }
             }
             self.recent.push(SettledWord {
@@ -466,6 +485,7 @@ impl UtteranceStream {
                 resume: Resume::Frame(end_frame),
                 joined: false,
                 heard_end: 0,
+                entry: None,
             }
         });
         Ok(after_settled(heard, boundary))
@@ -1014,6 +1034,7 @@ fn spotted_hypothesis(tokens: &[Token], spotted: &[Range<usize>], ids: &[u32]) -
                 },
                 joined,
                 heard_end: 0,
+                entry: None,
             }
         })
         .collect()
@@ -1063,7 +1084,7 @@ fn heard_in_place(tokenizer: &Tokenizer, context: &[Hyp], s: &SettledWord, befor
 /// The tokens heard, `heard`, with spoken forms written as their words. A word's tokens take
 /// the frames [`Spoken::written`] gives them, are joined so they settle together, and resume
 /// where the form ends. Each token records how many heard tokens it and those before it stand
-/// for.
+/// for, and a word's first token records its entry.
 fn write_spoken(spoken: &Spoken, tokenizer: &Tokenizer, heard: &[Hyp]) -> Vec<Hyp> {
     let ids: Vec<u32> = heard.iter().map(|h| h.id).collect();
     let found = spoken.find(tokenizer, &ids);
@@ -1092,6 +1113,7 @@ fn write_spoken(spoken: &Spoken, tokenizer: &Tokenizer, heard: &[Hyp]) -> Vec<Hy
                 resume: last.resume.clone(),
                 joined: k > 0 || first.joined,
                 heard_end: r.heard.end,
+                entry: (k == 0).then_some(r.entry),
             });
         }
         i = r.heard.end;
@@ -1113,6 +1135,7 @@ fn ctc_hypothesis(ids: &[u32], frame: usize, prev: u32, blank: u32) -> Vec<Hyp> 
                 end_frame: f + 1,
                 joined: false,
                 heard_end: 0,
+                entry: None,
                 resume: Resume::Ctc {
                     frame: f + 1,
                     prev: id,
@@ -1285,6 +1308,7 @@ mod tests {
                     resume: Resume::Frame(2 * i + 2),
                     joined: false,
                     heard_end: 0,
+                    entry: None,
                 })
                 .collect()
         };
@@ -1343,6 +1367,7 @@ mod tests {
             resume: Resume::Frame(frame + 1),
             joined: false,
             heard_end: 0,
+            entry: None,
         })
     }
 
@@ -1398,6 +1423,73 @@ mod tests {
         let (mut s, tok) = settled_kubectl(&spoken);
         let again = [(6, 0), (1, 4), (2, 4), (3, 4), (6, 40)];
         let next = s.settle(&tok, window(&s, &again), &config, PassMode::Tentative);
+        assert_eq!(next.tentative, " the");
+    }
+
+    #[test]
+    fn a_settled_word_is_recognized_in_its_other_spellings_with_what_follows_it() {
+        let mut words = SpecialWords::new();
+        words.add_spoken("kubectl", "cube control").unwrap();
+        let config = PassConfig::default();
+        // Settles `first` over two passes, then gives a pass's tentative text and a final pass's
+        // settled text over `later`.
+        let run = |first: &[(u32, usize)], settled: &str, later: &[(u32, usize)]| {
+            let (mut s, tok) = stream_with(&words, 50);
+            s.settle(&tok, window(&s, first), &config, PassMode::Tentative);
+            let second = s.settle(&tok, window(&s, first), &config, PassMode::Tentative);
+            assert_eq!(second.settled, settled);
+            let next = s.settle(&tok, window(&s, later), &config, PassMode::Tentative);
+            let last = s.settle(&tok, window(&s, later), &config, PassMode::Final);
+            (next.tentative, last.settled)
+        };
+        let the = || (" the".to_string(), " the".to_string());
+        for (end, text) in [
+            (&[62][..], "'s"),
+            (&[77], "’s"),
+            (&[63, 47], "-s"),
+            (&[60], "."),
+            (&[61], "—"),
+        ] {
+            // The word's tokens, then `end` on the frame of its last token, then "the".
+            let heard = |tokens: &[(u32, usize)]| -> Vec<(u32, usize)> {
+                let end = end.iter().map(|&id| (id, 4));
+                tokens.iter().copied().chain(end).chain([(6, 40)]).collect()
+            };
+            let written = heard(&[(6, 0), (1, 2), (2, 3), (3, 4)]);
+            let spoken = heard(&[(6, 0), (4, 2), (5, 4)]);
+            let again = heard(&[(6, 0), (1, 4), (2, 4), (3, 4)]);
+            let settled = format!(" the kubectl{text}");
+            // Written as heard, then heard as its spoken form, whose last word the window keeps.
+            assert_eq!(run(&written, &settled, &spoken), the(), "{text}");
+            // Heard as its spoken form, then heard as written, on the window's first frame.
+            assert_eq!(run(&spoken, &settled, &again), the(), "{text}");
+            // The end of the form said again after the settled word's audio is new speech.
+            let later: Vec<(u32, usize)> = [(5, 8)]
+                .into_iter()
+                .chain(end.iter().map(|&id| (id, 8)))
+                .chain([(6, 40)])
+                .collect();
+            let new = format!(" control{text} the");
+            for first in [&written, &spoken] {
+                assert_eq!(run(first, &settled, &later), (new.clone(), new.clone()));
+            }
+        }
+    }
+
+    #[test]
+    fn a_settled_word_keeps_its_own_spoken_forms_among_words_spelled_alike() {
+        let mut words = SpecialWords::new();
+        words.add_spoken("C++", "c plus plus").unwrap();
+        words.add_spoken("C#", "c sharp").unwrap();
+        let (mut s, tok) = stream_with(&words, 50);
+        let config = PassConfig::default();
+        // "the C#" settles as heard, then a pass hears it as "c sharp" and keeps "sharp".
+        let written = [(6, 0), (58, 2), (67, 3), (6, 40)];
+        s.settle(&tok, window(&s, &written), &config, PassMode::Tentative);
+        let second = s.settle(&tok, window(&s, &written), &config, PassMode::Tentative);
+        assert_eq!(second.settled, " the C#");
+        let spoken = [(6, 0), (30, 2), (76, 3), (6, 40)];
+        let next = s.settle(&tok, window(&s, &spoken), &config, PassMode::Tentative);
         assert_eq!(next.tentative, " the");
     }
 
@@ -1458,6 +1550,7 @@ mod tests {
                     resume: Resume::Frame(end_frame),
                     joined: false,
                     heard_end: 0,
+                    entry: None,
                 })
                 .collect();
             let heard = Heard { tokens, new: 1 };
