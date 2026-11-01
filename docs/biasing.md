@@ -291,7 +291,10 @@ WER changed by at most +0.01 points (the upper end of the interval at most +0.03
 words didn't change, and one utterance in 6,608 had a false rewrite, "Bee Shire" heard as "zee
 shell" and written as zsh. On LibriSpeech test, "standard in the art" became "stdin the art".
 Streamed in steps of half a second, the terms of two voices' 320 utterances came out as spelled
-85.9% of the time with Granite and 91.2% with Parakeet, against 88.1% and 91.6% offline.
+85.9% of the time with Granite and 90.9% with Parakeet, against 88.1% and 91.6% offline. In one
+Granite utterance the words of "Gemini 3.8 Flash" settled in separate passes, since earlier
+passes heard "3.5" and "3.84" and so stopped matching its form. The text came out right, but a
+name can settle a word at a time like this.
 
 ### Streaming
 
