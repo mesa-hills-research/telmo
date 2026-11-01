@@ -97,7 +97,7 @@ impl Spoken {
 
     /// The spoken forms in `ids`, in any case of their ASCII letters, leftmost first and the
     /// longest of those starting at one token. A form starts at a token that starts a word, and
-    /// ends where the text has no letter or digit before the next space, which may be inside a
+    /// ends before a character that isn't a letter or digit, or the end, which may be inside a
     /// token. Also returns the first token where a form could still be under way if more tokens
     /// followed, or `ids.len()`. Punctuation at the end doesn't stop a form there, since a model
     /// often closes a sentence where its audio ends and drops the punctuation once more comes.
@@ -212,13 +212,13 @@ impl Spoken {
     }
 }
 
-/// Whether a word ends at the start of `text`, meaning no letter or digit comes before the next
-/// space.
+/// Whether a word ends at the start of `text`, meaning it starts with a character that isn't a
+/// letter or digit, or is empty.
 fn ends_word(text: &[u8]) -> bool {
-    let until_space = &text[..text.iter().position(|&b| b == b' ').unwrap_or(text.len())];
-    !String::from_utf8_lossy(until_space)
+    String::from_utf8_lossy(&text[..text.len().min(4)])
         .chars()
-        .any(char::is_alphanumeric)
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric())
 }
 
 /// Where the last letter or digit of `text` ends, or 0. Text cut inside a character's bytes
@@ -293,6 +293,8 @@ mod tests {
     const BE_DOT: u32 = 59;
     const DOT: u32 = 60;
     const DASH: u32 = 61;
+    const APOSTROPHE_S: u32 = 62;
+    const HYPHEN: u32 = 63;
 
     #[test]
     fn whole_words_of_a_form_are_found_in_any_capitals() {
@@ -326,6 +328,45 @@ mod tests {
             assert_eq!(tok.decode(&ids), text);
             assert_eq!(found(&c, &ids).0.len(), matches as usize, "{text}");
         }
+    }
+
+    #[test]
+    fn any_character_but_a_letter_or_digit_ends_a_form() {
+        let c = spoken(&[("kubectl", "cube control")]);
+        let tok = tokenizer();
+        let kubectl = || vec![(1..3, vec![1, 2, 3])];
+        for ids in [
+            [THE, CUBE, CONTROL, APOSTROPHE_S],
+            [THE, CUBE, CONTROL, HYPHEN],
+            [THE, CUBE, CONTROL, DASH],
+        ] {
+            assert_eq!(found(&c, &ids).0, kubectl(), "{}", tok.decode(&ids));
+        }
+        let text = |ids: &[u32]| {
+            let tokens = ids
+                .iter()
+                .map(|&id| Token {
+                    id,
+                    frame: 0,
+                    duration: 1,
+                })
+                .collect();
+            let out: Vec<u32> = c
+                .spoken
+                .rewrite(&tok, tokens)
+                .iter()
+                .map(|t| t.id)
+                .collect();
+            tok.decode(&out)
+        };
+        assert_eq!(
+            text(&[THE, CUBE, CONTROL, APOSTROPHE_S, THE]),
+            "the kubectl's the"
+        );
+        assert_eq!(text(&[THE, CUBE, CONTROL, HYPHEN, S]), "the kubectl-s");
+        assert_eq!(text(&[THE, CUBE, CONTROL, DASH, THE]), "the kubectl— the");
+        // A letter or digit goes on with the word.
+        assert_eq!(text(&[THE, CUBE, CONTROL, S, THE]), "the cube controls the");
     }
 
     #[test]
