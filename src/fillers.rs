@@ -363,7 +363,7 @@ fn spelled(tokenizer: &Tokenizer, text: &str, start: bool) -> Option<Vec<u32>> {
 
 /// A word's punctuation before, its letters and digits with what's between them, and its
 /// punctuation after.
-fn split(word: &str) -> (&str, &str, &str) {
+pub(crate) fn split(word: &str) -> (&str, &str, &str) {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let Some(start) = word.find(is_word) else {
         return (word, "", "");
@@ -418,6 +418,14 @@ fn is_plain_lower(word: &str) -> bool {
     let mut parts = word.split('\'');
     let lower = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_lowercase());
     parts.next().is_some_and(lower) && parts.next().is_none_or(lower) && parts.next().is_none()
+}
+
+/// `word` with a capital, if its letters are plain lower case and it isn't a `protected`
+/// spelling's first word, its punctuation kept around them ("hello," gives "Hello,").
+pub(crate) fn with_capital(word: &str, protected: &Protected) -> Option<String> {
+    let (lead, core, trail) = split(word);
+    (is_plain_lower(core) && !protected.keeps_case(core))
+        .then(|| format!("{lead}{}{trail}", capitalized(core)))
 }
 
 fn capitalized(word: &str) -> String {

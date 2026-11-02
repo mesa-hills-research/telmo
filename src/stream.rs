@@ -32,6 +32,7 @@ use crate::biasing::{
 };
 use crate::error::Result;
 use crate::features::LogMelStream;
+use crate::fillers::{self, Protected};
 use crate::granite::{self, Granite};
 use crate::granite_stream::GraniteStream;
 use crate::model::Model;
@@ -1020,8 +1021,7 @@ fn sentence_goes_on(text: &str, words: Option<&Compiled>) -> Option<bool> {
     if text.starts_with([',', ';', ':']) {
         return Some(true);
     }
-    let first = text.split_whitespace().next()?;
-    let core = first.trim_matches(|c: char| !c.is_alphanumeric());
+    let (_, core, _) = fillers::split(text.split_whitespace().next()?);
     if core.is_empty() || core.starts_with(char::is_uppercase) {
         return None;
     }
@@ -1044,21 +1044,12 @@ fn capitalized(text: &str, words: Option<&Compiled>) -> String {
     let start = text.len() - text.trim_start().len();
     let rest = &text[start..];
     let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    let word = &rest[..end];
-    let plain = word.chars().all(|c| c.is_ascii_lowercase() || c == '\'')
-        && word.starts_with(|c: char| c.is_ascii_lowercase());
-    if !plain || words.is_some_and(|w| w.protected.keeps_case(word)) {
-        return text.to_string();
+    let none = Protected::default();
+    let protected = words.map_or(&none, |w| &w.protected);
+    match fillers::with_capital(&rest[..end], protected) {
+        Some(word) => format!("{}{word}{}", &text[..start], &rest[end..]),
+        None => text.to_string(),
     }
-    let mut chars = word.chars();
-    let first = chars.next().map(|c| c.to_ascii_uppercase());
-    format!(
-        "{}{}{}{}",
-        &text[..start],
-        first.into_iter().collect::<String>(),
-        chars.as_str(),
-        &rest[end..]
-    )
 }
 
 enum Message {
@@ -2056,6 +2047,10 @@ mod tests {
             (" The music came.", Some("."), " The music came."),
             (" kubectl get pods", Some("."), " kubectl get pods"),
             (" 5 minutes.", Some("."), " 5 minutes."),
+            // The capital goes on the word, with its punctuation around it.
+            (" hello.", Some("."), " Hello."),
+            (" hello, world", Some("."), " Hello, world"),
+            (" 'hello world", Some("."), " 'Hello world"),
         ] {
             let (events, out) = resolve_held(held, next, Some(&words));
             let want: Vec<String> = mark.into_iter().map(String::from).collect();
