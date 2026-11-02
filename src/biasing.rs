@@ -25,7 +25,7 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use crate::error::{Error, Result};
-use crate::fillers::{Fillers, Protected};
+use crate::fillers::{Context, Fillers, Protected};
 use crate::parakeet::Token;
 use crate::tokenizer::Tokenizer;
 
@@ -788,7 +788,7 @@ impl Compiled {
             tokenizer,
             tokens,
             |t| t.id,
-            None,
+            &Context::default(),
             &self.protected,
             |word, ids| {
                 let (first, last) = (word[0], word[word.len() - 1]);

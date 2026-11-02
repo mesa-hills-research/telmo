@@ -13,9 +13,10 @@
 //!   it'll.
 //!
 //! A quoted word stays, as a mention ("I often go “Um, so”", "'um'"). That's a word from an
-//! opening quote mark to the closing one of its kind, or with an opening mark of its own, so a
-//! closing mark alone ("uh'") quotes nothing. Both copies stay when a quote mark, bracket or
-//! sentence end comes between them, also on a removed hesitation. Every word of a special word or
+//! opening quote mark to the closing one of its kind, or to the end of the text when none comes.
+//! A closing mark alone ("uh'") quotes nothing, and neither does the apostrophe of an elision
+//! ("'cause"). Both copies stay when a quote mark, bracket or sentence end comes between them,
+//! also on a removed hesitation. Every word of a special word or
 //! a spoken form's word stays wherever the whole of it occurs. Every other word stays as written,
 //! so "uh-huh", "oh", "very very", "had had", "it it", repeats of several words, false starts and
 //! words such as "like" or "you know" are left alone.
@@ -28,6 +29,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use crate::biasing::SpecialWords;
 use crate::tokenizer::Tokenizer;
 
 /// The fillers of one language that a transcript can leave out, as the [module](self)
@@ -78,6 +80,39 @@ pub(crate) enum Edit {
     Leave(char),
 }
 
+/// What the words after a text that can't change need from it, such as a stream's settled text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Context {
+    /// Its last word, with its punctuation.
+    last: Option<String>,
+    /// Whether a quote of each kind, double and single, is open at its end.
+    open: [bool; 2],
+    /// Its last words, without their punctuation, as many as a spelling can go on from.
+    tail: Vec<String>,
+}
+
+impl Context {
+    /// The context of `text`.
+    pub fn after(text: &str) -> Context {
+        let mut context = Context::default();
+        for word in text.split_whitespace() {
+            let (lead, core, trail) = split(word);
+            let closes = quote_marks(&mut context.open, lead, core, trail);
+            for (kind, close) in closes.into_iter().enumerate() {
+                context.open[kind] &= !close;
+            }
+            context.tail.push(bare(word));
+            let keep = context
+                .tail
+                .len()
+                .saturating_sub(SpecialWords::MAX_PARTS - 1);
+            context.tail.drain(..keep);
+            context.last = Some(word.to_string());
+        }
+        context
+    }
+}
+
 /// The spellings a transcript keeps as they are, the special words and spoken forms' words. A
 /// word goes nowhere where its whole spelling occurs, and the first word of a spelling keeps its
 /// case anywhere.
@@ -102,21 +137,23 @@ impl Protected {
         protected
     }
 
-    /// Which of `words` are part of a spelling that occurs whole among them.
-    pub fn words(&self, words: &[&str]) -> Vec<bool> {
-        let mut covered = vec![false; words.len()];
-        if self.spellings.is_empty() {
-            return covered;
-        }
-        let bare: Vec<String> = words.iter().map(|w| bare(w)).collect();
-        for i in 0..words.len() {
-            for spelling in self.spellings.get(&bare[i]).into_iter().flatten() {
-                if bare[i..].starts_with(spelling) {
-                    covered[i..i + spelling.len()].fill(true);
+    /// Which of `words`, after the words `before` without their punctuation, are part of a
+    /// spelling that occurs whole among them, one that began in `before` included.
+    pub fn words(&self, before: &[String], words: &[&str]) -> Vec<bool> {
+        let mut covered = vec![false; before.len() + words.len()];
+        if !self.spellings.is_empty() {
+            let bare: Vec<String> = (before.iter().cloned())
+                .chain(words.iter().map(|w| bare(w)))
+                .collect();
+            for i in 0..bare.len() {
+                for spelling in self.spellings.get(&bare[i]).into_iter().flatten() {
+                    if bare[i..].starts_with(spelling) {
+                        covered[i..i + spelling.len()].fill(true);
+                    }
                 }
             }
         }
-        covered
+        covered.split_off(before.len())
     }
 
     /// Whether `word`, in lower case, is a spelling's first word, which keeps its case.
@@ -149,7 +186,7 @@ impl Fillers {
     /// `text` without these fillers, its words separated by single spaces.
     pub fn remove(&self, text: &str) -> String {
         let words: Vec<&str> = text.split_whitespace().collect();
-        let edits = self.plan(None, &words, &Protected::default());
+        let edits = self.plan(&Context::default(), &words, &Protected::default());
         let mut out = String::new();
         for (word, edit) in words.iter().zip(&edits) {
             let word = match edit {
@@ -169,19 +206,19 @@ impl Fillers {
         out
     }
 
-    /// What happens to each of `words`, which follow the word `before` of a text that can't
-    /// change, if any. Words of a `protected` spelling stay as they are.
+    /// What happens to each of `words`, which follow a text that can't change, whose `context`
+    /// this is. Words of a `protected` spelling stay as they are.
     pub(crate) fn plan(
         &self,
-        before: Option<&str>,
+        context: &Context,
         words: &[&str],
         protected: &Protected,
     ) -> Vec<Edit> {
         let Language::English = self.language;
         let parts: Vec<(&str, &str, &str)> = words.iter().map(|w| split(w)).collect();
-        let before = before.map(split);
-        let kept = protected.words(words);
-        let quoted = quoted(before, &parts);
+        let before = context.last.as_deref().map(split);
+        let kept = protected.words(&context.tail, words);
+        let quoted = quoted(context.open, &parts);
         let mut deleted = vec![false; words.len()];
         for (i, &(_, core, _)) in parts.iter().enumerate() {
             let previous = match i {
@@ -287,14 +324,14 @@ impl Fillers {
 
     /// The edits of `tokens`, whose ids `id` gives, with the words that go left out and the
     /// words that change spelled anew by `respell` from the word's tokens and its new ids.
-    /// `before` is the word of a text that can't change before them, and words of a `protected`
+    /// `context` is that of a text that can't change before them, and words of a `protected`
     /// spelling stay as they are.
     pub(crate) fn rewrite<T>(
         &self,
         tokenizer: &Tokenizer,
         tokens: Vec<T>,
         id: impl Fn(&T) -> u32,
-        before: Option<&str>,
+        context: &Context,
         protected: &Protected,
         respell: impl Fn(&[T], Vec<u32>) -> Vec<T>,
     ) -> Vec<T>
@@ -313,7 +350,7 @@ impl Fillers {
             })
             .collect();
         let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let edits = self.plan(before, &texts, protected);
+        let edits = self.plan(context, &texts, protected);
         if edits.iter().all(|e| *e == Edit::Keep) {
             return tokens;
         }
@@ -406,43 +443,53 @@ fn is_hesitation(word: &str, previous: Option<&str>) -> bool {
     sound && !(lower.starts_with("mm") && previous.is_some_and(is_number))
 }
 
-/// Which of the words split as `parts`, after the word `before` if any, are quoted. A quote runs
-/// from a word with an opening mark before its letters to the first with a closing mark of the
-/// same kind after them, and a mark standing alone closes an open quote or opens one. A quote
-/// that never closes is only its first word's ("'cause"), and a closing mark with no quote open
-/// ("uh'", "students'") quotes nothing.
-fn quoted(before: Option<(&str, &str, &str)>, parts: &[(&str, &str, &str)]) -> Vec<bool> {
-    let mut quoted = vec![false; parts.len()];
-    // Where each kind's open quote began, `Some(None)` for one that began in `before`.
-    let mut open: [Option<Option<usize>>; 2] = [None, None];
-    let words = before.into_iter().map(|b| (None, b));
-    for (i, (lead, core, trail)) in
-        words.chain(parts.iter().copied().enumerate().map(|(i, p)| (Some(i), p)))
-    {
-        for (kind, marks) in QUOTE_KINDS.iter().enumerate() {
-            let (opens, closes) = if core.is_empty() {
-                let mark = lead.contains(marks);
-                (mark && open[kind].is_none(), mark && open[kind].is_some())
-            } else {
-                (lead.contains(marks), trail.contains(marks))
-            };
-            if opens && open[kind].is_none() {
-                open[kind] = Some(i);
+/// Which of the words split as `parts` are quoted, with a quote of each kind `open` before
+/// them. A quote runs from an opening mark to the closing mark of its kind, or to the end of the
+/// text when none comes, so whether a word is quoted depends only on the words before it.
+fn quoted(mut open: [bool; 2], parts: &[(&str, &str, &str)]) -> Vec<bool> {
+    parts
+        .iter()
+        .map(|&(lead, core, trail)| {
+            let closes = quote_marks(&mut open, lead, core, trail);
+            let quoted = open.iter().any(|&o| o);
+            for (kind, close) in closes.into_iter().enumerate() {
+                open[kind] &= !close;
             }
-            // A quote that closes in `before` takes none of the words.
-            if closes
-                && let Some(start) = open[kind].take()
-                && let Some(end) = i
-            {
-                quoted[start.unwrap_or(0)..=end].fill(true);
-            }
-        }
-    }
-    for start in open.into_iter().flatten().flatten() {
-        quoted[start] = true;
-    }
-    quoted
+            quoted
+        })
+        .collect()
 }
+
+/// Opens the quotes that a word with punctuation `lead` and `trail` around its letters `core`
+/// opens, and gives the kinds it closes after it. An opening mark is one before the letters,
+/// unless it's the apostrophe of an elision ("'cause"), or a mark standing alone with no quote of
+/// its kind open. A closing mark is one after the letters, or standing alone, with a quote of its
+/// kind open, so a closing mark with no quote open ("uh'", "students'") does nothing.
+fn quote_marks(open: &mut [bool; 2], lead: &str, core: &str, trail: &str) -> [bool; 2] {
+    let mut closes = [false; 2];
+    for (kind, marks) in QUOTE_KINDS.iter().enumerate() {
+        if core.is_empty() {
+            if lead.contains(marks) {
+                closes[kind] = open[kind];
+                open[kind] = true;
+            }
+            continue;
+        }
+        let elided =
+            kind == 1 && lead.ends_with(marks) && ELIDED.contains(&core.to_lowercase().as_str());
+        if lead.contains(marks) && !elided {
+            open[kind] = true;
+        }
+        closes[kind] = open[kind] && trail.contains(marks);
+    }
+    closes
+}
+
+/// Words written with an apostrophe before them for the letters left out, which opens no quote.
+const ELIDED: [&str; 13] = [
+    "bout", "cause", "cos", "cuz", "em", "kay", "n", "neath", "nother", "round", "til", "tis",
+    "twas",
+];
 
 /// Whether `word` is a number such as 5, 2.5 or 1,000.
 fn is_number(word: &str) -> bool {
@@ -565,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn a_word_is_quoted_between_an_opening_mark_and_its_closing_one() {
+    fn a_word_is_quoted_from_an_opening_mark_to_its_closing_one() {
         for (text, want) in [
             // A closing mark alone, such as an apostrophe Granite wrote, quotes nothing.
             ("And uh' the idea", "And the idea"),
@@ -579,17 +626,62 @@ mod tests {
             ("He said “so um” and um left", "He said “so um” and left"),
             ("He said “so um” and uh' left", "He said “so um” and left"),
             ("He said 'um", "He said 'um"),
-            // A quote that never closes is only its first word's, as an elided "'cause", and a
-            // mark of the other kind closes none.
+            // A quote that never closes runs to the end of the text.
+            ("He said “so um I think", "He said “so um I think"),
+            ("He said ' um, the the idea", "He said ' um, the the idea"),
+            // An elision opens no quote, and a mark of the other kind closes none.
             ("'cause um I think", "'cause I think"),
+            ("'Tis uh true", "'Tis true"),
             ("“the workers’ uh news”", "“the workers’ uh news”"),
             ("“the workers’ news” uh goes", "“the workers’ news” goes"),
         ] {
             assert_eq!(english().remove(text), want, "{text}");
         }
-        // A quote that opened in text that can't change goes on into the words after it.
-        let plan = english().plan(Some("“so"), &["um”", "uh"], &Protected::default());
-        assert_eq!(plan, [Edit::Keep, Edit::Delete]);
+    }
+
+    #[test]
+    fn protection_goes_on_from_text_that_cant_change() {
+        let none = Protected::default();
+        let plan = |before, words: &[&str], protected| {
+            english().plan(&Context::after(before), words, protected)
+        };
+        // A quote open at the end of the text, of either kind.
+        assert_eq!(
+            plan("He said “the city", &["um", "big"], &none),
+            [Edit::Keep, Edit::Keep]
+        );
+        assert_eq!(
+            plan("He said 'the city", &["um", "big"], &none),
+            [Edit::Keep, Edit::Keep]
+        );
+        assert_eq!(
+            plan("“so", &["um”", "uh"], &none),
+            [Edit::Keep, Edit::Delete]
+        );
+        assert_eq!(
+            plan("“so” and", &["um", "then"], &none),
+            [Edit::Delete, Edit::Keep]
+        );
+        assert_eq!(
+            plan("'cause", &["um", "then"], &none),
+            [Edit::Delete, Edit::Keep]
+        );
+        // A spelling that began in the text, at any of its words.
+        let protected = Protected::new(["New um city now"]);
+        for (before, words) in [
+            ("ask New", &["um", "city", "now", "um"][..]),
+            ("ask New um", &["city", "now", "um"]),
+            ("ask New um city", &["now", "um"]),
+        ] {
+            let edits = plan(before, words, &protected);
+            let mut want = vec![Edit::Keep; words.len() - 1];
+            want.push(Edit::Delete);
+            assert_eq!(edits, want, "{before}");
+        }
+        assert_eq!(
+            plan("ask New", &["um", "town"], &protected),
+            [Edit::Delete, Edit::Keep]
+        );
     }
 
     #[test]
@@ -637,11 +729,11 @@ mod tests {
     #[test]
     fn a_special_word_keeps_its_spelling() {
         let words = ["Uh,", "kubectl", "get", "pods"];
-        let edits = english().plan(None, &words, &Protected::new(["kubectl"]));
+        let edits = english().plan(&Context::default(), &words, &Protected::new(["kubectl"]));
         assert_eq!(edits, [Edit::Delete, Edit::Keep, Edit::Keep, Edit::Keep]);
         let words = ["Hmm"];
         assert_eq!(
-            english().plan(None, &words, &Protected::new(["Hmm"])),
+            english().plan(&Context::default(), &words, &Protected::new(["Hmm"])),
             [Edit::Keep]
         );
     }
@@ -651,7 +743,7 @@ mod tests {
         let text = |text: &str, spellings: &[&str]| {
             let words: Vec<&str> = text.split_whitespace().collect();
             let protected = Protected::new(spellings.iter().copied());
-            let edits = english().plan(None, &words, &protected);
+            let edits = english().plan(&Context::default(), &words, &protected);
             let kept: Vec<String> = (words.iter().zip(&edits))
                 .filter_map(|(w, e)| match e {
                     Edit::Keep => Some(w.to_string()),
@@ -687,8 +779,9 @@ mod tests {
 
     #[test]
     fn words_after_text_that_cant_change() {
-        let plan =
-            |before, words: &[&str]| english().plan(Some(before), words, &Protected::default());
+        let plan = |before, words: &[&str]| {
+            english().plan(&Context::after(before), words, &Protected::default())
+        };
         // The earlier copy has settled, so the later one goes.
         assert_eq!(plan("the", &["the", "idea"]), [Edit::Delete, Edit::Keep]);
         assert_eq!(

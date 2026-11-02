@@ -32,7 +32,7 @@ use crate::biasing::{
 };
 use crate::error::Result;
 use crate::features::LogMelStream;
-use crate::fillers::{self, Protected};
+use crate::fillers::{self, Context, Protected};
 use crate::granite::{self, Granite};
 use crate::granite_stream::GraniteStream;
 use crate::model::Model;
@@ -195,8 +195,8 @@ pub struct UtteranceStream {
     granite: Option<GraniteStream>,
     /// Parakeet's log-mel frames, computed once as the audio arrives.
     log_mel: Option<LogMelStream>,
-    /// Whether any text settled in this utterance.
-    settled_any: bool,
+    /// The text settled so far, which filler removal goes on from.
+    settled: String,
     passes: usize,
     /// The special words passes favour.
     words: Option<Arc<Compiled>>,
@@ -240,7 +240,7 @@ impl UtteranceStream {
             previous: Vec::new(),
             granite,
             log_mel,
-            settled_any: false,
+            settled: String::new(),
             passes: 0,
             words,
             timings,
@@ -276,17 +276,6 @@ impl UtteranceStream {
         self.passes
     }
 
-    /// The last word of the text settled so far, with its punctuation.
-    fn last_word(&self, tokenizer: &Tokenizer) -> Option<String> {
-        let ids: Vec<u32> = self
-            .recent
-            .iter()
-            .flat_map(|w| w.ids.iter().copied())
-            .collect();
-        let text = tokenizer.decode_raw(&ids);
-        text.split_whitespace().last().map(str::to_string)
-    }
-
     /// Runs a pass over the audio so far. A final pass settles every word, and no audio may
     /// follow it.
     pub fn pass(&mut self, model: &Model, config: &PassConfig, mode: PassMode) -> Result<PassText> {
@@ -314,12 +303,11 @@ impl UtteranceStream {
         let none = Spoken::default();
         let spoken = self.words.as_ref().map_or(&none, |w| &w.spoken);
         let hyp = write_spoken(spoken, tokenizer, &heard);
-        // Fillers go before anything settles, with the settled text's last word as context, so
-        // a word whose fate depends on the next one is the last of the pass until that one comes.
+        // Fillers go before anything settles, going on from the settled text, so a word whose
+        // fate depends on the next one is the last of the pass until that one comes, and what
+        // protects a word from going may have settled before it.
         let hyp = match self.words.as_ref() {
-            Some(words) => {
-                remove_fillers(words, tokenizer, self.last_word(tokenizer).as_deref(), hyp)
-            }
+            Some(words) => remove_fillers(words, tokenizer, &Context::after(&self.settled), hyp),
             None => hyp,
         };
         let words = split_words(tokenizer, self.last_settled, &hyp);
@@ -411,7 +399,7 @@ impl UtteranceStream {
         self.previous = words[settle..].iter().map(|w| word_ids(&hyp, w)).collect();
         let settled = tokenizer.decode_raw(&settled_ids);
         let tentative = tokenizer.decode_raw(&tentative_ids);
-        self.settled_any |= !settled.is_empty();
+        self.settled.push_str(&settled);
         PassText {
             settled,
             tentative,
@@ -1296,13 +1284,13 @@ fn write_spoken(spoken: &Spoken, tokenizer: &Tokenizer, heard: &[Hyp]) -> Vec<Hy
     out
 }
 
-/// `hyp` with `words`' fillers left out, if any are to go, after `before`, the settled text's
-/// last word. Special words, spoken forms' words and spotted words keep their spelling. A word's
-/// new tokens share its frames and resume where it did.
+/// `hyp` with `words`' fillers left out, if any are to go, after the settled text, whose
+/// `context` this is. Special words, spoken forms' words and spotted words keep their spelling.
+/// A word's new tokens share its frames and resume where it did.
 fn remove_fillers(
     words: &Compiled,
     tokenizer: &Tokenizer,
-    before: Option<&str>,
+    context: &Context,
     hyp: Vec<Hyp>,
 ) -> Vec<Hyp> {
     let Some(fillers) = &words.fillers else {
@@ -1312,7 +1300,7 @@ fn remove_fillers(
         tokenizer,
         hyp,
         |h| h.id,
-        before,
+        context,
         &words.protected,
         |word, ids| {
             let (first, last) = (&word[0], &word[word.len() - 1]);
@@ -1606,7 +1594,7 @@ mod tests {
             previous: Vec::new(),
             granite: None,
             log_mel: None,
-            settled_any: false,
+            settled: String::new(),
             passes: 0,
             words: Some(Arc::new(compiled)),
             timings: Timings::default(),
@@ -1963,10 +1951,77 @@ mod tests {
         assert_eq!(out.tentative, " the the city");
     }
 
+    /// A tokenizer whose words are whole pieces, `words[i]` with id `i + 1`.
+    fn word_tokenizer(words: &[&str]) -> Tokenizer {
+        let vocab: Vec<String> = (words.iter().enumerate())
+            .map(|(i, w)| format!("\"▁{w}\":{}", i + 1))
+            .collect();
+        let json = format!(
+            r#"{{"added_tokens":[{{"id":0,"content":"<blank>","special":true}}],"model":{{"type":"BPE","vocab":{{"<blank>":0,{}}},"merges":[]}}}}"#,
+            vocab.join(",")
+        );
+        Tokenizer::from_json(json.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn a_quote_protects_its_words_after_its_start_settles() {
+        let (mut s, _) = stream_with(&fillers(), 50);
+        let tok = word_tokenizer(&[
+            "“the", "city", "of", "New", "York", "is", "very", "um", "big”",
+        ]);
+        // A word every 480 ms. The second pass settles up to "very", inside the quote.
+        let heard: Vec<(u32, usize)> = (1..=9).map(|id| (id, 6 * (id as usize - 1))).collect();
+        let config = PassConfig::default();
+        s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
+        let second = s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
+        assert_eq!(second.settled, " “the city of New York is very");
+        let last = s.settle(&tok, window(&s, &heard), &config, PassMode::Final);
+        assert_eq!(last.settled, " um big”");
+    }
+
+    #[test]
+    fn a_quote_protects_its_words_before_its_closing_mark_is_heard() {
+        let (mut s, _) = stream_with(&fillers(), 50);
+        let tok = word_tokenizer(&[
+            "“the", "city", "um", "of", "New", "York", "is", "very", "big", "big”",
+        ]);
+        // Two passes without the closing mark settle past "um", then the last pass hears it.
+        let open: Vec<(u32, usize)> = (1..=9).map(|id| (id, 6 * (id as usize - 1))).collect();
+        let mut closed = open.clone();
+        closed[8].0 = 10;
+        let config = PassConfig::default();
+        s.settle(&tok, window(&s, &open), &config, PassMode::Tentative);
+        let second = s.settle(&tok, window(&s, &open), &config, PassMode::Tentative);
+        let last = s.settle(&tok, window(&s, &closed), &config, PassMode::Final);
+        assert_eq!(
+            format!("{}{}", second.settled, last.settled),
+            " “the city um of New York is very big”"
+        );
+    }
+
+    #[test]
+    fn a_special_spelling_protects_its_words_after_its_start_settles() {
+        let mut words = fillers();
+        words.add_code_word("New um").unwrap();
+        let (mut s, tok) = stream_with(&words, 10);
+        // "New", "um" on frame 6 and "city" on frame 9. The second pass settles "New" alone.
+        let heard = [(42, 0), (11, 6), (13, 6), (79, 6), (44, 9)];
+        let config = PassConfig {
+            settle_margin: Duration::from_millis(320),
+            ..PassConfig::default()
+        };
+        s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
+        let second = s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
+        assert_eq!(second.settled, " New");
+        let last = s.settle(&tok, window(&s, &heard), &config, PassMode::Final);
+        assert_eq!(last.settled, " um city");
+    }
+
     #[test]
     fn a_copy_of_a_settled_word_goes_in_its_place() {
         let (mut s, tok) = stream_with(&fillers(), 50);
         s.recent = vec![settled(&tok, &[6], 0..1)];
+        s.settled = " the".into();
         s.resume = Resume::Frame(1);
         s.last_settled = Some(6);
         // "the" again on frame 10, said after the settled one.
@@ -1986,6 +2041,7 @@ mod tests {
         for (city, tentative) in [(&[44][..], ". New York the"), (&[44, 7], " New York the")] {
             let (mut s, _) = stream_with(&fillers(), 50);
             s.recent = vec![settled(&tok, &[6], 0..1), settled(&tok, city, 2..3)];
+            s.settled = tok.decode_raw(&[&[6][..], city].concat());
             s.resume = Resume::Frame(3);
             s.last_settled = Some(city[city.len() - 1]);
             let config = PassConfig::default();

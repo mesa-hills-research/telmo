@@ -39,8 +39,10 @@ think" becomes "So I think"). Other words keep their spelling.
 
 - "mm" after a number, as millimetres, and a hesitation in capitals (UM, ER), as an acronym.
 - A quoted word, as a mention ("I often go “Um, so”", "'um'"). That's a word from an opening
-  quote mark to the closing one of its kind, or one with an opening mark of its own. A closing
-  mark alone quotes nothing, so "uh'" goes.
+  quote mark to the closing one of its kind, or to the end of the utterance when none comes. A
+  closing mark alone quotes nothing, so "uh'" goes. Neither does the apostrophe of a word from a
+  short list of elisions ('bout, 'cause, 'cos, 'cuz, 'em, 'kay, 'n, 'neath, 'nother, 'round,
+  'til, 'tis and 'twas), so the "um" in "'cause um" goes too.
 - Both copies when a quote mark, bracket or sentence end comes between them, also on a removed
   hesitation ("I um. I think" becomes "I. I think").
 - Every word of a special word or a spoken form's word, wherever the whole of it occurs ("the
@@ -52,14 +54,15 @@ think" becomes "So I think"). Other words keep their spelling.
 
 ## In a stream
 
-Each pass leaves out fillers from all its words before any settle, with the settled text's last
-word as context, so tentative text never shows a hesitation. A word whose fate depends on the
-next one waits for it, because the last word of a pass never settles, and a word followed only
-by hesitations is the last. When the first copy of a stutter has settled, the second goes
-instead. A sentence end left by a hesitation follows the settled text, unless that ends in a
-comma. A pass often hears the settled words again, and a stream drops those, but a word said
-twice ("no, no") keeps both copies. Each settled word stands for one word of the pass, heard on
-its audio or starting less than 240 ms after it, and any other copy was said again.
+Each pass leaves out fillers from all its words before any settle, going on from the settled text,
+so tentative text never shows a hesitation, and a quote or special word that began in the settled
+text still keeps its words. A word whose fate depends on the next one waits for it, because the
+last word of a pass never settles, and a word followed only by hesitations is the last. When the
+first copy of a stutter has settled, the second goes instead. A sentence end left by a hesitation
+follows the settled text, unless that ends in a comma. A pass often hears the settled words again,
+and a stream drops those, but a word said twice ("no, no") keeps both copies. Each settled word
+stands for one word of the pass, heard on its audio or starting less than 240 ms after it, and any
+other copy was said again.
 
 ## Accuracy
 
