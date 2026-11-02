@@ -378,6 +378,7 @@ impl UtteranceStream {
             self.resume = h.resume.clone();
             self.last_settled = Some(h.id);
         }
+        // Words join before the oldest are dropped, so the words kept are whole.
         if settle > 0 {
             join_entries(&mut self.recent, spoken, tokenizer);
         }
@@ -1155,13 +1156,14 @@ fn write_spoken(spoken: &Spoken, tokenizer: &Tokenizer, heard: &[Hyp]) -> Vec<Hy
     out
 }
 
-/// Joins the last settled words, `recent`, that spell an entry's spoken form or word whole into
-/// one with its entries, as when a word's start settled before the rest was heard.
+/// Joins settled words that spell an entry's spoken form or word whole into one with its
+/// entries, as when a word's start settled before the rest was heard. `recent` holds the words
+/// kept from before and all those a pass settled, and is matched whole before any are dropped,
+/// so a word's start is found however many words settle after it.
 fn join_entries(recent: &mut Vec<SettledWord>, spoken: &Spoken, tokenizer: &Tokenizer) {
-    let from = recent.len().saturating_sub(KEPT);
     let mut starts = Vec::new();
     let mut ids = Vec::new();
-    for w in &recent[from..] {
+    for w in recent.iter() {
         starts.push(ids.len());
         ids.extend_from_slice(&w.ids);
     }
@@ -1175,7 +1177,7 @@ fn join_entries(recent: &mut Vec<SettledWord>, spoken: &Spoken, tokenizer: &Toke
         if first == last {
             continue;
         }
-        let parts: Vec<SettledWord> = recent.drain(from + first..=from + last).collect();
+        let parts: Vec<SettledWord> = recent.drain(first..=last).collect();
         let ids: Vec<u32> = parts.iter().flat_map(|w| w.ids.iter().copied()).collect();
         let as_heard = parts
             .iter()
@@ -1186,7 +1188,7 @@ fn join_entries(recent: &mut Vec<SettledWord>, spoken: &Spoken, tokenizer: &Toke
         let frames = parts[0].heard.start..parts[parts.len() - 1].heard.end;
         let entries = Some((unit.entries(), rest));
         let joined = SettledWord::new(spoken, &text, as_heard, entries, ids, frames);
-        recent.insert(from + first, joined);
+        recent.insert(first, joined);
     }
 }
 
@@ -1252,9 +1254,11 @@ fn split_words(tokenizer: &Tokenizer, before: Option<u32>, hyp: &[Hyp]) -> Vec<W
 /// The most settled words a pass may repeat.
 const MAX_REPEAT: usize = 3;
 
-/// The most settled words kept, enough for an entry's word or form whose start settled alone.
-const KEPT: usize = if SpecialWords::MAX_PARTS > MAX_REPEAT {
-    SpecialWords::MAX_PARTS
+/// The settled words kept once they're joined. The repeat check and Granite's re-alignment use
+/// the last [`MAX_REPEAT`], and a later pass can complete an entry's word or form whose first
+/// words, at most all but one of [`SpecialWords::MAX_PARTS`], are the last ones kept.
+const KEPT: usize = if SpecialWords::MAX_PARTS - 1 > MAX_REPEAT {
+    SpecialWords::MAX_PARTS - 1
 } else {
     MAX_REPEAT
 };
@@ -1669,6 +1673,46 @@ mod tests {
                 .collect();
             let next = s.settle(&tok, window(&s, &later), &config, PassMode::Tentative);
             assert_eq!(next.tentative, " the", "{written}");
+        }
+    }
+
+    #[test]
+    fn a_settled_start_joins_the_longest_word_whatever_settles_after_it() {
+        let tok = crate::biasing::tests::tokenizer();
+        let config = PassConfig::default();
+        let longest = "New York city plus sharp";
+        assert_eq!(longest.split(' ').count(), SpecialWords::MAX_PARTS);
+        let mut words = SpecialWords::new();
+        words.add_spoken(longest, "cube control").unwrap();
+        // "New" settled alone, then its other four words settle on frame 4 with one or two
+        // words after them.
+        for (after, words_after) in [(&[(9, 4), (10, 4)][..], 1), (&[(6, 4), (9, 4), (10, 4)], 2)] {
+            let (mut s, _) = stream_with(&words, 50);
+            s.recent = vec![settled(&tok, &[6], 0..1), settled(&tok, &[42], 2..3)];
+            s.resume = Resume::Frame(3);
+            s.last_settled = Some(42);
+            let rest = [(6, 0), (42, 2), (43, 4), (44, 4), (71, 4), (76, 4)];
+            let heard: Vec<(u32, usize)> = (rest.iter().chain(after).copied())
+                .chain([(6, 40)])
+                .collect();
+            s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
+            let next = s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
+            let ids: Vec<u32> = ([43, 44, 71, 76].into_iter())
+                .chain(after.iter().map(|&(id, _)| id))
+                .collect();
+            assert_eq!(next.settled, tok.decode_raw(&ids));
+            // The word is one settled word, heard on frames 2 to 4, and so is each after it.
+            let frames: Vec<Range<usize>> = s.recent.iter().map(|w| w.heard.clone()).collect();
+            let mut expected = vec![0..1, 2..5];
+            expected.extend(std::iter::repeat_n(4..5, words_after));
+            assert_eq!(frames, expected);
+            // Its form on its frames, with the words after it, is the settled audio again.
+            let again: Vec<(u32, usize)> = ([(6, 0), (4, 2), (5, 4)].into_iter())
+                .chain(after.iter().copied())
+                .chain([(6, 40)])
+                .collect();
+            let next = s.settle(&tok, window(&s, &again), &config, PassMode::Tentative);
+            assert_eq!(next.tentative, " the", "{words_after} after");
         }
     }
 
