@@ -43,7 +43,10 @@ think" becomes "So I think"). Other words keep their spelling.
   closing mark alone quotes nothing, so "uh'" goes. Neither does the apostrophe of an elision from
   a short list ('bout, 'cause, 'cos, 'cuz, 'em, 'kay, 'n, 'neath, 'nother, 'round, 'til, 'tis and
   'twas) or of a contraction's ending written apart from its word ('s, 'll, 're, 've, 'd, 'm and
-  't, as in "we 'll"), so the "um" in "'cause um" goes too.
+  't, as in "we 'll"), so the "um" in "'cause um" goes too. A straight ' or a ’ right before one
+  of these words is taken for its apostrophe even where it could open a quote, so a quote in
+  straight marks that begins with one ('re um…') isn't kept. Other marks, such as ‘ and ‹, always
+  open a quote.
 - Both copies when a quote mark, bracket or sentence end comes between them, also on a removed
   hesitation ("I um. I think" becomes "I. I think").
 - Every word of a special word or a spoken form's word, wherever the whole of it occurs ("the

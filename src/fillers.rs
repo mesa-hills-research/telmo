@@ -482,12 +482,17 @@ fn quoted(mut open: [bool; 2], parts: &[(&str, &str, &str)]) -> Vec<bool> {
 }
 
 /// Opens the quotes that a word with punctuation `lead` and `trail` around its letters `core`
-/// opens, and gives the kinds it closes after it. An opening mark is one before the letters, unless
-/// it's the apostrophe of an elision ("'cause") or of a contraction's ending written apart ("we
-/// 'll"), or a mark standing alone with no quote of its kind open. A closing mark is one after the
-/// letters, or standing alone, with a quote of its kind open, so a closing mark with no quote open
-/// ("uh'", "students'") does nothing.
+/// opens, and gives the kinds it closes after it. An opening mark is one before the letters, or a
+/// mark standing alone with no quote of its kind open. An apostrophe right before an elision
+/// ("'cause") or a contraction's ending written apart ("we 'll") belongs to the word instead, and
+/// a straight or right single mark there is taken for one. Other marks, such as ‘ and ‹, are only
+/// ever quote marks. A closing mark is one after the letters, or standing alone, with a quote of
+/// its kind open, so a closing mark with no quote open ("uh'", "students'") does nothing.
 fn quote_marks(open: &mut [bool; 2], lead: &str, core: &str, trail: &str) -> [bool; 2] {
+    let lead = match lead.strip_suffix(APOSTROPHES) {
+        Some(rest) if ELIDED.contains(&core.to_lowercase().as_str()) => rest,
+        _ => lead,
+    };
     let mut closes = [false; 2];
     for (kind, marks) in QUOTE_KINDS.iter().enumerate() {
         if core.is_empty() {
@@ -497,9 +502,7 @@ fn quote_marks(open: &mut [bool; 2], lead: &str, core: &str, trail: &str) -> [bo
             }
             continue;
         }
-        let elided =
-            kind == 1 && lead.ends_with(marks) && ELIDED.contains(&core.to_lowercase().as_str());
-        if lead.contains(marks) && !elided {
+        if lead.contains(marks) {
             open[kind] = true;
         }
         closes[kind] = open[kind] && trail.contains(marks);
@@ -507,7 +510,11 @@ fn quote_marks(open: &mut [bool; 2], lead: &str, core: &str, trail: &str) -> [bo
     closes
 }
 
-/// Words written with an apostrophe before them for the letters left out, which opens no quote.
+/// The marks that can be an apostrophe, the straight one and the right single quotation mark
+/// typography uses for it. Either can also be a quote mark.
+const APOSTROPHES: [char; 2] = ['\'', '’'];
+
+/// Words written with an apostrophe before them for the letters left out.
 /// They're elisions, and the endings of contractions written apart from their word, as AMI's
 /// transcripts write "we 'll" and "'s move on".
 const ELIDED: [&str; 20] = [
@@ -672,6 +679,28 @@ mod tests {
             ("“the workers’ news” uh goes", "“the workers’ news” goes"),
         ] {
             assert_eq!(english().remove(text), want, "{text}");
+        }
+    }
+
+    #[test]
+    fn an_apostrophe_before_an_elision_opens_no_quote_but_a_quotation_mark_does() {
+        for &word in ELIDED.iter() {
+            for apostrophe in ["'", "’"] {
+                // An elision or a contraction's ending, alone or inside a quote already open.
+                let text = format!("we {apostrophe}{word} um go");
+                assert_eq!(english().remove(&text), format!("we {apostrophe}{word} go"));
+                let quoted = format!("He said “we {apostrophe}{word} um the the idea” twice");
+                assert_eq!(english().remove(&quoted), quoted);
+            }
+            // ‘ and ‹ only open quotes, so a quote that begins with such a word is kept.
+            for (open, close) in [("‘", "’"), ("‹", "›")] {
+                let text = format!("He wrote {open}{word} um the the idea{close} twice");
+                assert_eq!(english().remove(&text), text);
+            }
+            // A straight mark before it is taken for an apostrophe, so such a quote isn't kept.
+            let text = format!("He wrote '{word} um the the idea' twice");
+            let want = format!("He wrote '{word} the idea' twice");
+            assert_eq!(english().remove(&text), want);
         }
     }
 
