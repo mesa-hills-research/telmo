@@ -63,17 +63,19 @@ recordings.
 |---|---:|---:|
 | First tentative word after speech starts, median | 0.77 s | 0.75 s |
 | First tentative word, 90th percentile | 0.97 s | 1.81 s |
-| Final text after speech ends, median | 1.13 s | 1.09 s |
-| Final text, 90th percentile | 1.73 s | 1.69 s |
+| Words settled after speech ends, median | 1.13 s | 1.09 s |
+| Words settled, 90th percentile | 1.73 s | 1.69 s |
 | Tentative words replaced per 100 settled | 46 | 63 |
 | WER streamed | 2.33% | 2.69% |
 | WER offline, on the same utterances | 2.12% | 2.44% |
 | CPU | 1.2 cores | 1.8 cores |
 
-The offline row transcribes each utterance the stream found in one go. Most of the wait for the
-final text is the 600 ms of quiet that ends an utterance. Passes run at least 0.5 s apart by
-default (`StreamConfig::min_interval`). At 1 s apart, Granite's first word comes after 1.29 s
-instead, it replaces 26 tentative words per 100 and uses 0.85 cores, at the same WER.
+The offline row transcribes each utterance the stream found in one go. The words have settled
+when the utterance ends, and most of that wait is the 600 ms of quiet that ends it. A sentence
+end that closes the utterance settles later, with the next utterance's first words, or when the
+stream finishes. Passes run at least 0.5 s apart by default (`StreamConfig::min_interval`). At
+1 s apart, Granite's first word comes after 1.29 s instead, it replaces 26 tentative words per
+100 and uses 0.85 cores, at the same WER.
 
 FLEURS recordings of six or seven test utterances per language gave these word error rates, where
 a single word moves a figure by about a point. Offline here means transcribing the original
