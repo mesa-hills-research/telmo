@@ -54,7 +54,9 @@ word as context, so tentative text never shows a hesitation. A word whose fate d
 next one waits for it, because the last word of a pass never settles, and a word followed only
 by hesitations is the last. When the first copy of a stutter has settled, the second goes
 instead. A sentence end left by a hesitation follows the settled text, unless that ends in a
-comma.
+comma. A pass often hears the settled words again, and a stream drops those, but a word said
+twice ("no, no") keeps both copies. A copy counts as said again when the pass also heard the
+settled word in its own place, or when it starts 240 ms or more after it.
 
 ## Accuracy
 
