@@ -13,7 +13,8 @@
 //! spoken form written as its word settles whole, and words where a spoken form could still be
 //! under way wait. Fillers a list leaves out go from each pass's words before any settle, so
 //! tentative text never shows them. Settled words never change. When the utterance ends, one
-//! last pass settles everything.
+//! last pass settles everything, except a sentence end at its end, which waits for the next
+//! utterance's first words, since a pause can split a sentence.
 //!
 //! [`Stream`] runs it all on a thread of its own. Audio of any sample rate goes in as it comes,
 //! voice activity splits it into utterances, passes run as often as the computer keeps up with,
@@ -633,7 +634,9 @@ pub enum Event {
     Tentative { utterance: u64, text: String },
     /// Words that won't change, to append after the earlier settled text.
     Settled { utterance: u64, text: String },
-    /// The utterance ended. Its speech ended at `speech_end`, and all its text has settled.
+    /// The utterance ended. Its speech ended at `speech_end`, and all its text has settled, except
+    /// a sentence end at its end, which stays tentative text of this utterance until the next
+    /// one's first words settle or the stream finishes.
     UtteranceEnd {
         utterance: u64,
         at: f64,
@@ -684,6 +687,10 @@ pub struct Streamer {
     closing: VecDeque<Active>,
     /// Whether any text has settled, so the next settled text keeps its leading space.
     wrote: bool,
+    /// The sentence end that closed an utterance, held as tentative text until the next
+    /// utterance's first words settle and show whether the sentence goes on, as the utterance's
+    /// number and the mark.
+    held: Option<(u64, char)>,
     /// Utterances started so far.
     started: u64,
     /// The special words new utterances favour.
@@ -708,6 +715,7 @@ impl Streamer {
             active: None,
             closing: VecDeque::new(),
             wrote: false,
+            held: None,
             started: 0,
             words: None,
         }
@@ -878,6 +886,19 @@ impl Streamer {
         if !self.wrote {
             settled = settled.trim_start().to_string();
         }
+        if !settled.is_empty()
+            && let Some(held) = self.held.take()
+        {
+            let (resolved, text) = resolve_held(held, &settled, a.stream.words.as_deref());
+            events.extend(resolved);
+            settled = text;
+        }
+        if out.last
+            && let Some(mark) = settled.chars().last().filter(|c| SENTENCE_END.contains(c))
+        {
+            settled.pop();
+            self.held = Some((a.index, mark));
+        }
         if !settled.is_empty() {
             self.wrote = true;
             events.push(Event::Settled {
@@ -917,6 +938,14 @@ impl Streamer {
             at: decided_at as f64 / SAMPLE_RATE as f64,
             speech_end: speech_end as f64 / SAMPLE_RATE as f64,
         });
+        if let Some((utterance, mark)) = self.held
+            && utterance == a.index
+        {
+            events.push(Event::Tentative {
+                utterance,
+                text: mark.to_string(),
+            });
+        }
         Ok(true)
     }
 
@@ -934,8 +963,102 @@ impl Streamer {
         while let Some(mut a) = self.closing.pop_front() {
             self.finish_utterance(&mut a, PassMode::Final, &mut events)?;
         }
+        if let Some((utterance, mark)) = self.held.take() {
+            events.push(Event::Settled {
+                utterance,
+                text: mark.to_string(),
+            });
+            events.push(Event::Tentative {
+                utterance,
+                text: String::new(),
+            });
+        }
         Ok(events)
     }
+}
+
+/// Marks that end a sentence.
+const SENTENCE_END: [char; 3] = ['.', '?', '!'];
+
+/// The events that settle or drop the sentence end `held` (an utterance's number and its mark)
+/// once the next utterance's first words, `settled`, settle, and those words to settle. The mark
+/// goes when the sentence goes on, and the next words take a capital when they start a new one.
+/// Either way it leaves the held utterance's tentative text.
+fn resolve_held(
+    held: (u64, char),
+    settled: &str,
+    words: Option<&Compiled>,
+) -> (Vec<Event>, String) {
+    let (utterance, mark) = held;
+    let goes_on = sentence_goes_on(settled, words);
+    let mut events = Vec::new();
+    if goes_on != Some(true) {
+        events.push(Event::Settled {
+            utterance,
+            text: mark.to_string(),
+        });
+    }
+    events.push(Event::Tentative {
+        utterance,
+        text: String::new(),
+    });
+    let text = match goes_on {
+        Some(false) => capitalized(settled, words),
+        _ => settled.to_string(),
+    };
+    (events, text)
+}
+
+/// Whether `text`, the first settled words of an utterance after one that ended with a sentence
+/// end, goes on with that sentence (`Some(true)`), starts a new one (`Some(false)`), or is left
+/// as it is (`None`). Granite writes an utterance's first word with a capital even where the
+/// sentence goes on, and sometimes a new sentence's first word without one, so a capital leaves
+/// the text as it is, a lower-case word that joins words (and, of, which) goes on, and another
+/// lower-case word starts a new sentence. A comma first goes on too.
+fn sentence_goes_on(text: &str, words: Option<&Compiled>) -> Option<bool> {
+    let text = text.trim_start();
+    if text.starts_with([',', ';', ':']) {
+        return Some(true);
+    }
+    let first = text.split_whitespace().next()?;
+    let core = first.trim_matches(|c: char| !c.is_alphanumeric());
+    if core.is_empty() || core.starts_with(char::is_uppercase) {
+        return None;
+    }
+    let lower = core.to_lowercase();
+    if words.is_some_and(|w| w.keeps_case(&lower)) {
+        return None;
+    }
+    Some(JOINING.contains(&lower.as_str()))
+}
+
+/// Words that join a sentence's words rather than start one.
+const JOINING: [&str; 33] = [
+    "and", "or", "but", "nor", "yet", "rather", "because", "which", "who", "whom", "whose", "that",
+    "than", "as", "to", "of", "in", "on", "at", "for", "with", "by", "from", "into", "about", "if",
+    "when", "while", "where", "though", "although", "unless", "until",
+];
+
+/// `text` with its first word capitalized, if that's plain lower case and not a special word.
+fn capitalized(text: &str, words: Option<&Compiled>) -> String {
+    let start = text.len() - text.trim_start().len();
+    let rest = &text[start..];
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let word = &rest[..end];
+    let plain = word.chars().all(|c| c.is_ascii_lowercase() || c == '\'')
+        && word.starts_with(|c: char| c.is_ascii_lowercase());
+    if !plain || words.is_some_and(|w| w.keeps_case(word)) {
+        return text.to_string();
+    }
+    let mut chars = word.chars();
+    let first = chars.next().map(|c| c.to_ascii_uppercase());
+    format!(
+        "{}{}{}{}",
+        &text[..start],
+        first.into_iter().collect::<String>(),
+        chars.as_str(),
+        &rest[end..]
+    )
 }
 
 enum Message {
@@ -1201,7 +1324,7 @@ fn remove_fillers(
     before: Option<&str>,
     hyp: Vec<Hyp>,
 ) -> Vec<Hyp> {
-    let Some((fillers, special)) = &words.fillers else {
+    let Some(fillers) = &words.fillers else {
         return hyp;
     };
     fillers.rewrite(
@@ -1210,9 +1333,7 @@ fn remove_fillers(
         |h| h.id,
         before,
         |word, text| {
-            word[0].entry.is_some()
-                || word.iter().any(|h| h.joined)
-                || special.iter().any(|s| s == text)
+            word[0].entry.is_some() || word.iter().any(|h| h.joined) || words.keeps_case(text)
         },
         |word, ids| {
             let (first, last) = (&word[0], &word[word.len() - 1]);
@@ -1890,6 +2011,43 @@ mod tests {
             let out = s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
             // A comma that settled stays, and the sentence end goes with the hesitation.
             assert_eq!(out.tentative, tentative);
+        }
+    }
+
+    #[test]
+    fn a_held_sentence_end_goes_when_the_next_utterance_goes_on_with_the_sentence() {
+        let held = (3, '.');
+        let settled = |events: &[Event]| -> Vec<String> {
+            (events.iter())
+                .filter_map(|e| match e {
+                    Event::Settled { utterance: 3, text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let cleared = Event::Tentative {
+            utterance: 3,
+            text: String::new(),
+        };
+        let mut words = SpecialWords::new();
+        words.add_code_word("kubectl").unwrap();
+        let tok = crate::biasing::tests::tokenizer();
+        let words = Compiled::new(&words, &tok).0;
+        for (next, mark, text) in [
+            // "...speak your mind" then "rather than having to only type."
+            (" rather than", None, " rather than"),
+            (", and also", None, ", and also"),
+            // A new sentence keeps the mark, with a capital its first word may lack.
+            (" detailed design.", Some("."), " Detailed design."),
+            (" i think so.", Some("."), " I think so."),
+            (" The music came.", Some("."), " The music came."),
+            (" kubectl get pods", Some("."), " kubectl get pods"),
+            (" 5 minutes.", Some("."), " 5 minutes."),
+        ] {
+            let (events, out) = resolve_held(held, next, Some(&words));
+            let want: Vec<String> = mark.into_iter().map(String::from).collect();
+            assert_eq!((settled(&events), out.as_str()), (want, text), "{next}");
+            assert!(events.contains(&cleared), "{next}");
         }
     }
 

@@ -648,9 +648,11 @@ pub(crate) struct Compiled {
     pub boost: Boost,
     /// The spoken forms to write as their words after decoding.
     pub spoken: Spoken,
-    /// The fillers to leave out after that, and the first word of each special word and of each
-    /// spoken form's word in lower case, which keep their spelling.
-    pub fillers: Option<(Fillers, Vec<String>)>,
+    /// The fillers to leave out after that.
+    pub fillers: Option<Fillers>,
+    /// The first word of each special word and of each spoken form's word in lower case, which
+    /// keep their spelling.
+    pub keep_case: Vec<String>,
 }
 
 impl Compiled {
@@ -761,7 +763,8 @@ impl Compiled {
                 tokens,
                 boost,
                 spoken,
-                fillers: words.fillers.map(|f| (f, first_words(words))),
+                fillers: words.fillers,
+                keep_case: first_words(words),
             },
             unusable,
         )
@@ -775,7 +778,7 @@ impl Compiled {
     /// `tokens` with the fillers left out, if any are to go. A word's new tokens share its
     /// frames.
     pub fn remove_fillers(&self, tokenizer: &Tokenizer, tokens: Vec<Token>) -> Vec<Token> {
-        let Some((fillers, special)) = &self.fillers else {
+        let Some(fillers) = &self.fillers else {
             return tokens;
         };
         fillers.rewrite(
@@ -783,7 +786,7 @@ impl Compiled {
             tokens,
             |t| t.id,
             None,
-            |_, word| special.iter().any(|s| s == word),
+            |_, word| self.keeps_case(word),
             |word, ids| {
                 let (first, last) = (word[0], word[word.len() - 1]);
                 let frame =
@@ -798,6 +801,14 @@ impl Compiled {
                     .collect()
             },
         )
+    }
+}
+
+impl Compiled {
+    /// Whether `word`, in lower case, is the first word of a special word or of a spoken form's
+    /// word.
+    pub fn keeps_case(&self, word: &str) -> bool {
+        self.keep_case.iter().any(|w| w == word)
     }
 }
 

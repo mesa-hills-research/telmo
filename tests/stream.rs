@@ -247,6 +247,11 @@ fn check_session(var: &str, special: &SpecialWords) {
         offline.len()
     );
     assert_eq!(ends, clips.len(), "one utterance per clip");
+    // A sentence end that closed an utterance waits as tentative text until the next one's
+    // first words settle, and the last one settles when the stream finishes.
+    let held = |e: &&Event| matches!(e, Event::Tentative { text, .. } if [".", "?", "!"].contains(&text.as_str()));
+    assert!(events.iter().any(|e| held(&e)), "no sentence end was held");
+    assert!(text.trim_end().ends_with(['.', '?', '!']), "{text}");
     // The streamed audio carries noise, a round trip through 48 kHz and the quiet around each
     // utterance, so a few words come out differently from the clean clips. A lost or repeated
     // sentence would differ by far more.
