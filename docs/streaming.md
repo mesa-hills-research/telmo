@@ -44,8 +44,9 @@ stream.finish()?;
    words settle, or the stream finishes, since a pause can split a sentence. It goes when they
    start with a comma or a lower-case word that joins words, such as "and", "rather", "of" or
    "which", and stays otherwise. A new sentence's first word gets a capital where Granite wrote
-   it in lower case. On 261 such boundaries in streamed meeting speech (AMI), the text was then
-   right at 79%, against 74% left as it was, and on 148 in LibriSpeech at 93% against 91%.
+   it in lower case. On 261 such boundaries in streamed meeting speech (AMI) and 148 in
+   LibriSpeech, the boundaries the rule was chosen on, the text was then right at 78.9% and
+   93.2%, against 73.6% and 91.2% left as it was.
 
 `Streamer` is the same machinery without the thread, for callers that decide themselves when
 passes run.
