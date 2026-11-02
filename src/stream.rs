@@ -10,8 +10,8 @@
 //!
 //! A word settles once two passes in a row agree on it, together with every word before it, it
 //! ends at least a second before the audio does, and the model has heard a word after it. A
-//! spoken form written as its word settles whole, and words where a spoken form could still be
-//! under way wait. Fillers a list leaves out go from each pass's words before any settle, so
+//! spoken form written as its word settles whole, and words where a spoken form or a special
+//! word could still be under way wait. Fillers a list leaves out go from each pass's words before any settle, so
 //! tentative text never shows them. Settled words never change. When the utterance ends, one
 //! last pass settles everything, except a sentence end at its end, which waits for the next
 //! utterance's first words, since a pause can split a sentence.
@@ -306,8 +306,9 @@ impl UtteranceStream {
         // Fillers go before anything settles, going on from the settled text, so a word whose
         // fate depends on the next one is the last of the pass until that one comes, and what
         // protects a word from going may have settled before it.
+        let settled_context = Context::after(&self.settled);
         let hyp = match self.words.as_ref() {
-            Some(words) => remove_fillers(words, tokenizer, &Context::after(&self.settled), hyp),
+            Some(words) => remove_fillers(words, tokenizer, &settled_context, hyp),
             None => hyp,
         };
         let words = split_words(tokenizer, self.last_settled, &hyp);
@@ -345,13 +346,18 @@ impl UtteranceStream {
             {
                 settle += 1;
             }
-            // Nothing settles from where a spoken form could still be under way, since the
-            // words from the first that can't settle on may still change. A form holds back at
-            // most its own words.
+            // Nothing settles from where a spoken form or a special word could still be under
+            // way, since the words from the first that can't settle on may still change. So a
+            // word that one may still protect from filler removal settles only once it's whole
+            // or can no longer be. A form or word holds back at most its own words.
             let ids: Vec<u32> = heard.iter().map(|h| h.id).collect();
-            while settle > 0 {
+            while settle > 0
+                && let Some(words_list) = self.words.as_deref()
+            {
                 let frontier = hyp[words[settle].start - 1].heard_end;
-                let Some(open) = spoken.open_before(tokenizer, &ids, frontier) else {
+                let Some(open) =
+                    words_list.open_before(tokenizer, &ids, frontier, &settled_context)
+                else {
                     break;
                 };
                 settle = words[..settle]
@@ -1585,8 +1591,14 @@ mod tests {
     /// forms, with the test tokenizer.
     fn stream_with(words: &SpecialWords, frames: usize) -> (UtteranceStream, Tokenizer) {
         let tok = crate::biasing::tests::tokenizer();
-        let compiled = Compiled::new(words, &tok).0;
-        let stream = UtteranceStream {
+        (stream_for(words, &tok, frames), tok)
+    }
+
+    /// The same with tokenizer `tok`.
+    fn stream_for(words: &SpecialWords, tok: &Tokenizer, frames: usize) -> UtteranceStream {
+        let (compiled, rejected) = Compiled::new(words, tok);
+        assert!(rejected.is_empty(), "{rejected:?}");
+        UtteranceStream {
             audio: vec![0.0; frames * FRAME],
             resume: Resume::Frame(0),
             last_settled: None,
@@ -1598,8 +1610,7 @@ mod tests {
             passes: 0,
             words: Some(Arc::new(compiled)),
             timings: Timings::default(),
-        };
-        (stream, tok)
+        }
     }
 
     /// Tokens as (id, frame), each lasting a frame.
@@ -1999,12 +2010,114 @@ mod tests {
         );
     }
 
+    /// The settled text of a stream over `frames` frames with `words`, after two passes that hear
+    /// `first` and a final pass that hears `last`, and the text offline removal gives `last`.
+    fn streamed_and_offline(
+        words: &SpecialWords,
+        tok: &Tokenizer,
+        frames: usize,
+        first: &[(u32, usize)],
+        last: &[(u32, usize)],
+    ) -> (String, String) {
+        let mut s = stream_for(words, tok, frames);
+        let config = PassConfig {
+            settle_margin: Duration::from_millis(320),
+            ..PassConfig::default()
+        };
+        let mut text = String::new();
+        for (heard, mode) in [
+            (first, PassMode::Tentative),
+            (first, PassMode::Tentative),
+            (last, PassMode::Final),
+        ] {
+            text.push_str(&s.settle(tok, window(&s, heard), &config, mode).settled);
+        }
+        let compiled = s.words.clone().unwrap();
+        let offline = remove_fillers(&compiled, tok, &Context::default(), hyps(last).collect());
+        let offline = tok.decode_raw(&offline.iter().map(|h| h.id).collect::<Vec<_>>());
+        (text, offline)
+    }
+
     #[test]
-    fn a_special_spelling_protects_its_words_after_its_start_settles() {
+    fn a_special_spellings_unfinished_start_waits_for_the_rest() {
+        let mut words = fillers();
+        words.add_code_word("New um York city control").unwrap();
+        let tok = crate::biasing::tests::tokenizer();
+        // Two passes hear "New um York city", and the last hears "control" after it.
+        let start = [(42, 0), (11, 3), (13, 3), (79, 3), (43, 6), (44, 10)];
+        let mut whole = start.to_vec();
+        whole.push((5, 18));
+        let (streamed, offline) = streamed_and_offline(&words, &tok, 20, &start, &whole);
+        assert_eq!(offline, " New um York city control");
+        assert_eq!(streamed, offline);
+    }
+
+    #[test]
+    fn a_special_spelling_is_whole_or_not_at_every_settle_frontier() {
+        let tok = crate::biasing::tests::tokenizer();
+        let ids = |word: &str| -> Vec<u32> {
+            match word {
+                "um" => vec![11, 13, 79],
+                "cube" => vec![4],
+                "control" => vec![5],
+                "the" => vec![6],
+                "New" => vec![42],
+                "York" => vec![43],
+                "city" => vec![44],
+                "plus" => vec![71],
+                "sharp" => vec![76],
+                _ => unreachable!("{word}"),
+            }
+        };
+        let base = ["New", "York", "city", "plus", "sharp"];
+        // Five-word spellings with a hesitation at each place, or a listed double at each pair.
+        let mut spellings: Vec<Vec<&str>> = Vec::new();
+        for at in 0..5 {
+            let mut words = base[..4].to_vec();
+            words.insert(at, "um");
+            spellings.push(words);
+        }
+        for at in 0..4 {
+            let mut words = base[..3].to_vec();
+            words.splice(at..at, ["the", "the"]);
+            spellings.push(words);
+        }
+        // A word every 480 ms after "cube", so a copy said again is new speech.
+        let heard = |words: &[&str]| -> Vec<(u32, usize)> {
+            (std::iter::once("cube")
+                .chain(words.iter().copied())
+                .enumerate())
+            .flat_map(|(k, w)| ids(w).into_iter().map(move |id| (id, 6 * k)))
+            .collect()
+        };
+        for spelling in &spellings {
+            let mut words = fillers();
+            words.add_code_word(&spelling.join(" ")).unwrap();
+            // The first passes hear the spelling's first words, so a frontier falls after each of
+            // them, then the last pass hears the rest of it, or another word in its place.
+            for heard_first in 1..=5 {
+                let first = heard(&spelling[..heard_first]);
+                let whole: Vec<&str> = spelling.iter().copied().chain(["cube"]).collect();
+                let mut other = spelling[..heard_first.min(4)].to_vec();
+                other.extend(["control", "cube"]);
+                for (last, complete) in [(heard(&whole), true), (heard(&other), false)] {
+                    let (streamed, offline) = streamed_and_offline(&words, &tok, 50, &first, &last);
+                    let case = format!("{spelling:?} after {heard_first} words, {complete}");
+                    assert_eq!(streamed, offline, "{case}");
+                    let kept = offline.contains(&spelling.join(" "));
+                    assert_eq!(kept, complete, "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_special_spelling_settles_whole_with_its_fillers() {
         let mut words = fillers();
         words.add_code_word("New um").unwrap();
         let (mut s, tok) = stream_with(&words, 10);
-        // "New", "um" on frame 6 and "city" on frame 9. The second pass settles "New" alone.
+        // "New", "um" on frame 6 and "city" on frame 9. Only "New" ends early enough to settle,
+        // and it waits, since "um" may still change.
         let heard = [(42, 0), (11, 6), (13, 6), (79, 6), (44, 9)];
         let config = PassConfig {
             settle_margin: Duration::from_millis(320),
@@ -2012,7 +2125,15 @@ mod tests {
         };
         s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
         let second = s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
-        assert_eq!(second.settled, " New");
+        assert_eq!(second.settled, "");
+        let last = s.settle(&tok, window(&s, &heard), &config, PassMode::Final);
+        assert_eq!(last.settled, " New um city");
+        // A settled "New" with the rest of the word after it keeps "um" too.
+        let (mut s, tok) = stream_with(&words, 10);
+        s.recent = vec![settled(&tok, &[42], 0..1)];
+        s.settled = " New".into();
+        s.resume = Resume::Frame(1);
+        s.last_settled = Some(42);
         let last = s.settle(&tok, window(&s, &heard), &config, PassMode::Final);
         assert_eq!(last.settled, " um city");
     }

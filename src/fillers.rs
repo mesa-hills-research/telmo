@@ -156,6 +156,27 @@ impl Protected {
         covered.split_off(before.len())
     }
 
+    /// The first of `words` from which a spelling could still be under way after the last of
+    /// them, or none. That's a word that starts a spelling which runs on to the last of `words`
+    /// without ending there, so the words after them could still complete it. A spelling that
+    /// began in the text whose `context` this is gives the first word.
+    pub fn open_before(&self, context: &Context, words: &[&str]) -> Option<usize> {
+        if self.spellings.is_empty() || words.is_empty() {
+            return None;
+        }
+        let bare: Vec<String> = (context.tail.iter().cloned())
+            .chain(words.iter().map(|w| bare(w)))
+            .collect();
+        let start = (0..bare.len()).find(|&i| {
+            let rest = &bare[i..];
+            let spellings = self.spellings.get(&bare[i]).into_iter().flatten();
+            spellings
+                .into_iter()
+                .any(|s| s.len() > rest.len() && s.starts_with(rest))
+        })?;
+        Some(start.saturating_sub(context.tail.len()))
+    }
+
     /// Whether `word`, in lower case, is a spelling's first word, which keeps its case.
     pub fn keeps_case(&self, word: &str) -> bool {
         self.spellings.contains_key(word)
@@ -377,7 +398,7 @@ impl Fillers {
 
 /// The token ranges of the words of `ids`, each starting at a token with the word-start
 /// marker, except a first word without it.
-fn words(tokenizer: &Tokenizer, ids: &[u32]) -> Vec<Range<usize>> {
+pub(crate) fn words(tokenizer: &Tokenizer, ids: &[u32]) -> Vec<Range<usize>> {
     let mut spans: Vec<Range<usize>> = Vec::new();
     for (i, &id) in ids.iter().enumerate() {
         match spans.last_mut() {
@@ -637,6 +658,19 @@ mod tests {
         ] {
             assert_eq!(english().remove(text), want, "{text}");
         }
+    }
+
+    #[test]
+    fn a_spelling_under_way_is_found_from_its_first_word() {
+        let protected = Protected::new(["New um York city control"]);
+        let open = |before, words: &[&str]| protected.open_before(&Context::after(before), words);
+        assert_eq!(open("go", &["New", "um", "York"]), Some(0));
+        assert_eq!(open("go", &["to", "new,", "Um"]), Some(1));
+        assert_eq!(open("go New", &["um"]), Some(0));
+        // Whole, or gone another way, it's under way no longer.
+        assert_eq!(open("go", &["New", "um", "York", "city", "control"]), None);
+        assert_eq!(open("go", &["New", "um", "town"]), None);
+        assert_eq!(open("go", &["to", "go"]), None);
     }
 
     #[test]

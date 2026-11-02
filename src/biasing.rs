@@ -778,6 +778,32 @@ impl Compiled {
         self.forms.is_empty() && self.spoken.is_empty() && self.fillers.is_none()
     }
 
+    /// The first token of `ids` before token `frontier` from which a spoken form, an entry's word
+    /// or a special word could still be under way, given that the tokens from `frontier` on may
+    /// still change, or none. A special word may have begun in the settled text whose `context`
+    /// this is, and then it's the first token.
+    pub fn open_before(
+        &self,
+        tokenizer: &Tokenizer,
+        ids: &[u32],
+        frontier: usize,
+        context: &Context,
+    ) -> Option<usize> {
+        let spoken = self.spoken.open_before(tokenizer, ids, frontier);
+        let spans = crate::fillers::words(tokenizer, &ids[..frontier]);
+        let texts: Vec<String> = (spans.iter())
+            .map(|s| {
+                tokenizer
+                    .decode_raw(&ids[s.clone()])
+                    .trim_start()
+                    .to_string()
+            })
+            .collect();
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let special = (self.protected.open_before(context, &texts)).map(|k| spans[k].start);
+        spoken.into_iter().chain(special).min()
+    }
+
     /// `tokens` with the fillers left out, if any are to go. A word's new tokens share its
     /// frames.
     pub fn remove_fillers(&self, tokenizer: &Tokenizer, tokens: Vec<Token>) -> Vec<Token> {
