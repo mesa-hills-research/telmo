@@ -2,6 +2,8 @@
 //! or Parakeet TDT on first use and records prompted speech.
 
 mod cache;
+#[cfg_attr(not(feature = "record"), allow(dead_code))] // Only the microphone feeds it.
+mod capture;
 mod download;
 mod install;
 #[cfg_attr(feature = "record", path = "mic.rs")]

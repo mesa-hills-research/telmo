@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use crate::mic::{self, Mic};
+use crate::capture::{Capture, Refused};
+use crate::mic;
 
 /// One numbered prompt.
 #[derive(Debug, PartialEq)]
@@ -136,21 +137,6 @@ fn wav_path(out_dir: &Path, item: &Item) -> PathBuf {
     out_dir.join(format!("{}.wav", item.stem))
 }
 
-/// Mixes interleaved samples down to one channel, onto the end of `mono`.
-#[cfg_attr(not(feature = "record"), allow(dead_code))] // Only the microphone calls it.
-pub fn downmix(samples: impl Iterator<Item = f32>, channels: usize, mono: &mut Vec<f32>) {
-    let channels = channels.max(1);
-    let (mut sum, mut count) = (0.0, 0);
-    for sample in samples {
-        sum += sample;
-        count += 1;
-        if count == channels {
-            mono.push(sum / channels as f32);
-            (sum, count) = (0.0, 0);
-        }
-    }
-}
-
 /// The index of the device that `pick` names, by its 1-based number, its whole name or a part
 /// of it, ignoring case.
 #[cfg_attr(not(feature = "record"), allow(dead_code))] // Only the microphone calls it.
@@ -257,20 +243,22 @@ fn ask(lines: &Receiver<String>, prompt: &str, allowed: &[Key]) -> Key {
 }
 
 /// Records until a line arrives, showing the time and level. `None` if the input closed.
-fn record_until_enter(mic: &Mic, lines: &Receiver<String>) -> Result<Option<Vec<f32>>, String> {
-    mic.start();
-    mic.level();
+/// A take that lost samples or went through a device failure is refused, even when the line
+/// arrived first.
+fn record_until_enter(
+    capture: &Capture,
+    lines: &Receiver<String>,
+) -> Result<Option<Vec<f32>>, Refused> {
+    capture.start()?;
     let (start, mut peak) = (Instant::now(), 0.0_f32);
     loop {
         match lines.recv_timeout(Duration::from_millis(100)) {
-            Ok(_) => return Ok(Some(mic.stop())),
+            Ok(_) => return capture.stop().map(Some),
             Err(RecvTimeoutError::Disconnected) => return Ok(None),
             Err(RecvTimeoutError::Timeout) => {}
         }
-        if let Some(failure) = mic.failure() {
-            return Err(format!("The microphone stopped ({failure})."));
-        }
-        let level = mic.level();
+        capture.poll()?;
+        let level = capture.level();
         peak = peak.max(level);
         let elapsed = start.elapsed();
         let hint = if elapsed > Duration::from_secs(2) && peak < SILENT {
@@ -359,8 +347,19 @@ pub fn run(prompts: &Path, out_dir: &Path, device: Option<&str>) -> Result<(), S
                 Key::Quit => break 'items,
                 _ => {}
             }
-            let Some(samples) = record_until_enter(&mic, &lines)? else {
-                break 'items;
+            let samples = match record_until_enter(&mic.capture, &lines) {
+                Ok(Some(samples)) => samples,
+                Ok(None) => break 'items,
+                Err(Refused::Failed(reason)) => {
+                    println!();
+                    return Err(format!(
+                        "The microphone stopped ({reason}). The items saved so far are kept."
+                    ));
+                }
+                Err(Refused::Dropped) => {
+                    println!("\nThe computer fell behind and part of the recording is missing.");
+                    continue;
+                }
             };
             let seconds = samples.len() as f64 / f64::from(mic.sample_rate);
             let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
@@ -406,6 +405,7 @@ pub fn run(prompts: &Path, out_dir: &Path, device: Option<&str>) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     const SAMPLE: &str = "\
 # Recording script
@@ -521,16 +521,6 @@ Text with `sets/dictation-seed.txt`.
     }
 
     #[test]
-    fn channels_are_averaged_and_a_partial_frame_is_dropped() {
-        let mut mono = Vec::new();
-        downmix([1.0, 0.0, 0.5, 0.5, 0.25].into_iter(), 2, &mut mono);
-        assert_eq!(mono, [0.5, 0.5]);
-        mono.clear();
-        downmix([0.25, 0.5].into_iter(), 1, &mut mono);
-        assert_eq!(mono, [0.25, 0.5]);
-    }
-
-    #[test]
     fn a_device_is_picked_by_number_or_name() {
         let names: Vec<String> = [
             "default",
@@ -567,6 +557,55 @@ Text with `sets/dictation-seed.txt`.
         assert_eq!(meter(1.0), format!("[{}]", "#".repeat(METER_WIDTH)));
         assert!(meter(0.1).matches('#').count() > meter(0.01).matches('#').count());
         assert_eq!(clock(Duration::from_secs(75)), "1:15");
+    }
+
+    #[test]
+    fn a_stop_that_arrives_with_a_device_failure_keeps_nothing() {
+        let capture = Arc::new(Capture::new());
+        let (send, lines) = mpsc::channel();
+        // The stop line is waiting when the device fails, so the first thing the take
+        // sees is the line.
+        let failing = Arc::clone(&capture);
+        let device = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            failing.push([0.5; 4800].into_iter(), 1);
+            failing.fail("device disconnected".into());
+            send.send(String::new()).unwrap();
+        });
+        let taken = record_until_enter(&capture, &lines);
+        device.join().unwrap();
+        assert_eq!(taken, Err(Refused::Failed("device disconnected".into())));
+        let (send, lines) = mpsc::channel();
+        send.send(String::new()).unwrap();
+        assert_eq!(
+            record_until_enter(&capture, &lines),
+            Err(Refused::Failed("device disconnected".into())),
+            "a device that failed earlier starts no take"
+        );
+    }
+
+    #[test]
+    fn a_stop_ends_a_healthy_take_with_its_audio() {
+        let capture = Arc::new(Capture::new());
+        let (send, lines) = mpsc::channel();
+        let device = {
+            let capture = Arc::clone(&capture);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                capture.push([0.5; 480].into_iter(), 1);
+                send.send(String::new()).unwrap();
+            })
+        };
+        assert_eq!(
+            record_until_enter(&capture, &lines),
+            Ok(Some(vec![0.5; 480]))
+        );
+        device.join().unwrap();
+        assert_eq!(
+            record_until_enter(&capture, &lines),
+            Ok(None),
+            "input closed"
+        );
     }
 
     #[test]
