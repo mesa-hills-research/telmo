@@ -451,7 +451,7 @@ pub(crate) fn normalized_words(text: &str) -> Vec<String> {
 /// The frame of token `k` of `n` written in place of a form whose tokens start at frames
 /// `first` to `last`. The first takes the form's first frame, the last the frame of its last
 /// token, and those between spread evenly over the frames between.
-fn place(first: usize, last: usize, n: usize, k: usize) -> usize {
+pub(crate) fn place(first: usize, last: usize, n: usize, k: usize) -> usize {
     if n == 1 {
         first
     } else {
