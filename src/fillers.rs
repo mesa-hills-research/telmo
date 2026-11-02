@@ -12,8 +12,10 @@
 //!   they're, you're, he's, she's, I've, we've, they've, you've, I'll, we'll, they'll, you'll and
 //!   it'll.
 //!
-//! Every other word stays as written, so "uh-huh", "oh", "very very", "had had", "it it", repeats
-//! of several words, false starts and words such as "like" or "you know" are left alone.
+//! A word with a quote mark of its own stays, as a mention ("I often go “Um, so”"), and so do
+//! both copies when a quote mark or bracket comes between them. Every other word stays as
+//! written, so "uh-huh", "oh", "very very", "had had", "it it", repeats of several words, false
+//! starts and words such as "like" or "you know" are left alone.
 //!
 //! Punctuation on a removed word goes with it, except a sentence end, which moves to the word
 //! before ("We go there um. And then" becomes "We go there. And then"). When the removed word
@@ -45,6 +47,15 @@ const REPEATED: [&str; 35] = [
 ];
 
 const SENTENCE_END: [char; 3] = ['.', '?', '!'];
+
+/// Quote marks. A word with one of its own is quoted, a mention rather than a filler, and one
+/// between two copies keeps both.
+const QUOTES: [char; 14] = [
+    '"', '\'', '“', '”', '„', '‟', '‘', '’', '‚', '‛', '«', '»', '‹', '›',
+];
+
+/// Brackets, which keep both copies when they come between them.
+const BRACKETS: [char; 6] = ['(', ')', '[', ']', '{', '}'];
 
 /// What happens to a word.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,39 +114,50 @@ impl Fillers {
         let parts: Vec<(&str, &str, &str)> = words.iter().map(|w| split(w)).collect();
         let before = before.map(split);
         let mut deleted = vec![false; words.len()];
-        for (i, &(_, core, _)) in parts.iter().enumerate() {
+        for (i, &(lead, core, trail)) in parts.iter().enumerate() {
             let previous = match i {
                 0 => before.map(|b| b.1),
                 _ => Some(parts[i - 1].1),
             };
             deleted[i] = !core.is_empty()
+                && !quoted(lead, trail)
                 && is_hesitation(core, previous)
                 && !special(i, &core.to_lowercase());
         }
-        // The first of two copies goes, or the second when the first can't change.
-        let mut previous =
-            before.map(|(_, core, trail)| (None, core.to_lowercase(), trail.to_string()));
+        // The first of two copies goes, or the second when the first can't change. Each copy
+        // is held with its punctuation after it and whether it's quoted.
+        let mut previous = before.map(|(lead, core, trail)| {
+            (
+                None,
+                core.to_lowercase(),
+                trail.to_string(),
+                quoted(lead, trail),
+            )
+        });
         for (i, &(lead, core, trail)) in parts.iter().enumerate() {
             if deleted[i] {
                 continue;
             }
             let core = core.to_lowercase();
-            if let Some((copy, earlier, between)) = &mut previous
+            if let Some((copy, earlier, between, earlier_quoted)) = &mut previous
                 && !earlier.is_empty()
                 && *earlier == core
                 && REPEATED.contains(&core.as_str())
-                && !format!("{between}{lead}").contains(SENTENCE_END)
+                && !format!("{between}{lead}").contains(|c| {
+                    SENTENCE_END.contains(&c) || QUOTES.contains(&c) || BRACKETS.contains(&c)
+                })
             {
                 match copy {
-                    Some(copy) => deleted[*copy] = true,
-                    None => {
+                    Some(copy) if !*earlier_quoted => deleted[*copy] = true,
+                    None if !quoted(lead, trail) => {
                         deleted[i] = true;
                         between.push_str(trail);
                         continue;
                     }
+                    _ => {}
                 }
             }
-            previous = Some((Some(i), core, trail.to_string()));
+            previous = Some((Some(i), core, trail.to_string(), quoted(lead, trail)));
         }
         self.tidy(before, &parts, &deleted, special)
     }
@@ -317,6 +339,11 @@ fn is_hesitation(word: &str, previous: Option<&str>) -> bool {
     sound && !(lower.starts_with("mm") && previous.is_some_and(is_number))
 }
 
+/// Whether a word with punctuation `lead` before it and `trail` after it is quoted.
+fn quoted(lead: &str, trail: &str) -> bool {
+    lead.contains(QUOTES) || trail.contains(QUOTES)
+}
+
 /// Whether `word` is a number such as 5, 2.5 or 1,000.
 fn is_number(word: &str) -> bool {
     word.ends_with(|c: char| c.is_ascii_digit())
@@ -413,8 +440,52 @@ mod tests {
             "uh-huh, oh, eh, huh, err",
             "Five minutes that was i guess that that's the old message.",
             "when when is",
+            "Also the “the workers’ news goes to the agent” status message",
+            "Say the (the old one) twice",
+            "I often go “Um, so” stuff like that",
+            "He said 'uh' twice",
         ] {
             assert_eq!(english().remove(text), text, "{text}");
+        }
+    }
+
+    #[test]
+    fn removing_words_leaves_no_stray_punctuation() {
+        assert_eq!(
+            english().remove("Thank you, um, you saved"),
+            "Thank you, you saved"
+        );
+        // Every sequence of up to five of these words, whose punctuation sits on the words.
+        let words = [
+            "the", "the,", "The", "um", "um,", "um.", "Um,", "uh?", "so", "so,", "so.", "I,",
+        ];
+        let stray = |text: &str| {
+            let joined: String = text.chars().filter(|c| *c != ' ').collect();
+            [",,", ",.", ",?", "..", ".,", "?.", "?,"]
+                .iter()
+                .any(|s| joined.contains(s))
+                || text.starts_with([',', '.', '?'])
+        };
+        let mut sequence = vec![0usize];
+        while sequence.len() <= 5 {
+            let text: Vec<&str> = sequence.iter().map(|&k| words[k]).collect();
+            let text = text.join(" ");
+            let out = english().remove(&text);
+            assert!(!stray(&out), "{text} became {out}");
+            // The next sequence, counting in base words.len().
+            let mut k = 0;
+            loop {
+                if k == sequence.len() {
+                    sequence.push(0);
+                    break;
+                }
+                sequence[k] += 1;
+                if sequence[k] < words.len() {
+                    break;
+                }
+                sequence[k] = 0;
+                k += 1;
+            }
         }
     }
 
