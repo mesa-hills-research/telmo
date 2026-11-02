@@ -62,9 +62,10 @@ capitals, is refused as a `Duplicate`. Forms count toward `MAX_WORDS` with the w
 `add_spoken` doesn't favour the word itself, which `add` does, so a short word such as `rg` can
 have "rip grep" without being favoured as two letters.
 
-In a stream, the word written for a form settles whole. A word doesn't settle while a form
+In a stream, the word written for a form settles whole, and so does a word of several words
+heard as written, such as "Claude Code". A word doesn't settle while a form or such a word
 starting at or before it still matches up to the words that may still change, so it waits until
-the form completes, stops matching in words that won't change, or the utterance ends. A form
+the match completes, stops in words that won't change, or the utterance ends. A form or word
 holds back at most its own words.
 
 Every occurrence of a form is rewritten, so a form that is also an everyday phrase changes that
