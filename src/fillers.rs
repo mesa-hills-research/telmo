@@ -12,12 +12,13 @@
 //!   they're, you're, he's, she's, I've, we've, they've, you've, I'll, we'll, they'll, you'll and
 //!   it'll.
 //!
-//! A word with a quote mark of its own stays, as a mention ("I often go “Um, so”"), and so do
-//! both copies when a quote mark, bracket or sentence end comes between them, also on a removed
-//! hesitation. Every word of a special word or a spoken form's word stays wherever the whole of
-//! it occurs. Every other word stays as written, so "uh-huh", "oh", "very very", "had had", "it
-//! it", repeats of several words, false starts and words such as "like" or "you know" are left
-//! alone.
+//! A quoted word stays, as a mention ("I often go “Um, so”", "'um'"). That's a word from an
+//! opening quote mark to the closing one of its kind, or with an opening mark of its own, so a
+//! closing mark alone ("uh'") quotes nothing. Both copies stay when a quote mark, bracket or
+//! sentence end comes between them, also on a removed hesitation. Every word of a special word or
+//! a spoken form's word stays wherever the whole of it occurs. Every other word stays as written,
+//! so "uh-huh", "oh", "very very", "had had", "it it", repeats of several words, false starts and
+//! words such as "like" or "you know" are left alone.
 //!
 //! Punctuation on a removed word goes with it, except a sentence end, which moves to the word
 //! before ("We go there um. And then" becomes "We go there. And then"). When the removed word
@@ -51,10 +52,16 @@ const REPEATED: [&str; 35] = [
 
 const SENTENCE_END: [char; 3] = ['.', '?', '!'];
 
-/// Quote marks. A word with one of its own is quoted, a mention rather than a filler, and one
-/// between two copies keeps both.
+/// Quote marks. A quoted word is a mention rather than a filler, and a mark between two copies
+/// keeps both.
 const QUOTES: [char; 14] = [
     '"', '\'', '“', '”', '„', '‟', '‘', '’', '‚', '‛', '«', '»', '‹', '›',
+];
+
+/// The two kinds of quote marks, double and single. A quote closes with a mark of its kind.
+const QUOTE_KINDS: [[char; 7]; 2] = [
+    ['"', '“', '”', '„', '‟', '«', '»'],
+    ['\'', '‘', '’', '‚', '‛', '‹', '›'],
 ];
 
 /// Brackets, which keep both copies when they come between them.
@@ -174,16 +181,15 @@ impl Fillers {
         let parts: Vec<(&str, &str, &str)> = words.iter().map(|w| split(w)).collect();
         let before = before.map(split);
         let kept = protected.words(words);
+        let quoted = quoted(before, &parts);
         let mut deleted = vec![false; words.len()];
-        for (i, &(lead, core, trail)) in parts.iter().enumerate() {
+        for (i, &(_, core, _)) in parts.iter().enumerate() {
             let previous = match i {
                 0 => before.map(|b| b.1),
                 _ => Some(parts[i - 1].1),
             };
-            deleted[i] = !kept[i]
-                && !core.is_empty()
-                && !quoted(lead, trail)
-                && is_hesitation(core, previous);
+            deleted[i] =
+                !kept[i] && !quoted[i] && !core.is_empty() && is_hesitation(core, previous);
         }
         // The first of two copies goes, or the second when the first can't change. The copy
         // before is held with whether it may go, and `between` gathers the punctuation since it,
@@ -197,7 +203,7 @@ impl Fillers {
                 continue;
             }
             let core = core.to_lowercase();
-            let may_go = !kept[i] && !quoted(lead, trail);
+            let may_go = !kept[i] && !quoted[i];
             let apart = format!("{between}{lead}").contains(|c| {
                 SENTENCE_END.contains(&c) || QUOTES.contains(&c) || BRACKETS.contains(&c)
             });
@@ -400,9 +406,42 @@ fn is_hesitation(word: &str, previous: Option<&str>) -> bool {
     sound && !(lower.starts_with("mm") && previous.is_some_and(is_number))
 }
 
-/// Whether a word with punctuation `lead` before it and `trail` after it is quoted.
-fn quoted(lead: &str, trail: &str) -> bool {
-    lead.contains(QUOTES) || trail.contains(QUOTES)
+/// Which of the words split as `parts`, after the word `before` if any, are quoted. A quote runs
+/// from a word with an opening mark before its letters to the first with a closing mark of the
+/// same kind after them, and a mark standing alone closes an open quote or opens one. A quote
+/// that never closes is only its first word's ("'cause"), and a closing mark with no quote open
+/// ("uh'", "students'") quotes nothing.
+fn quoted(before: Option<(&str, &str, &str)>, parts: &[(&str, &str, &str)]) -> Vec<bool> {
+    let mut quoted = vec![false; parts.len()];
+    // Where each kind's open quote began, `Some(None)` for one that began in `before`.
+    let mut open: [Option<Option<usize>>; 2] = [None, None];
+    let words = before.into_iter().map(|b| (None, b));
+    for (i, (lead, core, trail)) in
+        words.chain(parts.iter().copied().enumerate().map(|(i, p)| (Some(i), p)))
+    {
+        for (kind, marks) in QUOTE_KINDS.iter().enumerate() {
+            let (opens, closes) = if core.is_empty() {
+                let mark = lead.contains(marks);
+                (mark && open[kind].is_none(), mark && open[kind].is_some())
+            } else {
+                (lead.contains(marks), trail.contains(marks))
+            };
+            if opens && open[kind].is_none() {
+                open[kind] = Some(i);
+            }
+            // A quote that closes in `before` takes none of the words.
+            if closes
+                && let Some(start) = open[kind].take()
+                && let Some(end) = i
+            {
+                quoted[start.unwrap_or(0)..=end].fill(true);
+            }
+        }
+    }
+    for start in open.into_iter().flatten().flatten() {
+        quoted[start] = true;
+    }
+    quoted
 }
 
 /// Whether `word` is a number such as 5, 2.5 or 1,000.
@@ -523,6 +562,34 @@ mod tests {
         ] {
             assert_eq!(english().remove(text), text, "{text}");
         }
+    }
+
+    #[test]
+    fn a_word_is_quoted_between_an_opening_mark_and_its_closing_one() {
+        for (text, want) in [
+            // A closing mark alone, such as an apostrophe Granite wrote, quotes nothing.
+            ("And uh' the idea", "And the idea"),
+            ("the students' uh results", "the students' results"),
+            // A word with an opening mark of its own, or inside a quote, is a mention.
+            (
+                "I often go “Um, so” when I start",
+                "I often go “Um, so” when I start",
+            ),
+            ("I said 'um' twice", "I said 'um' twice"),
+            ("He said “so um” and um left", "He said “so um” and left"),
+            ("He said “so um” and uh' left", "He said “so um” and left"),
+            ("He said 'um", "He said 'um"),
+            // A quote that never closes is only its first word's, as an elided "'cause", and a
+            // mark of the other kind closes none.
+            ("'cause um I think", "'cause I think"),
+            ("“the workers’ uh news”", "“the workers’ uh news”"),
+            ("“the workers’ news” uh goes", "“the workers’ news” goes"),
+        ] {
+            assert_eq!(english().remove(text), want, "{text}");
+        }
+        // A quote that opened in text that can't change goes on into the words after it.
+        let plan = english().plan(Some("“so"), &["um”", "uh"], &Protected::default());
+        assert_eq!(plan, [Edit::Keep, Edit::Delete]);
     }
 
     #[test]

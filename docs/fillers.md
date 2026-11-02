@@ -38,9 +38,11 @@ think" becomes "So I think"). Other words keep their spelling.
 ## What stays
 
 - "mm" after a number, as millimetres, and a hesitation in capitals (UM, ER), as an acronym.
-- A word with a quote mark of its own, as a mention ("I often go “Um, so”"), and both copies when
-  a quote mark, bracket or sentence end comes between them, also on a removed hesitation ("I um.
-  I think" becomes "I. I think").
+- A quoted word, as a mention ("I often go “Um, so”", "'um'"). That's a word from an opening
+  quote mark to the closing one of its kind, or one with an opening mark of its own. A closing
+  mark alone quotes nothing, so "uh'" goes.
+- Both copies when a quote mark, bracket or sentence end comes between them, also on a removed
+  hesitation ("I um. I think" becomes "I. I think").
 - Every word of a special word or a spoken form's word, wherever the whole of it occurs ("the
   the" given as a name). The first word of each also keeps its case.
 - Backchannels and interjections such as mm-hmm, uh-huh, oh and huh.
