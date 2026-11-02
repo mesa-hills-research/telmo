@@ -39,9 +39,10 @@ think" becomes "So I think"). Other words keep their spelling.
 
 - "mm" after a number, as millimetres, and a hesitation in capitals (UM, ER), as an acronym.
 - A word with a quote mark of its own, as a mention ("I often go “Um, so”"), and both copies when
-  a quote mark or bracket comes between them ("the “the workers’ news” message").
-- Special words and the words of spoken forms, which are never taken for fillers or given a
-  capital.
+  a quote mark, bracket or sentence end comes between them, also on a removed hesitation ("I um.
+  I think" becomes "I. I think").
+- Every word of a special word or a spoken form's word, wherever the whole of it occurs ("the
+  the" given as a name). The first word of each also keeps its case.
 - Backchannels and interjections such as mm-hmm, uh-huh, oh and huh.
 - Doubles of words that can end a clause ("chew it, it breaks", "put them in, in a minute") and
   meant doubles ("had had", "very very", "no no").

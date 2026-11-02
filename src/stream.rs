@@ -1026,7 +1026,7 @@ fn sentence_goes_on(text: &str, words: Option<&Compiled>) -> Option<bool> {
         return None;
     }
     let lower = core.to_lowercase();
-    if words.is_some_and(|w| w.keeps_case(&lower)) {
+    if words.is_some_and(|w| w.protected.keeps_case(&lower)) {
         return None;
     }
     Some(JOINING.contains(&lower.as_str()))
@@ -1047,7 +1047,7 @@ fn capitalized(text: &str, words: Option<&Compiled>) -> String {
     let word = &rest[..end];
     let plain = word.chars().all(|c| c.is_ascii_lowercase() || c == '\'')
         && word.starts_with(|c: char| c.is_ascii_lowercase());
-    if !plain || words.is_some_and(|w| w.keeps_case(word)) {
+    if !plain || words.is_some_and(|w| w.protected.keeps_case(word)) {
         return text.to_string();
     }
     let mut chars = word.chars();
@@ -1332,9 +1332,7 @@ fn remove_fillers(
         hyp,
         |h| h.id,
         before,
-        |word, text| {
-            word[0].entry.is_some() || word.iter().any(|h| h.joined) || words.keeps_case(text)
-        },
+        &words.protected,
         |word, ids| {
             let (first, last) = (&word[0], &word[word.len() - 1]);
             (ids.iter().enumerate())
@@ -1980,6 +1978,21 @@ mod tests {
         assert_eq!(shown[1], "| the");
         assert_eq!(settled, " the city the");
         assert!(shown.iter().all(|s| !s.contains("uh")), "{shown:?}");
+    }
+
+    #[test]
+    fn a_spoken_forms_word_of_list_words_stays_whole() {
+        let mut words = fillers();
+        words.add_spoken("the the", "cube control").unwrap();
+        let (mut s, tok) = stream_with(&words, 50);
+        let heard = [(4, 1), (5, 2), (44, 30)];
+        let out = s.settle(
+            &tok,
+            window(&s, &heard),
+            &PassConfig::default(),
+            PassMode::Tentative,
+        );
+        assert_eq!(out.tentative, " the the city");
     }
 
     #[test]

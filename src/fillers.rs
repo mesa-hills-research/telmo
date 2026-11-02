@@ -13,15 +13,18 @@
 //!   it'll.
 //!
 //! A word with a quote mark of its own stays, as a mention ("I often go “Um, so”"), and so do
-//! both copies when a quote mark or bracket comes between them. Every other word stays as
-//! written, so "uh-huh", "oh", "very very", "had had", "it it", repeats of several words, false
-//! starts and words such as "like" or "you know" are left alone.
+//! both copies when a quote mark, bracket or sentence end comes between them, also on a removed
+//! hesitation. Every word of a special word or a spoken form's word stays wherever the whole of
+//! it occurs. Every other word stays as written, so "uh-huh", "oh", "very very", "had had", "it
+//! it", repeats of several words, false starts and words such as "like" or "you know" are left
+//! alone.
 //!
 //! Punctuation on a removed word goes with it, except a sentence end, which moves to the word
 //! before ("We go there um. And then" becomes "We go there. And then"). When the removed word
 //! had a capital at the start of a sentence, the next word takes it if it's in lower case and
 //! isn't a special word ("Um, so I think" becomes "So I think").
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::tokenizer::Tokenizer;
@@ -68,6 +71,64 @@ pub(crate) enum Edit {
     Leave(char),
 }
 
+/// The spellings a transcript keeps as they are, the special words and spoken forms' words. A
+/// word goes nowhere where its whole spelling occurs, and the first word of a spelling keeps its
+/// case anywhere.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Protected {
+    /// Each spelling's words in lower case, by its first word.
+    spellings: HashMap<String, Vec<Vec<String>>>,
+}
+
+impl Protected {
+    pub fn new<'a>(spellings: impl IntoIterator<Item = &'a str>) -> Protected {
+        let mut protected = Protected::default();
+        for spelling in spellings {
+            let words: Vec<String> = spelling.split_whitespace().map(bare).collect();
+            if let Some(first) = words.first() {
+                let alike = protected.spellings.entry(first.clone()).or_default();
+                if !alike.contains(&words) {
+                    alike.push(words);
+                }
+            }
+        }
+        protected
+    }
+
+    /// Which of `words` are part of a spelling that occurs whole among them.
+    pub fn words(&self, words: &[&str]) -> Vec<bool> {
+        let mut covered = vec![false; words.len()];
+        if self.spellings.is_empty() {
+            return covered;
+        }
+        let bare: Vec<String> = words.iter().map(|w| bare(w)).collect();
+        for i in 0..words.len() {
+            for spelling in self.spellings.get(&bare[i]).into_iter().flatten() {
+                if bare[i..].starts_with(spelling) {
+                    covered[i..i + spelling.len()].fill(true);
+                }
+            }
+        }
+        covered
+    }
+
+    /// Whether `word`, in lower case, is a spelling's first word, which keeps its case.
+    pub fn keeps_case(&self, word: &str) -> bool {
+        self.spellings.contains_key(word)
+    }
+}
+
+/// `word` in lower case without the punctuation, quotes or brackets at its ends.
+fn bare(word: &str) -> String {
+    let edge = |c: char| {
+        SENTENCE_END.contains(&c)
+            || QUOTES.contains(&c)
+            || BRACKETS.contains(&c)
+            || [',', ';', ':'].contains(&c)
+    };
+    word.trim_matches(edge).to_lowercase()
+}
+
 impl Fillers {
     /// The fillers of a language given as an ISO 639-1 code, with or without a region (`en`,
     /// `en-GB`), or none if Telmo has no rules for it.
@@ -81,7 +142,7 @@ impl Fillers {
     /// `text` without these fillers, its words separated by single spaces.
     pub fn remove(&self, text: &str) -> String {
         let words: Vec<&str> = text.split_whitespace().collect();
-        let edits = self.plan(None, &words, &|_, _| false);
+        let edits = self.plan(None, &words, &Protected::default());
         let mut out = String::new();
         for (word, edit) in words.iter().zip(&edits) {
             let word = match edit {
@@ -102,64 +163,65 @@ impl Fillers {
     }
 
     /// What happens to each of `words`, which follow the word `before` of a text that can't
-    /// change, if any. `special(i, word)` says whether word `i`, given in lower case, keeps its
-    /// spelling, which keeps it from being taken for a hesitation or given a capital.
+    /// change, if any. Words of a `protected` spelling stay as they are.
     pub(crate) fn plan(
         &self,
         before: Option<&str>,
         words: &[&str],
-        special: &dyn Fn(usize, &str) -> bool,
+        protected: &Protected,
     ) -> Vec<Edit> {
         let Language::English = self.language;
         let parts: Vec<(&str, &str, &str)> = words.iter().map(|w| split(w)).collect();
         let before = before.map(split);
+        let kept = protected.words(words);
         let mut deleted = vec![false; words.len()];
         for (i, &(lead, core, trail)) in parts.iter().enumerate() {
             let previous = match i {
                 0 => before.map(|b| b.1),
                 _ => Some(parts[i - 1].1),
             };
-            deleted[i] = !core.is_empty()
+            deleted[i] = !kept[i]
+                && !core.is_empty()
                 && !quoted(lead, trail)
-                && is_hesitation(core, previous)
-                && !special(i, &core.to_lowercase());
+                && is_hesitation(core, previous);
         }
-        // The first of two copies goes, or the second when the first can't change. Each copy
-        // is held with its punctuation after it and whether it's quoted.
-        let mut previous = before.map(|(lead, core, trail)| {
-            (
-                None,
-                core.to_lowercase(),
-                trail.to_string(),
-                quoted(lead, trail),
-            )
-        });
+        // The first of two copies goes, or the second when the first can't change. The copy
+        // before is held with whether it may go, and `between` gathers the punctuation since it,
+        // that of removed hesitations included.
+        let mut previous = before.map(|(_, core, _)| (None, core.to_lowercase(), false));
+        let mut between = before.map_or(String::new(), |b| b.2.to_string());
         for (i, &(lead, core, trail)) in parts.iter().enumerate() {
             if deleted[i] {
+                between.push_str(lead);
+                between.push_str(trail);
                 continue;
             }
             let core = core.to_lowercase();
-            if let Some((copy, earlier, between, earlier_quoted)) = &mut previous
+            let may_go = !kept[i] && !quoted(lead, trail);
+            let apart = format!("{between}{lead}").contains(|c| {
+                SENTENCE_END.contains(&c) || QUOTES.contains(&c) || BRACKETS.contains(&c)
+            });
+            if let Some((copy, earlier, earlier_may_go)) = &previous
                 && !earlier.is_empty()
                 && *earlier == core
                 && REPEATED.contains(&core.as_str())
-                && !format!("{between}{lead}").contains(|c| {
-                    SENTENCE_END.contains(&c) || QUOTES.contains(&c) || BRACKETS.contains(&c)
-                })
+                && !apart
             {
                 match copy {
-                    Some(copy) if !*earlier_quoted => deleted[*copy] = true,
-                    None if !quoted(lead, trail) => {
+                    Some(copy) if *earlier_may_go => deleted[*copy] = true,
+                    None if may_go => {
                         deleted[i] = true;
+                        between.push_str(lead);
                         between.push_str(trail);
                         continue;
                     }
                     _ => {}
                 }
             }
-            previous = Some((Some(i), core, trail.to_string(), quoted(lead, trail)));
+            previous = Some((Some(i), core, may_go));
+            between = trail.to_string();
         }
-        self.tidy(before, &parts, &deleted, special)
+        self.tidy(before, &parts, &deleted, &kept, protected)
     }
 
     /// The edits that delete `deleted`, with punctuation and capitals as the module describes.
@@ -168,7 +230,8 @@ impl Fillers {
         before: Option<(&str, &str, &str)>,
         parts: &[(&str, &str, &str)],
         deleted: &[bool],
-        special: &dyn Fn(usize, &str) -> bool,
+        kept: &[bool],
+        protected: &Protected,
     ) -> Vec<Edit> {
         let mut edits = vec![Edit::Keep; parts.len()];
         // The last word kept, as written now, and whether it's the word before, which can't
@@ -181,8 +244,8 @@ impl Fillers {
             if deleted[i] {
                 edits[i] = Edit::Delete;
                 capital |= sentence_start && core.starts_with(char::is_uppercase);
-                let end = trail.trim_end_matches([',', ';', ':']);
-                if let Some(mark) = end.chars().last().filter(|_| end.contains(SENTENCE_END)) {
+                // Only the sentence end itself moves, not a bracket or quote around it.
+                if let Some(mark) = trail.chars().rev().find(|c| SENTENCE_END.contains(c)) {
                     if let Some((index, lead, core, trail)) = &mut last
                         && !trail.contains(SENTENCE_END)
                     {
@@ -205,7 +268,7 @@ impl Fillers {
                 continue;
             }
             let mut core = core.to_string();
-            if capital && is_plain_lower(&core) && !special(i, &core) {
+            if capital && is_plain_lower(&core) && !kept[i] && !protected.keeps_case(&core) {
                 core = capitalized(&core);
                 edits[i] = Edit::Change(format!("{lead}{core}{trail}"));
             }
@@ -218,15 +281,15 @@ impl Fillers {
 
     /// The edits of `tokens`, whose ids `id` gives, with the words that go left out and the
     /// words that change spelled anew by `respell` from the word's tokens and its new ids.
-    /// `before` is the word of a text that can't change before them, and `special` says
-    /// whether a word's tokens keep their spelling.
+    /// `before` is the word of a text that can't change before them, and words of a `protected`
+    /// spelling stay as they are.
     pub(crate) fn rewrite<T>(
         &self,
         tokenizer: &Tokenizer,
         tokens: Vec<T>,
         id: impl Fn(&T) -> u32,
         before: Option<&str>,
-        special: impl Fn(&[T], &str) -> bool,
+        protected: &Protected,
         respell: impl Fn(&[T], Vec<u32>) -> Vec<T>,
     ) -> Vec<T>
     where
@@ -244,9 +307,7 @@ impl Fillers {
             })
             .collect();
         let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let edits = self.plan(before, &texts, &|i, word| {
-            special(&tokens[spans[i].clone()], word)
-        });
+        let edits = self.plan(before, &texts, protected);
         if edits.iter().all(|e| *e == Edit::Keep) {
             return tokens;
         }
@@ -400,6 +461,13 @@ mod tests {
             ("That's the plan. Um.", "That's the plan."),
             ("We go there um. And then", "We go there. And then"),
             ("We go there, um. And then", "We go there. And then"),
+            // A removed hesitation's sentence end or bracket still keeps both copies, and only
+            // a sentence end moves.
+            ("I um. I think", "I. I think"),
+            ("the uh. the", "the. the"),
+            ("the (um) the idea", "the the idea"),
+            ("the um) the idea", "the the idea"),
+            ("We go there (um.) Next", "We go there. Next"),
             (
                 "Then uh we see you in about uh.",
                 "Then we see you in about.",
@@ -455,16 +523,18 @@ mod tests {
             english().remove("Thank you, um, you saved"),
             "Thank you, you saved"
         );
-        // Every sequence of up to five of these words, whose punctuation sits on the words.
+        // Every sequence of up to five of these words, whose punctuation sits on the words, and
+        // brackets around hesitations.
         let words = [
-            "the", "the,", "The", "um", "um,", "um.", "Um,", "uh?", "so", "so,", "so.", "I,",
+            "the", "the,", "The", "um", "um,", "um.", "Um,", "uh?", "(um.)", "(uh)", "so", "so,",
+            "so.", "I,",
         ];
         let stray = |text: &str| {
             let joined: String = text.chars().filter(|c| *c != ' ').collect();
-            [",,", ",.", ",?", "..", ".,", "?.", "?,"]
-                .iter()
-                .any(|s| joined.contains(s))
-                || text.starts_with([',', '.', '?'])
+            let pairs = [
+                ",,", ",.", ",?", "..", ".,", "?.", "?,", "()", "(.", ".)", "(,",
+            ];
+            pairs.iter().any(|s| joined.contains(s)) || text.starts_with([',', '.', '?', ')'])
         };
         let mut sequence = vec![0usize];
         while sequence.len() <= 5 {
@@ -492,17 +562,58 @@ mod tests {
     #[test]
     fn a_special_word_keeps_its_spelling() {
         let words = ["Uh,", "kubectl", "get", "pods"];
-        let special = |_: usize, word: &str| word == "kubectl";
-        let edits = english().plan(None, &words, &special);
+        let edits = english().plan(None, &words, &Protected::new(["kubectl"]));
         assert_eq!(edits, [Edit::Delete, Edit::Keep, Edit::Keep, Edit::Keep]);
         let words = ["Hmm"];
-        let special = |_: usize, word: &str| word == "hmm";
-        assert_eq!(english().plan(None, &words, &special), [Edit::Keep]);
+        assert_eq!(
+            english().plan(None, &words, &Protected::new(["Hmm"])),
+            [Edit::Keep]
+        );
+    }
+
+    #[test]
+    fn a_configured_spelling_stays_whole_wherever_it_occurs() {
+        let text = |text: &str, spellings: &[&str]| {
+            let words: Vec<&str> = text.split_whitespace().collect();
+            let protected = Protected::new(spellings.iter().copied());
+            let edits = english().plan(None, &words, &protected);
+            let kept: Vec<String> = (words.iter().zip(&edits))
+                .filter_map(|(w, e)| match e {
+                    Edit::Keep => Some(w.to_string()),
+                    Edit::Change(c) => Some(c.clone()),
+                    _ => None,
+                })
+                .collect();
+            kept.join(" ")
+        };
+        // A name with a hesitation or a doubled word in it stays whole.
+        assert_eq!(
+            text("ask New um about it", &["New um"]),
+            "ask New um about it"
+        );
+        assert_eq!(
+            text("read the the today", &["the the"]),
+            "read the the today"
+        );
+        assert_eq!(
+            text("read the the, today", &["the the"]),
+            "read the the, today"
+        );
+        // Elsewhere its words are words like any other.
+        assert_eq!(
+            text("um, ask New about um it", &["New um"]),
+            "ask New about it"
+        );
+        assert_eq!(
+            text("read the the book", &["the the band"]),
+            "read the book"
+        );
     }
 
     #[test]
     fn words_after_text_that_cant_change() {
-        let plan = |before, words: &[&str]| english().plan(Some(before), words, &|_, _| false);
+        let plan =
+            |before, words: &[&str]| english().plan(Some(before), words, &Protected::default());
         // The earlier copy has settled, so the later one goes.
         assert_eq!(plan("the", &["the", "idea"]), [Edit::Delete, Edit::Keep]);
         assert_eq!(
@@ -519,6 +630,10 @@ mod tests {
         assert_eq!(
             plan("there.", &["Um,", "so"]),
             [Edit::Delete, Edit::Change("So".into())]
+        );
+        assert_eq!(
+            plan("I", &["um.", "I", "think"]),
+            [Edit::Leave('.'), Edit::Keep, Edit::Keep]
         );
         // "mm" after a settled number.
         assert_eq!(plan("5", &["mm"]), [Edit::Keep]);

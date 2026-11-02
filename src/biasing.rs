@@ -25,7 +25,7 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use crate::error::{Error, Result};
-use crate::fillers::Fillers;
+use crate::fillers::{Fillers, Protected};
 use crate::parakeet::Token;
 use crate::tokenizer::Tokenizer;
 
@@ -650,9 +650,8 @@ pub(crate) struct Compiled {
     pub spoken: Spoken,
     /// The fillers to leave out after that.
     pub fillers: Option<Fillers>,
-    /// The first word of each special word and of each spoken form's word in lower case, which
-    /// keep their spelling.
-    pub keep_case: Vec<String>,
+    /// The special words and spoken forms' words, which keep their spelling.
+    pub protected: Protected,
 }
 
 impl Compiled {
@@ -764,7 +763,11 @@ impl Compiled {
                 boost,
                 spoken,
                 fillers: words.fillers,
-                keep_case: first_words(words),
+                protected: Protected::new(
+                    words
+                        .words()
+                        .chain(words.spoken().map(|(written, _)| written)),
+                ),
             },
             unusable,
         )
@@ -786,7 +789,7 @@ impl Compiled {
             tokens,
             |t| t.id,
             None,
-            |_, word| self.keeps_case(word),
+            &self.protected,
             |word, ids| {
                 let (first, last) = (word[0], word[word.len() - 1]);
                 let frame =
@@ -802,24 +805,6 @@ impl Compiled {
             },
         )
     }
-}
-
-impl Compiled {
-    /// Whether `word`, in lower case, is the first word of a special word or of a spoken form's
-    /// word.
-    pub fn keeps_case(&self, word: &str) -> bool {
-        self.keep_case.iter().any(|w| w == word)
-    }
-}
-
-/// The first word of each special word and of each spoken form's word, in lower case.
-fn first_words(words: &SpecialWords) -> Vec<String> {
-    let all = words
-        .words()
-        .chain(words.spoken().map(|(written, _)| written));
-    all.filter_map(|w| w.split_whitespace().next())
-        .map(str::to_lowercase)
-        .collect()
 }
 
 /// `spelling`'s tokens, if the model's vocabulary spells it in at most
@@ -936,6 +921,26 @@ pub(crate) mod tests {
         // Without fillers to remove, the transcript stays as decoded.
         let (c, _) = Compiled::new(&SpecialWords::new(), &tok);
         assert_eq!(c.remove_fillers(&tok, heard.clone()), heard);
+    }
+
+    #[test]
+    fn a_spoken_forms_word_stays_whole_when_fillers_go() {
+        let tok = tokenizer();
+        let mut words = SpecialWords::new();
+        words.set_fillers(Fillers::for_language("en"));
+        words.add_spoken("New um", "cube control").unwrap();
+        let (c, _) = Compiled::new(&words, &tok);
+        let tokens: Vec<Token> = (tok.encode("cube control").into_iter().enumerate())
+            .map(|(i, id)| Token {
+                id,
+                frame: i as u32,
+                duration: 1,
+            })
+            .collect();
+        let written = c.spoken.rewrite(&tok, tokens);
+        let out = c.remove_fillers(&tok, written);
+        let ids: Vec<u32> = out.iter().map(|t| t.id).collect();
+        assert_eq!(tok.decode(&ids), "New um");
     }
 
     #[test]
