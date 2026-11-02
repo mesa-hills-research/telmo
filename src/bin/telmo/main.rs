@@ -1,9 +1,13 @@
-//! The `telmo` command, which transcribes WAV files, packs models and downloads Granite Speech
-//! or Parakeet TDT on first use.
+//! The `telmo` command, which transcribes WAV files, packs models, downloads Granite Speech
+//! or Parakeet TDT on first use and records prompted speech.
 
 mod cache;
 mod download;
 mod install;
+#[cfg_attr(feature = "record", path = "mic.rs")]
+#[cfg_attr(not(feature = "record"), path = "no_mic.rs")]
+mod mic;
+mod record;
 mod sha256;
 
 use std::path::{Path, PathBuf};
@@ -24,6 +28,8 @@ Usage
   telmo transcribe [OPTIONS] FILE.wav...
   telmo pack MODEL OUT.pack [--precision P]
   telmo models
+  telmo record [--device D] PROMPTS OUT_DIR
+  telmo record --device list
   telmo help
 
 Commands
@@ -31,6 +37,10 @@ Commands
                and the timings on stderr
   pack         Converts a model into a pack, which loads in milliseconds
   models       Lists the installed models and where they are
+  record       Asks for each numbered item of PROMPTS in turn and saves it as a
+               WAV file in OUT_DIR, named by its number, such as 07.wav. Run it
+               again to continue with the items that have no file. Needs the
+               record feature (cargo install telmo --features record)
 
 Options
   --model M        granite (the default), parakeet, or the path of a pack, a
@@ -42,6 +52,8 @@ Options
                    isn't a pack yet (default int8 for Granite and q8_0 for
                    Parakeet)
   --yes            Downloads a missing model without asking
+  --device D       The input to record from, as a number or part of a name that
+                   --device list shows (default the system's input)
 
 Granite and Parakeet download on first use, after asking, into the cache
 directory that telmo models shows. Downloads use the proxy environment
@@ -60,6 +72,12 @@ enum Command {
         precision: Option<Precision>,
     },
     Models,
+    Record {
+        prompts: PathBuf,
+        out_dir: PathBuf,
+        device: Option<String>,
+    },
+    Devices,
     Help,
 }
 
@@ -70,6 +88,7 @@ struct Transcribe {
     isa: Option<Isa>,
     precision: Option<Precision>,
     yes: bool,
+    device: Option<String>,
     files: Vec<PathBuf>,
 }
 
@@ -96,6 +115,12 @@ fn main() -> ExitCode {
             precision,
         } => pack(&model, &out, precision),
         Command::Models => cache::dir().map(|dir| print!("{}", install::list(&dir))),
+        Command::Record {
+            prompts,
+            out_dir,
+            device,
+        } => record::run(&prompts, &out_dir, device.as_deref()),
+        Command::Devices => record::list_devices(),
         Command::Help => {
             print!("{HELP}");
             Ok(())
@@ -117,7 +142,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
     let Some((command, rest)) = args.split_first() else {
         return Ok(Command::Help);
     };
-    if !["transcribe", "pack", "models", "help"].contains(&command.as_str()) {
+    if !["transcribe", "pack", "models", "record", "help"].contains(&command.as_str()) {
         return Err(format!("Unknown command {command}."));
     }
     let default_model = ModelArg::Known(install::default_model());
@@ -127,6 +152,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
         isa: None,
         precision: None,
         yes: false,
+        device: None,
         files: Vec::new(),
     };
     let mut rest = rest.iter();
@@ -155,6 +181,10 @@ fn parse(args: &[String]) -> Result<Command, String> {
                 transcribe.precision = Some(Precision::from_name(value(ERROR)?).ok_or(ERROR)?);
             }
             "--yes" => transcribe.yes = true,
+            "--device" => {
+                const ERROR: &str = "--device takes list, a number or part of a device name.";
+                transcribe.device = Some(value(ERROR)?.clone());
+            }
             option if option.starts_with('-') => {
                 return Err(format!("Unknown option {option}."));
             }
@@ -168,6 +198,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
             ("--isa", transcribe.isa.is_some()),
             ("--precision", transcribe.precision.is_some()),
             ("--yes", transcribe.yes),
+            ("--device", transcribe.device.is_some()),
         ];
         match given
             .iter()
@@ -181,7 +212,10 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "transcribe" if transcribe.files.is_empty() => {
             Err("transcribe takes one or more WAV files.".into())
         }
-        "transcribe" => Ok(Command::Transcribe(transcribe)),
+        "transcribe" => {
+            only(&["--model", "--threads", "--isa", "--precision", "--yes"])?;
+            Ok(Command::Transcribe(transcribe))
+        }
         "pack" => {
             only(&["--precision"])?;
             match <[PathBuf; 2]>::try_from(transcribe.files) {
@@ -198,6 +232,20 @@ fn parse(args: &[String]) -> Result<Command, String> {
             match transcribe.files.first() {
                 Some(arg) => Err(format!("models doesn't take {}.", arg.display())),
                 None => Ok(Command::Models),
+            }
+        }
+        "record" => {
+            only(&["--device"])?;
+            if transcribe.device.as_deref() == Some("list") && transcribe.files.is_empty() {
+                return Ok(Command::Devices);
+            }
+            match <[PathBuf; 2]>::try_from(transcribe.files) {
+                Ok([prompts, out_dir]) => Ok(Command::Record {
+                    prompts,
+                    out_dir,
+                    device: transcribe.device,
+                }),
+                Err(_) => Err("record takes a prompts file and a folder to write.".into()),
             }
         }
         _ => Ok(Command::Help),
@@ -348,6 +396,7 @@ mod tests {
                 isa: None,
                 precision: None,
                 yes: false,
+                device: None,
                 files: vec!["a.wav".into(), "b.wav".into()],
             }))
         );
@@ -361,6 +410,7 @@ mod tests {
                 isa: Some(Isa::Scalar),
                 precision: Some(Precision::F16),
                 yes: true,
+                device: None,
                 files: vec!["a.wav".into()],
             }))
         );
@@ -446,9 +496,52 @@ mod tests {
     }
 
     #[test]
+    fn record_takes_prompts_a_folder_and_a_device() {
+        assert_eq!(
+            parse("record prompts.md out"),
+            Ok(Command::Record {
+                prompts: "prompts.md".into(),
+                out_dir: "out".into(),
+                device: None,
+            })
+        );
+        assert_eq!(
+            parse("record --device usb prompts.md out"),
+            Ok(Command::Record {
+                prompts: "prompts.md".into(),
+                out_dir: "out".into(),
+                device: Some("usb".into()),
+            })
+        );
+        assert_eq!(parse("record --device list"), Ok(Command::Devices));
+        let error = "record takes a prompts file and a folder to write.";
+        assert_eq!(parse("record"), Err(error.into()));
+        assert_eq!(parse("record prompts.md"), Err(error.into()));
+        assert_eq!(
+            parse("record a b --device"),
+            Err("--device takes list, a number or part of a device name.".into())
+        );
+        assert_eq!(
+            parse("record a b --yes"),
+            Err("record doesn't take --yes.".into())
+        );
+        assert_eq!(
+            parse("transcribe a.wav --device 2"),
+            Err("transcribe doesn't take --device.".into())
+        );
+    }
+
+    #[test]
     fn help_fits_80_columns_and_names_every_option() {
         assert!(HELP.lines().all(|l| l.len() <= 80));
-        for option in ["--model", "--threads", "--isa", "--precision", "--yes"] {
+        for option in [
+            "--model",
+            "--threads",
+            "--isa",
+            "--precision",
+            "--yes",
+            "--device",
+        ] {
             assert!(HELP.contains(&format!("\n  {option} ")), "{option}");
         }
     }
