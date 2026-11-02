@@ -27,7 +27,7 @@ use std::fmt;
 use crate::error::{Error, Result};
 use crate::tokenizer::Tokenizer;
 
-pub(crate) use spoken::{EntryId, Spoken, normalized_words};
+pub(crate) use spoken::{Entries, Spoken, Unit, normalized_words};
 pub(crate) use spotting::{score_row, spot};
 
 /// How strongly the decoders favour special words. The defaults were tuned on LibriSpeech.

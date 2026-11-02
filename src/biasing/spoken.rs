@@ -3,33 +3,42 @@
 //! the tokens of its word ("Nginx") on the same frames, so the transcript's text stays the
 //! decoding of its tokens.
 
-use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::parakeet::Token;
 use crate::tokenizer::Tokenizer;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct Node {
     /// (byte, node), sorted by byte.
     children: Vec<(u8, u32)>,
-    /// The entry a form ending here stands for.
-    entry: Option<EntryId>,
+    /// The entry a spoken form ending here stands for.
+    form: Option<EntryId>,
+    /// The entries whose word ends here, by their place in `alike`.
+    written: Option<u32>,
 }
 
 /// An entry of [`Spoken`], a word as written with its spoken forms, by its place in the list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EntryId(u32);
 
-/// Spoken forms in a tree of their bytes with ASCII letters in lower case, and the words they
-/// stand for.
+/// The entries a stretch of a transcript stands for. That's one, or for a word heard as written
+/// in other capitals than any of the entries whose words differ only in case, each of those.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Entries {
+    One(EntryId),
+    Alike(u32),
+}
+
+/// Spoken forms and the words they stand for, in a tree of their bytes with ASCII letters in
+/// lower case.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Spoken {
     /// The tree, empty without forms. The root is node 0.
     nodes: Vec<Node>,
     entries: Vec<Entry>,
-    /// The entries by their word with ASCII letters in lower case, in the order they were added.
-    by_word: HashMap<String, Vec<EntryId>>,
+    /// Entries whose words differ only in case, in the order they were added.
+    alike: Vec<Vec<EntryId>>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,21 +59,71 @@ pub(crate) struct Replacement {
     /// The tokens of what follows the form in its last token, written after the word, such as
     /// the period of a token "5." where the form ends in "5".
     pub rest: Vec<u32>,
+    /// The form's length in bytes.
+    pub len: usize,
+}
+
+/// An entry's spoken form or word found in a transcript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Unit {
+    /// A spoken form, written as its entry's word.
+    Form(Replacement),
+    /// An entry's word heard as written, which stays as heard.
+    Written {
+        heard: Range<usize>,
+        entries: Entries,
+        /// The word's length in bytes.
+        len: usize,
+    },
+}
+
+impl Unit {
+    /// The tokens it takes.
+    pub fn heard(&self) -> Range<usize> {
+        match self {
+            Unit::Form(r) => r.heard.clone(),
+            Unit::Written { heard, .. } => heard.clone(),
+        }
+    }
+
+    pub fn entries(&self) -> Entries {
+        match self {
+            Unit::Form(r) => Entries::One(r.entry),
+            Unit::Written { entries, .. } => *entries,
+        }
+    }
+
+    /// The length in bytes of the form or word as heard.
+    pub fn len(&self) -> usize {
+        match self {
+            Unit::Form(r) => r.len,
+            Unit::Written { len, .. } => *len,
+        }
+    }
 }
 
 impl Spoken {
     /// Adds an entry for the word `word`, with tokens `tokens`, unless it has one already, and
     /// returns it for [`Spoken::insert`].
     pub fn add_word(&mut self, word: &str, tokens: Vec<u32>) -> EntryId {
-        let alike = self.by_word.entry(word.to_ascii_lowercase()).or_default();
-        if let Some(&id) = alike
+        let node = self.node_for(word);
+        let group = match self.nodes[node].written {
+            Some(group) => group as usize,
+            None => {
+                self.alike.push(Vec::new());
+                self.nodes[node].written = Some(self.alike.len() as u32 - 1);
+                self.alike.len() - 1
+            }
+        };
+        let entries = &self.entries;
+        if let Some(&id) = self.alike[group]
             .iter()
-            .find(|id| self.entries[id.0 as usize].word == word)
+            .find(|id| entries[id.0 as usize].word == word)
         {
             return id;
         }
         let id = EntryId(self.entries.len() as u32);
-        alike.push(id);
+        self.alike[group].push(id);
         self.entries.push(Entry {
             word: word.to_string(),
             tokens,
@@ -79,22 +138,22 @@ impl Spoken {
         if !forms.iter().any(|f| f == form) {
             forms.push(form.to_string());
         }
+        let node = self.node_for(form);
+        self.nodes[node].form.get_or_insert(entry);
+    }
+
+    /// The node where `text` ends in the tree, added with the nodes before it if need be.
+    fn node_for(&mut self, text: &str) -> usize {
         if self.nodes.is_empty() {
-            self.nodes.push(Node {
-                children: Vec::new(),
-                entry: None,
-            });
+            self.nodes.push(Node::default());
         }
         let mut node = 0;
-        for b in form.bytes().map(|b| b.to_ascii_lowercase()) {
+        for b in text.bytes().map(|b| b.to_ascii_lowercase()) {
             node = match self.child(node, b) {
                 Some(c) => c,
                 None => {
                     let new = self.nodes.len() as u32;
-                    self.nodes.push(Node {
-                        children: Vec::new(),
-                        entry: None,
-                    });
+                    self.nodes.push(Node::default());
                     let children = &mut self.nodes[node as usize].children;
                     let at = children.partition_point(|&(x, _)| x < b);
                     children.insert(at, (b, new));
@@ -102,7 +161,7 @@ impl Spoken {
                 }
             };
         }
-        self.nodes[node as usize].entry.get_or_insert(entry);
+        node as usize
     }
 
     pub fn is_empty(&self) -> bool {
@@ -114,29 +173,102 @@ impl Spoken {
         &self.entries[entry.0 as usize].tokens
     }
 
-    /// The entries whose word starts `text`, in any case of its ASCII letters, and where the
-    /// word ends in `text`, before a character that isn't a letter or digit, or at the end. The
-    /// longest word wins. Of entries whose words differ only in case, it's the one spelled as in
-    /// `text`, or else each of them.
-    pub fn entries_at(&self, text: &str) -> Option<(&[EntryId], usize)> {
-        let lower = text.to_ascii_lowercase();
-        let ends = text.char_indices().filter(|&(_, c)| !c.is_alphanumeric());
-        let (alike, end) = (ends.map(|(i, _)| i).chain([text.len()]))
-            .rev()
-            .find_map(|end| Some((self.by_word.get(&lower[..end])?, end)))?;
-        let exact = alike
-            .iter()
-            .find(|id| self.entries[id.0 as usize].word == text[..end]);
-        Some((exact.map_or(alike.as_slice(), std::slice::from_ref), end))
+    fn ids(&self, entries: Entries) -> Vec<EntryId> {
+        match entries {
+            Entries::One(id) => vec![id],
+            Entries::Alike(group) => self.alike[group as usize].clone(),
+        }
     }
 
-    /// Each way `entry` is said, as written and as each of its forms, followed by `rest`, as
-    /// [`normalized_words`].
-    pub fn spellings(&self, entry: EntryId, rest: &str) -> impl Iterator<Item = Vec<String>> {
-        let entry = &self.entries[entry.0 as usize];
-        std::iter::once(&entry.word)
-            .chain(&entry.forms)
-            .map(move |s| normalized_words(&format!("{s}{rest}")))
+    /// The length in bytes of the word of `entries`.
+    pub fn word_len(&self, entries: Entries) -> usize {
+        self.entries[self.ids(entries)[0].0 as usize].word.len()
+    }
+
+    /// Each way `entries` are said, as written and as each of their forms, followed by `rest`
+    /// and without it, as [`normalized_words`].
+    pub fn spellings(&self, entries: Entries, rest: &str) -> impl Iterator<Item = Vec<String>> {
+        self.ids(entries).into_iter().flat_map(move |id| {
+            let entry = &self.entries[id.0 as usize];
+            std::iter::once(&entry.word)
+                .chain(&entry.forms)
+                .flat_map(move |s| {
+                    let with = normalized_words(&format!("{s}{rest}"));
+                    let without = normalized_words(s);
+                    let both = with != without;
+                    std::iter::once(with).chain(both.then_some(without))
+                })
+        })
+    }
+
+    /// The entries whose word starts `text`, in any case of its ASCII letters, and its length,
+    /// where it ends before a character that isn't a letter or digit, or at the end, and isn't
+    /// longer than `most` bytes. The longest wins. Of entries whose words differ only in case,
+    /// it's the one spelled as in `text`, or else each of them.
+    fn written_at(&self, text: &[u8], most: usize) -> Option<(Entries, usize)> {
+        if self.is_empty() {
+            return None;
+        }
+        let mut node = 0;
+        let mut found = None;
+        for (p, &b) in text.iter().enumerate().take(most) {
+            match self.child(node, b.to_ascii_lowercase()) {
+                Some(c) => node = c,
+                None => break,
+            }
+            if let Some(group) = self.nodes[node as usize].written
+                && ends_word(&text[p + 1..])
+            {
+                found = Some((group, p + 1));
+            }
+        }
+        let (group, len) = found?;
+        let exact = self.alike[group as usize]
+            .iter()
+            .find(|id| self.entries[id.0 as usize].word.as_bytes() == &text[..len]);
+        let entries = exact.map_or(Entries::Alike(group), |&id| Entries::One(id));
+        Some((entries, len))
+    }
+
+    /// The entries' spoken forms and words in `ids`, in any case of their ASCII letters. The
+    /// forms are those of [`Spoken::find`], and the words, leftmost first and the longest of
+    /// those starting at one token, are found in the stretches between them by the same rules.
+    pub fn units(&self, tokenizer: &Tokenizer, ids: &[u32]) -> Vec<Unit> {
+        let mut units = Vec::new();
+        if self.is_empty() {
+            return units;
+        }
+        let (text, ends) = text_of(tokenizer, ids);
+        let mut forms = self.find(tokenizer, ids).into_iter().peekable();
+        let mut i = 0;
+        while i < ids.len() {
+            if let Some(r) = forms.next_if(|r| r.heard.start == i) {
+                i = r.heard.end;
+                units.push(Unit::Form(r));
+                continue;
+            }
+            let start = if i == 0 { 0 } else { ends[i - 1] };
+            // A word ends before the next form.
+            let limit = forms.peek().map_or(text.len(), |r| match r.heard.start {
+                0 => 0,
+                k => ends[k - 1],
+            });
+            let found = (text.get(start) == Some(&b' ') && start < ends[i])
+                .then(|| self.written_at(&text[start + 1..], limit.saturating_sub(start + 1)))
+                .flatten();
+            let Some((entries, len)) = found else {
+                i += 1;
+                continue;
+            };
+            let end = ends.partition_point(|&e| e < start + 1 + len) + 1;
+            units.push(Unit::Written {
+                heard: i..end,
+                entries,
+                len,
+            });
+            i = end;
+        }
+        units
     }
 
     fn child(&self, node: u32, b: u8) -> Option<u32> {
@@ -175,7 +307,7 @@ impl Spoken {
                 while ends[token] < p + 1 {
                     token += 1;
                 }
-                if let Some(entry) = self.nodes[node as usize].entry
+                if let Some(entry) = self.nodes[node as usize].form
                     && ends_word(&text[p + 1..])
                     && let Some(rest) = continuation(tokenizer, &text[p + 1..ends[token]])
                 {
@@ -183,6 +315,7 @@ impl Spoken {
                         heard: i..token + 1,
                         entry,
                         rest,
+                        len: p - start,
                     });
                 }
             }
@@ -197,10 +330,10 @@ impl Spoken {
         found
     }
 
-    /// The first token of `ids` before token `frontier` from which a spoken form could still be
-    /// under way, given that the tokens from `frontier` on may still change, or none. That's a
-    /// token starting a word whose text up to the frontier is the start of a form that goes on
-    /// with another word, since the frontier starts one.
+    /// The first token of `ids` before token `frontier` from which a spoken form or an entry's
+    /// word could still be under way, given that the tokens from `frontier` on may still change,
+    /// or none. That's a token starting a word whose text up to the frontier is the start of a
+    /// form or word that goes on with another word, since the frontier starts one.
     pub fn open_before(
         &self,
         tokenizer: &Tokenizer,
@@ -362,6 +495,7 @@ mod tests {
     const S: u32 = 47;
     const NEW: u32 = 42;
     const YORK: u32 = 43;
+    const CITY: u32 = 44;
     const BE_DOT: u32 = 59;
     const DOT: u32 = 60;
     const DASH: u32 = 61;
@@ -441,37 +575,61 @@ mod tests {
         let csharp = spoken.add_word("C#", vec![58, 67]);
         spoken.insert("c sharp", csharp);
         assert_eq!(spoken.add_word("C#", vec![58, 67]), csharp);
+        // Words that differ only in case.
+        let lower = spoken.add_word("c#", vec![30, 67]);
+        let kubectl = spoken.add_word("kubectl", vec![1, 2, 3]);
+        let capital = spoken.add_word("Kubectl", vec![8, 2, 3]);
         let spellings = |text: &str| {
-            let (ids, end) = spoken.entries_at(text)?;
-            let rest = &text[end..];
-            Some(
-                ids.iter()
-                    .flat_map(|&id| spoken.spellings(id, rest))
-                    .collect::<Vec<_>>(),
-            )
+            let (entries, len) = spoken.written_at(text.as_bytes(), usize::MAX)?;
+            Some(spoken.spellings(entries, &text[len..]).collect::<Vec<_>>())
         };
         let words = |texts: &[&str]| Some(texts.iter().map(|t| normalized_words(t)).collect());
         assert_eq!(spellings("C#"), words(&["C#", "c sharp"]));
         assert_eq!(spellings("C++"), words(&["C++", "c plus plus"]));
-        // In other capitals, before any character that isn't a letter or digit.
-        assert_eq!(spellings("c++'s"), words(&["C++'s", "c plus plus's"]));
-        assert_eq!(spellings("c#-based"), words(&["C#-based", "c sharp-based"]));
-        assert_eq!(spellings("C#’s"), words(&["C#’s", "c sharp’s"]));
-        assert_eq!(spellings("C#."), words(&["C#.", "c sharp."]));
+        // In other capitals, before any character that isn't a letter or digit, with what
+        // follows and without it.
+        let cpps = words(&["C++'s", "C++", "c plus plus's", "c plus plus"]);
+        assert_eq!(spellings("c++'s"), cpps);
+        let based = words(&["C#-based", "C#", "c sharp-based", "c sharp"]);
+        assert_eq!(spellings("C#-based"), based);
+        assert_eq!(
+            spellings("C#’s"),
+            words(&["C#’s", "C#", "c sharp’s", "c sharp"])
+        );
+        assert_eq!(spellings("C#."), words(&["C#", "c sharp"]));
         // Not where the word goes on, or doesn't start the text.
         assert_eq!(spellings("C#s"), None);
         assert_eq!(spellings("C"), None);
         assert_eq!(spellings("(C#"), None);
         // Of words that differ only in case, the one spelled as in the text, or else each.
-        let lower = spoken.add_word("c#", vec![30, 67]);
-        assert_eq!(spoken.entries_at("C#!"), Some((&[csharp][..], 2)));
-        assert_eq!(spoken.entries_at("c#'s"), Some((&[lower][..], 2)));
-        let kubectl = spoken.add_word("kubectl", vec![1, 2, 3]);
-        let capital = spoken.add_word("Kubectl", vec![8, 2, 3]);
-        assert_eq!(
-            spoken.entries_at("KUBECTL"),
-            Some((&[kubectl, capital][..], 7))
-        );
+        let at = |text: &str| spoken.written_at(text.as_bytes(), usize::MAX);
+        assert_eq!(at("C#!"), Some((Entries::One(csharp), 2)));
+        assert_eq!(at("c#'s"), Some((Entries::One(lower), 2)));
+        let Some((Entries::Alike(group), 7)) = at("KUBECTL") else {
+            panic!("{:?}", at("KUBECTL"));
+        };
+        assert_eq!(spoken.ids(Entries::Alike(group)), vec![kubectl, capital]);
+    }
+
+    #[test]
+    fn an_entrys_word_heard_as_written_is_found_between_spoken_forms() {
+        let c = spoken(&[("New York", "cube control"), ("kubectl", "york city")]);
+        let tok = tokenizer();
+        let units = |ids: &[u32]| -> Vec<(Range<usize>, bool)> {
+            let units = c.spoken.units(&tok, ids);
+            units
+                .iter()
+                .map(|u| (u.heard(), matches!(u, Unit::Form(_))))
+                .collect()
+        };
+        assert_eq!(units(&[THE, NEW, YORK, COMMA]), vec![(1..3, false)]);
+        let both = vec![(0..2, true), (2..4, false)];
+        assert_eq!(units(&[CUBE, CONTROL, NEW, YORK]), both);
+        // A form comes first, and a word doesn't reach into it.
+        assert_eq!(units(&[NEW, YORK, CITY]), vec![(1..3, true)]);
+        // Not where the word goes on.
+        assert_eq!(units(&[THE, NEW, YORK, S]), vec![]);
+        assert_eq!(units(&[THE, NEW, THE]), vec![]);
     }
 
     #[test]
