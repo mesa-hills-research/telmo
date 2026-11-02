@@ -87,10 +87,13 @@ impl Capture {
                 dropped = true;
             }
         });
-        self.written.store(written, Release);
+        // The loss goes first, so whoever sees these samples through `written` sees it too.
         if dropped {
             self.dropped.fetch_max(generation, Relaxed);
         }
+        self.written.store(written, Release);
+        #[cfg(test)]
+        tests::AFTER_PUBLISH.with(|hook| hook.borrow().as_ref().map(|hook| hook()));
         self.peak.fetch_max(peak.to_bits(), Relaxed);
     }
 
@@ -200,7 +203,13 @@ pub fn downmix(samples: impl Iterator<Item = f32>, channels: usize, mut emit: im
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::sync::{Arc, Barrier};
+
+    thread_local! {
+        /// Runs in the thread that pushes, right after it publishes its samples.
+        pub(super) static AFTER_PUBLISH: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
 
     impl Capture {
         /// A capture whose ring counters start at `position`, to reach their wrap-around.
@@ -405,5 +414,31 @@ mod tests {
         capture.start().unwrap();
         capture.push(vec![0.2; RING].into_iter(), 1);
         assert_eq!(capture.stop().map(|take| take.len()), Ok(RING));
+    }
+
+    #[test]
+    fn samples_are_never_seen_without_the_loss_that_came_with_them() {
+        let capture = Arc::new(Capture::new());
+        capture.start().unwrap();
+        let (entered, release) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+        let callback = {
+            let (capture, entered, release) = (capture.clone(), entered.clone(), release.clone());
+            std::thread::spawn(move || {
+                AFTER_PUBLISH.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        entered.wait();
+                        release.wait();
+                    }));
+                });
+                // One sample more than the ring holds, so one is lost.
+                capture.push(vec![0.5; RING + 1].into_iter(), 1);
+            })
+        };
+        // The callback has published its samples and is not done yet.
+        entered.wait();
+        let stopped = capture.stop().map(|take| take.len());
+        release.wait();
+        assert_eq!(stopped, Err(Refused::Dropped));
+        callback.join().unwrap();
     }
 }
