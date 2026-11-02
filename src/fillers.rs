@@ -12,14 +12,14 @@
 //!   they're, you're, he's, she's, I've, we've, they've, you've, I'll, we'll, they'll, you'll and
 //!   it'll.
 //!
-//! A quoted word stays, as a mention ("I often go “Um, so”", "'um'"). That's a word from an
-//! opening quote mark to the closing one of its kind, or to the end of the text when none comes.
-//! A closing mark alone ("uh'") quotes nothing, and neither does the apostrophe of an elision
-//! ("'cause"). Both copies stay when a quote mark, bracket or sentence end comes between them,
-//! also on a removed hesitation. Every word of a special word or
-//! a spoken form's word stays wherever the whole of it occurs. Every other word stays as written,
-//! so "uh-huh", "oh", "very very", "had had", "it it", repeats of several words, false starts and
-//! words such as "like" or "you know" are left alone.
+//! A quoted word stays, as a mention ("I often go “Um, so”", "'um'"). That's a word from an opening
+//! quote mark to the closing one of its kind, or to the end of the text when none comes. A closing
+//! mark alone ("uh'") quotes nothing, and neither does the apostrophe of an elision ("'cause") or
+//! of a contraction's ending written apart ("we 'll"). Both copies stay when a quote mark, bracket
+//! or sentence end comes between them, also on a removed hesitation. Every word of a special word
+//! or a spoken form's word stays wherever the whole of it occurs. Every other word stays as
+//! written, so "uh-huh", "oh", "very very", "had had", "it it", repeats of several words, false
+//! starts and words such as "like" or "you know" are left alone.
 //!
 //! Punctuation on a removed word goes with it, except a sentence end, which moves to the word
 //! before ("We go there um. And then" becomes "We go there. And then"). When the removed word
@@ -482,10 +482,11 @@ fn quoted(mut open: [bool; 2], parts: &[(&str, &str, &str)]) -> Vec<bool> {
 }
 
 /// Opens the quotes that a word with punctuation `lead` and `trail` around its letters `core`
-/// opens, and gives the kinds it closes after it. An opening mark is one before the letters,
-/// unless it's the apostrophe of an elision ("'cause"), or a mark standing alone with no quote of
-/// its kind open. A closing mark is one after the letters, or standing alone, with a quote of its
-/// kind open, so a closing mark with no quote open ("uh'", "students'") does nothing.
+/// opens, and gives the kinds it closes after it. An opening mark is one before the letters, unless
+/// it's the apostrophe of an elision ("'cause") or of a contraction's ending written apart ("we
+/// 'll"), or a mark standing alone with no quote of its kind open. A closing mark is one after the
+/// letters, or standing alone, with a quote of its kind open, so a closing mark with no quote open
+/// ("uh'", "students'") does nothing.
 fn quote_marks(open: &mut [bool; 2], lead: &str, core: &str, trail: &str) -> [bool; 2] {
     let mut closes = [false; 2];
     for (kind, marks) in QUOTE_KINDS.iter().enumerate() {
@@ -507,9 +508,11 @@ fn quote_marks(open: &mut [bool; 2], lead: &str, core: &str, trail: &str) -> [bo
 }
 
 /// Words written with an apostrophe before them for the letters left out, which opens no quote.
-const ELIDED: [&str; 13] = [
-    "bout", "cause", "cos", "cuz", "em", "kay", "n", "neath", "nother", "round", "til", "tis",
-    "twas",
+/// They're elisions, and the endings of contractions written apart from their word, as AMI's
+/// transcripts write "we 'll" and "'s move on".
+const ELIDED: [&str; 20] = [
+    "bout", "cause", "cos", "cuz", "d", "em", "kay", "ll", "m", "n", "neath", "nother", "re",
+    "round", "s", "t", "til", "tis", "twas", "ve",
 ];
 
 /// Whether `word` is a number such as 5, 2.5 or 1,000.
@@ -653,6 +656,18 @@ mod tests {
             // An elision opens no quote, and a mark of the other kind closes none.
             ("'cause um I think", "'cause I think"),
             ("'Tis uh true", "'Tis true"),
+            // Nor does a contraction's ending written apart, as AMI's transcripts write them.
+            ("we 'll um either modify it", "we 'll either modify it"),
+            (
+                "'S move on to the um next one",
+                "'S move on to the next one",
+            ),
+            ("that's 's up to uh him", "that's 's up to him"),
+            ("Apple 've uh made", "Apple 've made"),
+            (
+                "I 'd uh go, you 're um late, I 'm uh sure, don 't um",
+                "I 'd go, you 're late, I 'm sure, don 't",
+            ),
             ("“the workers’ uh news”", "“the workers’ uh news”"),
             ("“the workers’ news” uh goes", "“the workers’ news” goes"),
         ] {
