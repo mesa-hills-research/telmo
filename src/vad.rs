@@ -8,8 +8,10 @@
 //! for 600 ms, at the end of the last frame above it. An utterance that reaches 30 s is cut at
 //! the quietest frame of its last 2 s and the next one starts there. Audio that opens in
 //! speech, with a first frame above the start threshold and no pause as long as the hangover
-//! before the onset, has its first utterance begin at the first sample. [`VadConfig`] holds
-//! these settings.
+//! before an onset found in its first 2 s, has its first utterance begin at the first sample.
+//! [`VadConfig`] holds these settings. [`Vad::flush`] decides on the frames still waiting when
+//! the audio ends, and [`Vad::look_back`] says how much audio a caller keeps for the utterances
+//! to come.
 //!
 //! The events count samples from the first one pushed, and they are the same whatever the
 //! sizes of the chunks the audio comes in.
@@ -69,6 +71,10 @@ impl Default for VadConfig {
 /// Frames at the start of the audio whose quietest is the first noise floor, 300 ms. A floor
 /// taken from the first frame alone would sit at the level of speech the audio opens on.
 const OPENING_FRAMES: usize = 30;
+
+/// Frames from the start of the audio within which an onset can still find that the audio opened
+/// in speech, 2 s. It bounds how far back an utterance can begin.
+const OPENING_REACH_FRAMES: usize = 200;
 
 /// What the detector found, at sample indices counted from the first sample pushed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,6 +203,28 @@ impl Vad {
         (self.frames + opening) * FRAME as u64 + self.frame_fill as u64
     }
 
+    /// The most samples before the newest one pushed at which an utterance found later can
+    /// begin, whatever the size of the pieces pushed. A caller that keeps this much audio before
+    /// the newest sample has the audio of every utterance to come.
+    pub fn look_back(&self) -> u64 {
+        let onset = (self.onset_frames * FRAME) as u64 + self.pre_roll;
+        let opening = (OPENING_REACH_FRAMES * FRAME) as u64;
+        let cut = (self.search_frames * FRAME) as u64;
+        onset.max(opening).max(cut)
+    }
+
+    /// Decides on the frames held back to set the first noise floor, as at the end of the
+    /// audio, and returns the events they complete. Audio shorter than the 300 ms the floor
+    /// waits for is otherwise never decided. A last frame shorter than 10 ms is left out, as
+    /// [`Vad::push`] leaves it until it's whole.
+    pub fn flush(&mut self) -> Vec<VadEvent> {
+        let mut events = Vec::new();
+        if self.opening.as_ref().is_some_and(|o| !o.is_empty()) {
+            self.end_opening(&mut events);
+        }
+        events
+    }
+
     /// The first sample a later event can refer to. Audio before it belongs to no utterance
     /// to come, so it can be dropped.
     pub fn keep_from(&self) -> u64 {
@@ -221,9 +249,13 @@ impl Vad {
             return;
         };
         opening.push(energy);
-        if opening.len() < OPENING_FRAMES {
-            return;
+        if opening.len() == OPENING_FRAMES {
+            self.end_opening(events);
         }
+    }
+
+    /// Sets the first noise floor from the opening's frames and decides on them.
+    fn end_opening(&mut self, events: &mut Vec<VadEvent>) {
         let opening = self.opening.take().expect("the opening is under way");
         let min_floor = self.config.min_floor_db;
         self.first_level = opening[0].max(min_floor);
@@ -243,6 +275,9 @@ impl Vad {
         let floor = self.floor.expect("the opening set the floor");
         let above_start = level > floor + c.start_db;
         let above_end = level > floor + c.end_db;
+        if self.frames > OPENING_REACH_FRAMES as u64 {
+            self.opened_in_speech = None;
+        }
         if let Some(quiet) = &mut self.opened_in_speech {
             *quiet = if above_end { 0 } else { *quiet + 1 };
             if *quiet >= self.hangover_frames {
@@ -531,6 +566,118 @@ mod tests {
         let found = utterances(&run(VadConfig::default(), &clicked));
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].1 / 16, 2000);
+    }
+
+    /// 50 ms of quiet and 200 ms of speech, a command shorter than the opening.
+    fn short_command() -> Vec<f32> {
+        let mut signal = noise(RATE / 4, NOISE_DB, 25);
+        add_burst(&mut signal, 800..RATE / 4, Kind::Noise, NOISE_DB + 20.0);
+        signal
+    }
+
+    #[test]
+    fn audio_shorter_than_the_opening_is_decided_when_it_ends() {
+        let signal = short_command();
+        let mut vad = Vad::new(VadConfig::default());
+        assert_eq!(vad.push(&signal), []);
+        let want = [VadEvent::Start {
+            audio_from: 0,
+            onset: 800,
+        }];
+        assert_eq!(vad.flush(), want);
+        assert!(vad.in_speech());
+        assert_eq!(vad.flush(), []);
+        // In pieces, and with a last frame of 5 ms, which is left out.
+        let mut vad = Vad::new(VadConfig::default());
+        let mut events = Vec::new();
+        for piece in signal.chunks(333) {
+            events.extend(vad.push(piece));
+        }
+        events.extend(vad.push(&[0.0; 80]));
+        events.extend(vad.flush());
+        assert_eq!(events, want);
+        // Audio that ends without a whole frame decides nothing.
+        assert_eq!(Vad::new(VadConfig::default()).flush(), []);
+        let mut vad = Vad::new(VadConfig::default());
+        vad.push(&[0.0; 100]);
+        assert_eq!(vad.flush(), []);
+        assert_eq!(vad.push(&short_command()).len(), 0);
+    }
+
+    #[test]
+    fn an_onset_after_the_opening_reach_begins_as_usual() {
+        // Loud and quiet tenths of a second for 4 s, too short to start speech, then speech.
+        let mut signal = noise(6 * RATE, NOISE_DB, 26);
+        for start in (0..4000).step_by(200) {
+            add_burst(
+                &mut signal,
+                start * 16..(start + 100) * 16,
+                Kind::Noise,
+                NOISE_DB + 30.0,
+            );
+        }
+        add_burst(
+            &mut signal,
+            4000 * 16..5000 * 16,
+            Kind::Noise,
+            NOISE_DB + 30.0,
+        );
+        let found = utterances(&run(VadConfig::default(), &signal));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!((found[0].0 / 16, found[0].1 / 16), (3700, 4000));
+    }
+
+    #[test]
+    fn no_utterance_begins_further_back_than_the_look_back() {
+        let mut opening = noise(5 * RATE, NOISE_DB, 27);
+        words(&mut opening, 0, 3000);
+        let mut alternating = noise(6 * RATE, NOISE_DB, 28);
+        for start in (0..4000).step_by(200) {
+            add_burst(
+                &mut alternating,
+                start * 16..(start + 100) * 16,
+                Kind::Noise,
+                NOISE_DB + 30.0,
+            );
+        }
+        add_burst(
+            &mut alternating,
+            4000 * 16..5000 * 16,
+            Kind::Noise,
+            NOISE_DB + 30.0,
+        );
+        let mut long = noise(48 * RATE, NOISE_DB, 29);
+        words(&mut long, 1000, 45_000);
+        let mut rng = Rng(79);
+        for signal in [opening, alternating, long, short_command()] {
+            for most in [160, 8000, 3 * RATE] {
+                let mut vad = Vad::new(VadConfig::default());
+                let mut pos = 0;
+                let mut starts = 0;
+                while pos <= signal.len() {
+                    let before = vad.samples();
+                    let events = if pos == signal.len() {
+                        pos += 1;
+                        vad.flush()
+                    } else {
+                        let size =
+                            (1 + (rng.next() * most as f64) as usize).min(signal.len() - pos);
+                        pos += size;
+                        vad.push(&signal[pos - size..pos])
+                    };
+                    for event in events {
+                        if let VadEvent::Start { audio_from, .. } = event {
+                            starts += 1;
+                            assert!(
+                                audio_from + vad.look_back() >= before,
+                                "{audio_from} {before}"
+                            );
+                        }
+                    }
+                }
+                assert!(starts > 0);
+            }
+        }
     }
 
     #[test]

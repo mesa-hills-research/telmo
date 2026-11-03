@@ -694,7 +694,7 @@ pub struct Streamer {
     /// Resampled samples still to drop at the start, the resampler's delay.
     to_drop: usize,
     vad: Vad,
-    /// The latest 16 kHz audio, for the audio before an onset.
+    /// The latest 16 kHz audio, as far back as voice activity can begin an utterance.
     history: VecDeque<f32>,
     /// The stream's sample `history[0]` is.
     history_start: u64,
@@ -714,9 +714,6 @@ pub struct Streamer {
     /// The special words new utterances favour.
     words: Option<Arc<Compiled>>,
 }
-
-/// Audio kept for the time before an onset, comfortably more than voice activity reaches back.
-const HISTORY: usize = 3 * SAMPLE_RATE;
 
 impl Streamer {
     pub fn new(model: Arc<Model>, config: StreamConfig) -> Streamer {
@@ -762,15 +759,11 @@ impl Streamer {
         let drop = self.to_drop.min(audio.len());
         audio.drain(..drop);
         self.to_drop -= drop;
-        let mut events = Vec::new();
         if audio.is_empty() {
-            return events;
+            return Vec::new();
         }
         self.history.extend(audio.iter().copied());
         self.total += audio.len() as u64;
-        let excess = self.history.len().saturating_sub(HISTORY);
-        self.history.drain(..excess);
-        self.history_start += excess as u64;
         if let Some(a) = &mut self.active {
             if a.end.is_none() {
                 a.stream.push(&audio);
@@ -778,7 +771,18 @@ impl Streamer {
                 a.after_end.extend_from_slice(&audio);
             }
         }
-        for event in self.vad.push(&audio) {
+        let found = self.vad.push(&audio);
+        let events = self.on_voice_activity(found);
+        let excess = (self.history.len() as u64).saturating_sub(self.vad.look_back()) as usize;
+        self.history.drain(..excess);
+        self.history_start += excess as u64;
+        events
+    }
+
+    /// Starts and ends utterances where voice activity `found` speech start and end.
+    fn on_voice_activity(&mut self, found: Vec<VadEvent>) -> Vec<Event> {
+        let mut events = Vec::new();
+        for event in found {
             match event {
                 VadEvent::Start { audio_from, onset } => {
                     if let Some(a) = &self.active {
@@ -972,6 +976,9 @@ impl Streamer {
         let mut audio = Vec::new();
         self.resampler.flush(&mut audio);
         let mut events = self.take(audio);
+        // Audio shorter than voice activity waits for before it decides is decided now.
+        let found = self.vad.flush();
+        events.extend(self.on_voice_activity(found));
         if let Some(mut a) = self.active.take() {
             if a.end.is_none() {
                 a.end = Some((self.total, self.total));
@@ -2472,6 +2479,46 @@ mod tests {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             (None, None) => true,
             _ => false,
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a model, named by GRANITE_SPEECH_DIR"]
+    fn a_command_shorter_than_voice_activitys_opening_gets_its_final_pass() {
+        let dir = std::env::var_os("GRANITE_SPEECH_DIR").expect("set GRANITE_SPEECH_DIR");
+        let model = Arc::new(Model::load(dir.as_ref(), &crate::Options::default()).unwrap());
+        // 50 ms of quiet and 200 ms of speech-level noise, whole and in 20 ms pieces, at the
+        // models' rate and resampled from 48 kHz.
+        for rate in [16_000usize, 48_000] {
+            let mut seed = 0x2545_f491u64;
+            let audio: Vec<f32> = (0..rate / 4)
+                .map(|i| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let level = if i < rate / 20 { 0.0005 } else { 0.2 };
+                    ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * level
+                })
+                .collect();
+            for piece in [audio.len(), rate / 50] {
+                let config = StreamConfig {
+                    input_rate: rate as u32,
+                    ..StreamConfig::default()
+                };
+                let mut s = Streamer::new(model.clone(), config);
+                let mut events = Vec::new();
+                for chunk in audio.chunks(piece) {
+                    events.extend(s.push(chunk));
+                }
+                events.extend(s.finish().unwrap());
+                let started = events
+                    .iter()
+                    .any(|e| matches!(e, Event::SpeechStart { at, .. } if *at < 0.1));
+                let ended = events
+                    .iter()
+                    .any(|e| matches!(e, Event::UtteranceEnd { .. }));
+                assert!(started && ended, "{rate} Hz in {piece}: {events:?}");
+            }
         }
     }
 
