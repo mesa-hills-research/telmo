@@ -22,7 +22,7 @@ German). `Fillers::remove` applies the same rules to text. The command takes
 
 | Words | Examples |
 |---|---|
-| A hesitation sound, the whole word in lower case or with one capital | um, umm, uh, uhh, uhm, er, erm, ah, hm, hmm, mm, mmm |
+| A hesitation sound, the whole word in lower case or with one capital, and ah in lower case only | um, umm, uh, uhh, uhm, er, erm, ah, hm, hmm, mm, mmm |
 | The first of two copies of a word that can't end a clause, side by side in any case, with a comma or a hesitation between them or nothing | the the, a a, and and, I, I, we we, it's it's, I'm I'm |
 
 The words of the second row are a, an, the, and, or, but, I, my, our, your, their, we, they,
@@ -38,6 +38,9 @@ think" becomes "So I think"). Other words keep their spelling.
 ## What stays
 
 - "mm" after a number, as millimetres, and a hesitation in capitals (UM, ER), as an acronym.
+- "Ah" with a capital, as the interjection ("Ah, that's why"). Both models write the
+  interjection with a capital, even in the middle of a sentence ("to you, Ah, madam"), and the
+  hesitation in lower case.
 - A quoted word, as a mention ("I often go “Um, so”", "'um'"). That's a word from an opening
   quote mark to the closing one of its kind, or to the end of the utterance when none comes. A
   closing mark alone quotes nothing, so "uh'" goes. Neither does the apostrophe of an elision from

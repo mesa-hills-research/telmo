@@ -4,7 +4,8 @@
 //!
 //! - A hesitation sound such as um, umm, uh, uhh, uhm, er, erm, ah, hm, hmm, mm or mmm, or a longer
 //!   spelling of one, the whole word in lower case or with one capital. "mm" after a number
-//!   stays, as millimetres, and so does a word in capitals (UM), as an acronym.
+//!   stays, as millimetres, and so does a word in capitals (UM), as an acronym. "Ah" with a
+//!   capital stays too, as the interjection ("Ah, that's why").
 //! - The first of two adjacent copies of a word that can't end a clause, in any case, with a comma
 //!   or a hesitation between them or nothing ("the the", "I, I", "it's it's"). A period, question
 //!   mark or exclamation mark between them keeps both. The words are a, an, the, and, or, but, I,
@@ -456,7 +457,10 @@ fn is_hesitation(word: &str, previous: Option<&str>) -> bool {
     }
     let letters: String = runs.iter().map(|r| r.0).collect();
     let sound = match letters.as_str() {
-        "um" | "uh" | "uhm" | "erm" | "ah" | "hm" => true,
+        "um" | "uh" | "uhm" | "erm" | "hm" => true,
+        // With a capital it's the interjection, as both models write it in read speech, even
+        // mid-sentence ("Ah, madam, said he", "to you, Ah, madam").
+        "ah" => word == lower,
         "er" => runs == [('e', 1), ('r', 1)],
         "m" => runs[0].1 >= 2,
         _ => false,
@@ -580,7 +584,8 @@ mod tests {
             ("a a a sophisticated chip", "a sophisticated chip"),
             ("but but uh but", "but"),
             ("Mm, that's fine.", "That's fine."),
-            ("Ah, that's why", "That's why"),
+            ("we could ah use the old one", "we could use the old one"),
+            ("so, ahh, the plan", "so, the plan"),
             ("Hmm.", ""),
             ("Is it um?", "Is it?"),
             ("That's the plan. Um.", "That's the plan."),
@@ -637,6 +642,12 @@ mod tests {
             "Say the (the old one) twice",
             "I often go “Um, so” stuff like that",
             "He said 'uh' twice",
+            // "Ah" with a capital is the interjection, wherever it stands.
+            "Ah, that's why",
+            "Ah me, how time flies.",
+            "It belongs to you, Ah, madam, said he.",
+            "That is Ah, murmured the man.",
+            "Ahh, I see.",
         ] {
             assert_eq!(english().remove(text), text, "{text}");
         }
