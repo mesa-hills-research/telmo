@@ -1,12 +1,15 @@
 //! Voice activity detection by the energy of 10 ms frames of 16 kHz audio.
 //!
 //! Each frame's energy is compared with a noise floor that falls quickly to quieter frames and
-//! rises slowly toward louder ones, so it follows the quiet moments between words. Speech
+//! rises slowly toward louder ones, so it follows the quiet moments between words. The floor
+//! starts at the quietest frame of the first 300 ms, which the detector waits for. Speech
 //! starts once the energy stays above a start threshold for 150 ms, and the utterance's audio
 //! begins 300 ms before that onset. It ends once the energy stays below a lower end threshold
 //! for 600 ms, at the end of the last frame above it. An utterance that reaches 30 s is cut at
-//! the quietest frame of its last 2 s and the next one starts there. [`VadConfig`] holds these
-//! settings.
+//! the quietest frame of its last 2 s and the next one starts there. Audio that opens in
+//! speech, with a first frame above the start threshold and no pause as long as the hangover
+//! before the onset, has its first utterance begin at the first sample. [`VadConfig`] holds
+//! these settings.
 //!
 //! The events count samples from the first one pushed, and they are the same whatever the
 //! sizes of the chunks the audio comes in.
@@ -63,6 +66,10 @@ impl Default for VadConfig {
     }
 }
 
+/// Frames at the start of the audio whose quietest is the first noise floor, 300 ms. A floor
+/// taken from the first frame alone would sit at the level of speech the audio opens on.
+const OPENING_FRAMES: usize = 30;
+
 /// What the detector found, at sample indices counted from the first sample pushed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VadEvent {
@@ -111,8 +118,15 @@ pub struct Vad {
     /// The sum of squares of the frame being filled, and its sample count.
     frame_sum: f64,
     frame_fill: usize,
-    /// Complete frames so far.
+    /// Complete frames the detector has decided on, which are all but the opening's until it
+    /// has all of them.
     frames: u64,
+    /// The energies of the first frames, until there are [`OPENING_FRAMES`] of them.
+    opening: Option<Vec<f64>>,
+    /// The first frame's level.
+    first_level: f64,
+    /// While the audio may have opened in speech, the frames in a row below the end threshold.
+    opened_in_speech: Option<usize>,
     floor: Option<f64>,
     state: State,
     /// Energies of the latest frames, the newest last, for choosing where to cut.
@@ -139,6 +153,9 @@ impl Vad {
             frame_sum: 0.0,
             frame_fill: 0,
             frames: 0,
+            opening: Some(Vec::with_capacity(OPENING_FRAMES)),
+            first_level: 0.0,
+            opened_in_speech: Some(0),
             floor: None,
             state: State::Quiet { run: 0 },
             recent: VecDeque::new(),
@@ -176,12 +193,16 @@ impl Vad {
 
     /// The samples pushed so far.
     pub fn samples(&self) -> u64 {
-        self.frames * FRAME as u64 + self.frame_fill as u64
+        let opening = self.opening.as_ref().map_or(0, Vec::len) as u64;
+        (self.frames + opening) * FRAME as u64 + self.frame_fill as u64
     }
 
     /// The first sample a later event can refer to. Audio before it belongs to no utterance
     /// to come, so it can be dropped.
     pub fn keep_from(&self) -> u64 {
+        if self.opened_in_speech.is_some() {
+            return 0;
+        }
         match self.state {
             State::Speech { from, .. } => from,
             State::Quiet { run } => {
@@ -192,16 +213,42 @@ impl Vad {
     }
 
     fn end_frame(&mut self, events: &mut Vec<VadEvent>) {
-        let c = &self.config;
         let energy = 10.0 * (self.frame_sum / FRAME as f64 + 1e-20).log10();
         self.frame_sum = 0.0;
         self.frame_fill = 0;
+        let Some(opening) = &mut self.opening else {
+            self.decide(energy, events);
+            return;
+        };
+        opening.push(energy);
+        if opening.len() < OPENING_FRAMES {
+            return;
+        }
+        let opening = self.opening.take().expect("the opening is under way");
+        let min_floor = self.config.min_floor_db;
+        self.first_level = opening[0].max(min_floor);
+        let quietest = opening.iter().copied().fold(f64::INFINITY, f64::min);
+        self.floor = Some(quietest.max(min_floor));
+        for energy in opening {
+            self.decide(energy, events);
+        }
+    }
+
+    /// Decides on the next frame, whose energy is `energy`.
+    fn decide(&mut self, energy: f64, events: &mut Vec<VadEvent>) {
+        let c = &self.config;
         self.frames += 1;
         let end = self.frames * FRAME as u64;
         let level = energy.max(c.min_floor_db);
-        let floor = *self.floor.get_or_insert(level);
+        let floor = self.floor.expect("the opening set the floor");
         let above_start = level > floor + c.start_db;
         let above_end = level > floor + c.end_db;
+        if let Some(quiet) = &mut self.opened_in_speech {
+            *quiet = if above_end { 0 } else { *quiet + 1 };
+            if *quiet >= self.hangover_frames {
+                self.opened_in_speech = None;
+            }
+        }
         self.recent.push_back(energy);
         if self.recent.len() > self.search_frames {
             self.recent.pop_front();
@@ -211,7 +258,13 @@ impl Vad {
             State::Quiet { run } => {
                 *run = if above_start { *run + 1 } else { 0 };
                 if *run >= self.onset_frames {
-                    let onset = end - (*run * FRAME) as u64;
+                    let mut onset = end - (*run * FRAME) as u64;
+                    // Speech under way when the audio opened began at its first sample.
+                    if self.opened_in_speech.take().is_some()
+                        && self.first_level > floor + c.start_db
+                    {
+                        onset = 0;
+                    }
                     let audio_from = onset.saturating_sub(self.pre_roll).max(self.previous_end);
                     events.push(VadEvent::Start { audio_from, onset });
                     self.state = State::Speech {
@@ -449,6 +502,35 @@ mod tests {
         assert_eq!(vad.push(&quiet), []);
         assert_eq!(vad.noise_floor_db(), -70.0);
         assert_eq!(run(VadConfig::default(), &vec![0.0; 5 * RATE]), []);
+    }
+
+    #[test]
+    fn audio_that_opens_in_speech_starts_its_utterance_at_the_first_sample() {
+        // Words of 400 ms, longer than the frames the first floor is taken from.
+        let mut long = noise(4 * RATE, NOISE_DB, 22);
+        words(&mut long, 0, 2000);
+        // Words of 200 ms with 100 ms gaps.
+        let mut short = noise(4 * RATE, NOISE_DB, 23);
+        for start in (0..2000).step_by(300) {
+            add_burst(
+                &mut short,
+                start * 16..(start + 200) * 16,
+                Kind::Noise,
+                NOISE_DB + 20.0,
+            );
+        }
+        for signal in [long, short] {
+            let found = utterances(&run(VadConfig::default(), &signal));
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!((found[0].0, found[0].1), (0, 0));
+        }
+        // A click before a pause as long as the hangover is no speech under way.
+        let mut clicked = noise(5 * RATE, NOISE_DB, 24);
+        add_burst(&mut clicked, 0..FRAME, Kind::Noise, NOISE_DB + 30.0);
+        words(&mut clicked, 2000, 4000);
+        let found = utterances(&run(VadConfig::default(), &clicked));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].1 / 16, 2000);
     }
 
     #[test]
