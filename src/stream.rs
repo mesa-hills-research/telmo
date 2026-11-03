@@ -2524,6 +2524,37 @@ mod tests {
 
     #[test]
     #[ignore = "needs a model, named by GRANITE_SPEECH_DIR"]
+    fn a_large_push_keeps_the_audio_before_its_onset() {
+        let dir = std::env::var_os("GRANITE_SPEECH_DIR").expect("set GRANITE_SPEECH_DIR");
+        let model = Arc::new(Model::load(dir.as_ref(), &crate::Options::default()).unwrap());
+        // 1 s of quiet, 2.5 s of speech-level noise and 0.5 s of quiet in one push, more than
+        // the 2 s a stream keeps before its newest sample.
+        let mut seed = 0x9e37_79b9u64;
+        let audio: Vec<f32> = (0..4 * SAMPLE_RATE)
+            .map(|i| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let speech = (SAMPLE_RATE..7 * SAMPLE_RATE / 2).contains(&i);
+                let level = if speech { 0.2 } else { 0.0005 };
+                ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * level
+            })
+            .collect();
+        let mut s = Streamer::new(model, StreamConfig::default());
+        let events = s.push(&audio);
+        assert!(
+            matches!(events[..], [Event::SpeechStart { at, .. }] if (at - 1.0).abs() < 0.02),
+            "{events:?}"
+        );
+        // The utterance starts 300 ms before its onset, with every sample from there.
+        let a = s.active.as_ref().expect("an utterance is active");
+        let from = 7 * SAMPLE_RATE / 10;
+        assert_eq!(a.start, from as u64);
+        assert!(a.stream.audio() == &audio[from..]);
+    }
+
+    #[test]
+    #[ignore = "needs a model, named by GRANITE_SPEECH_DIR"]
     fn each_utterance_keeps_the_list_it_started_with() {
         let dir = std::env::var_os("GRANITE_SPEECH_DIR").expect("set GRANITE_SPEECH_DIR");
         let model = Arc::new(Model::load(dir.as_ref(), &crate::Options::default()).unwrap());
