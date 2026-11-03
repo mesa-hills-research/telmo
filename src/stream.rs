@@ -9,10 +9,11 @@
 //! last settled one.
 //!
 //! A word settles once two passes in a row agree on it, together with every word before it, it
-//! ends at least a second before the audio does, and the model has heard a word after it. A
-//! spoken form written as its word settles whole, and words where a spoken form or a special
-//! word could still be under way wait. Fillers a list leaves out go from each pass's words before any settle, so
-//! tentative text never shows them. Settled words never change. When the utterance ends, one
+//! ends at least a second before the audio does, and the model has heard a word after it. With
+//! Parakeet, nothing settles before the utterance has 3 s of audio. A spoken form written as its
+//! word settles whole, and words where a spoken form or a special word could still be under way
+//! wait. Fillers a list leaves out go from each pass's words before any settle, so tentative
+//! text never shows them. Settled words never change. When the utterance ends, one
 //! last pass settles everything, except a sentence end at its end, which waits for the next
 //! utterance's first words, since a pause can split a sentence.
 //!
@@ -334,9 +335,11 @@ impl UtteranceStream {
             .len()
             .saturating_sub((config.settle_margin.as_secs_f64() * SAMPLE_RATE as f64) as usize);
         let mut settle = 0;
+        let early = matches!(self.resume, Resume::Frame(_))
+            && self.seconds() < PARAKEET_FIRST_SETTLE.as_secs_f64();
         if last {
             settle = words.len();
-        } else {
+        } else if !early {
             // The last word of a pass never settles. It may still grow, and near the end of the
             // audio a model may close it with punctuation that the next audio contradicts.
             while settle + 1 < words.len()
@@ -1420,6 +1423,12 @@ fn split_words(tokenizer: &Tokenizer, before: Option<u32>, hyp: &[Hyp]) -> Vec<W
     words
 }
 
+/// Audio a Parakeet utterance needs before any of its words settle. Parakeet decodes the window
+/// from the utterance's start with its features normalized over the window, and over the first
+/// seconds its hypothesis of the first words still changes as more audio comes, often hearing a
+/// word said twice as one ("No, it" where more audio hears "No no no it").
+const PARAKEET_FIRST_SETTLE: Duration = Duration::from_millis(3000);
+
 /// The most settled words a pass may repeat.
 const MAX_REPEAT: usize = 3;
 
@@ -2115,10 +2124,10 @@ mod tests {
     fn a_special_spelling_settles_whole_with_its_fillers() {
         let mut words = fillers();
         words.add_code_word("New um").unwrap();
-        let (mut s, tok) = stream_with(&words, 10);
-        // "New", "um" on frame 6 and "city" on frame 9. Only "New" ends early enough to settle,
-        // and it waits, since "um" may still change.
-        let heard = [(42, 0), (11, 6), (13, 6), (79, 6), (44, 9)];
+        let (mut s, tok) = stream_with(&words, 50);
+        // "New" on frame 40, "um" on frame 46 and "city" on frame 49. Only "New" ends early
+        // enough to settle, and it waits, since "um" may still change.
+        let heard = [(42, 40), (11, 46), (13, 46), (79, 46), (44, 49)];
         let config = PassConfig {
             settle_margin: Duration::from_millis(320),
             ..PassConfig::default()
@@ -2130,12 +2139,30 @@ mod tests {
         assert_eq!(last.settled, " New um city");
         // A settled "New" with the rest of the word after it keeps "um" too.
         let (mut s, tok) = stream_with(&words, 10);
+        let heard = [(42, 0), (11, 6), (13, 6), (79, 6), (44, 9)];
         s.recent = vec![settled(&tok, &[42], 0..1)];
         s.settled = " New".into();
         s.resume = Resume::Frame(1);
         s.last_settled = Some(42);
         let last = s.settle(&tok, window(&s, &heard), &config, PassMode::Final);
         assert_eq!(last.settled, " um city");
+    }
+
+    #[test]
+    fn parakeets_first_words_wait_for_enough_audio() {
+        let (mut s, tok) = stream_with(&SpecialWords::new(), 25);
+        let config = PassConfig::default();
+        // "the cube control" in the first 0.4 s, and a word near the end of 2 s of audio.
+        let heard = [(6, 0), (4, 2), (5, 4), (6, 20)];
+        s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
+        let second = s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
+        assert_eq!(
+            (second.settled.as_str(), second.tentative.as_str()),
+            ("", " the cube control the")
+        );
+        s.push(&vec![0.0; 13 * FRAME]);
+        let third = s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
+        assert_eq!(third.settled, " the cube control");
     }
 
     #[test]

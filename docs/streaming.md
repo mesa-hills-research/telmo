@@ -40,8 +40,12 @@ stream.finish()?;
    recomputes only the attention blocks new audio reaches, keeping the previous 10.24 s block
    live until the next one has 1.28 s.
 4. A word settles once two passes in a row agree on it and on every word before it, it ends a
-   second before the audio does, and the model has heard a word after it. When the utterance
-   ends, a last pass settles everything.
+   second before the audio does, and the model has heard a word after it. With Parakeet nothing
+   settles before the utterance has 3 s of audio, since until then its hypothesis of the first
+   words still changes and often hears a word said twice as one. That costs about a second. On
+   151 streamed AMI meeting clips, Parakeet's first settled word came a median 2.8 s after speech
+   started instead of 1.7 s, and 4.0 s instead of 3.7 s at the 90th percentile. Tentative text
+   shows as early as before. When the utterance ends, a last pass settles everything.
 5. A sentence end that closes an utterance stays tentative until the next utterance's first
    words settle, or the stream finishes, since a pause can split a sentence. It goes when they
    start with a comma or a lower-case word that joins words, such as "and", "rather", "of" or
