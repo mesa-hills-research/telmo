@@ -38,9 +38,10 @@ think" becomes "So I think"). Other words keep their spelling.
 ## What stays
 
 - "mm" after a number, as millimetres, and a hesitation in capitals (UM, ER), as an acronym.
-- "Ah" with a capital, as the interjection ("Ah, that's why"). Both models write the
-  interjection with a capital, even in the middle of a sentence ("to you, Ah, madam"), and the
-  hesitation in lower case.
+- "Ah" with a capital. It's usually the interjection ("Ah, that's why"), which both models write
+  with a capital even in the middle of a sentence ("to you, Ah, madam"). A hesitation a model
+  writes with a capital, as at the start of a sentence, stays too. That's on purpose, since a
+  hesitation left in costs less than a meant word lost.
 - A quoted word, as a mention ("I often go “Um, so”", "'um'"). That's a word from an opening
   quote mark to the closing one of its kind, or to the end of the utterance when none comes. A
   closing mark alone quotes nothing, so "uh'" goes. Neither does the apostrophe of an elision from
@@ -62,8 +63,8 @@ think" becomes "So I think"). Other words keep their spelling.
 ## In a stream
 
 Each pass leaves out fillers from all its words before any settle, going on from the settled text,
-so tentative text never shows a hesitation, and a quote that began in the settled text still keeps
-its words. A word that a special word of several words may still take in waits to settle until the
+so tentative text never shows a hesitation that goes, and a quote that began in the settled text
+still keeps its words. A word that a special word of several words may still take in waits to settle until the
 special word is heard whole or something else comes, so its fillers stay with it. A word whose fate
 depends on the next one waits for it, because the last word of a pass never settles, and a word
 followed only by hesitations is the last. When the first copy of a stutter has settled, the second
@@ -79,7 +80,7 @@ headsets, transcribed offline.
 
 | | Granite | Parakeet |
 |---|---:|---:|
-| Words left out | 566 | 563 |
+| Words left out | 565 | 562 |
 | Hesitations written for a spoken um or uh that went | 430 of 430 | 428 of 428 |
 | Stutters of the listed words written twice that went | 57 of 57 | 57 of 57 |
 | Meant words left out | 0 | 0 |
@@ -87,12 +88,17 @@ headsets, transcribed offline.
 Granite also left out two words and Parakeet one that the reference counts as meant, each a copy
 of a stutter the model wrote once more than the reference spells it ("a a a sophisticated chip"
 for "a a sophisticated chip"). Where a model wrote a hesitation for a word ("uh" for "a"), the
-word was lost with it, 15 times with Granite and 17 with Parakeet.
+word was lost with it, 15 times with Granite and 17 with Parakeet. Each model also left an "Ah,"
+that starts a sentence and that AMI's annotators mark as a hesitation.
 
 Streamed in steps of half a second, on 50 of those utterances, no settled or tentative text
 showed a hesitation and no stutter was left, and the words left out were those offline left out
 wherever the stream wrote the same words as offline.
 
-On read speech (LibriSpeech's dev sets, 5,567 utterances) the text of 24 utterances changed with
-Granite and 27 with Parakeet. In 20 of each, the change was an "Ah" of the book's text ("Ah,
-maiden, said he"), and four more were stutters the books print ("I I don't know").
+On read speech, the rule as it was before "Ah" with a capital stayed changed the text of 24 of
+LibriSpeech's 5,567 dev utterances with Granite and 27 with Parakeet. In 20 of each, the change
+was an "Ah" of the book's text ("Ah, maiden, said he"), and four more were stutters the books
+print ("I I don't know"). With the rule as it is now, 6 of 2,912 LibriSpeech train-clean-100
+utterances changed with Granite and 8 of 2,904 with Parakeet. All but one left out a hesitation
+or a stutter the book prints ("We—er—I came", "I—I did not know") or a word the model wrote
+twice, and the other was an "ah" Parakeet wrote in lower case where the book meant it.

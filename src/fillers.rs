@@ -5,7 +5,8 @@
 //! - A hesitation sound such as um, umm, uh, uhh, uhm, er, erm, ah, hm, hmm, mm or mmm, or a longer
 //!   spelling of one, the whole word in lower case or with one capital. "mm" after a number
 //!   stays, as millimetres, and so does a word in capitals (UM), as an acronym. "Ah" with a
-//!   capital stays too, as the interjection ("Ah, that's why").
+//!   capital stays too. It's usually the interjection ("Ah, that's why"), and a hesitation a
+//!   model writes with a capital, as at a sentence's start, stays with it on purpose.
 //! - The first of two adjacent copies of a word that can't end a clause, in any case, with a comma
 //!   or a hesitation between them or nothing ("the the", "I, I", "it's it's"). A period, question
 //!   mark or exclamation mark between them keeps both. The words are a, an, the, and, or, but, I,
@@ -458,8 +459,8 @@ fn is_hesitation(word: &str, previous: Option<&str>) -> bool {
     let letters: String = runs.iter().map(|r| r.0).collect();
     let sound = match letters.as_str() {
         "um" | "uh" | "uhm" | "erm" | "hm" => true,
-        // With a capital it's the interjection, as both models write it in read speech, even
-        // mid-sentence ("Ah, madam, said he", "to you, Ah, madam").
+        // With a capital it's usually the interjection, as both models write it in read speech
+        // even mid-sentence ("to you, Ah, madam"), so it stays, a hesitation written so included.
         "ah" => word == lower,
         "er" => runs == [('e', 1), ('r', 1)],
         "m" => runs[0].1 >= 2,
@@ -650,6 +651,24 @@ mod tests {
             "Ahh, I see.",
         ] {
             assert_eq!(english().remove(text), text, "{text}");
+        }
+    }
+
+    #[test]
+    fn ah_goes_only_in_lower_case() {
+        for (text, want) in [
+            ("we could ah use it", "we could use it"),
+            ("ahh, let me think", "let me think"),
+            ("So, ah. Fine.", "So. Fine."),
+            // A capital keeps it, a sentence's hesitation as well as the interjection.
+            (
+                "Ah, let me think, I need a minute",
+                "Ah, let me think, I need a minute",
+            ),
+            ("Ahh, um, so the plan", "Ahh, so the plan"),
+            ("AH", "AH"),
+        ] {
+            assert_eq!(english().remove(text), want, "{text}");
         }
     }
 
