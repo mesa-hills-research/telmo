@@ -27,11 +27,11 @@ stream.finish()?;
 
 1. The audio is resampled to 16 kHz and split into utterances by voice activity. An utterance
    starts after 150 ms above an adaptive noise floor and keeps the 300 ms before that. The
-   floor starts at the quietest of the first 300 ms, or of all the audio when it ends sooner,
-   and audio that opens in the middle of a word keeps that word, since its first utterance then
-   starts at the first sample. It ends
-   after 600 ms below the floor once the model has heard no word in the last 400 ms, and an
-   utterance longer than 30 s is cut at its quietest point.
+   floor starts at the quietest of the first 300 ms, or of all the audio when it ends sooner.
+   Audio that opens in the middle of a word keeps that word when speech is found in its first
+   2 s, since its first utterance then starts at the first sample. An utterance ends after
+   600 ms below the floor once the model has heard no word in the last 400 ms, and one longer
+   than 30 s is cut at its quietest point.
 2. Passes over the current utterance run at least `min_interval` (0.5 s) apart, and at least
    1.5 times the last pass's duration apart, so a slow computer shows tentative text less often
    instead of falling behind.
