@@ -1600,8 +1600,8 @@ const KEPT: usize = if SpecialWords::MAX_PARTS - 1 > MAX_REPEAT {
 /// pass, and a copy of it said again stays. A word fits when its frames overlap the settled
 /// word's or start less than [`FIT`] frames after them. A word on the settled word's frames may
 /// also be just the end of a spelling ("control" of "cube control"), as the pass's window began
-/// inside it, or the word split another way with only its end the same ("themselves" heard
-/// again as "inselves").
+/// inside it, the word split another way with only its end the same ("themselves" heard again
+/// as "inselves"), or the word cut short ("be" for "beep"), so a copy after it stays.
 fn heard_again(settled: &[SettledWord], texts: &[String], frames: &[Range<usize>]) -> Vec<bool> {
     let mut taken = vec![false; texts.len()];
     let mut from = 0;
@@ -1630,7 +1630,20 @@ fn heard_again(settled: &[SettledWord], texts: &[String], frames: &[Range<usize>
             };
             let ends_like = |sp: &Vec<String>| sp.len() == 1 && shares_end(&rest[0], &sp[0]);
             let same_end = || s.spellings.iter().any(ends_like).then_some(1);
-            let k = whole.or_else(|| inside.then(|| end().or_else(same_end)).flatten())?;
+            // A word on the settled word's frames that starts it ("be" for "beep") is the
+            // settled word heard in place, cut short, so a copy after it was said again.
+            let starts_like = |sp: &Vec<String>| {
+                sp.len() == 1
+                    && rest[0].chars().count() >= 2
+                    && sp[0].len() > rest[0].len()
+                    && sp[0].starts_with(rest[0].as_str())
+            };
+            let same_start = || s.spellings.iter().any(starts_like).then_some(1);
+            let k = whole.or_else(|| {
+                inside
+                    .then(|| end().or_else(same_end).or_else(same_start))
+                    .flatten()
+            })?;
             fits(frames[j].start..frames[j + k - 1].end).then_some((j, k))
         });
         if let Some((j, k)) = found {
@@ -2523,8 +2536,25 @@ mod tests {
         tokens: &[(u32, usize, usize)],
         context: usize,
     ) -> String {
-        let (mut s, tok) = stream_with(&SpecialWords::new(), 50);
-        s.recent = vec![settled(&tok, ids, frames.clone())];
+        granite_pass_with(
+            &crate::biasing::tests::tokenizer(),
+            ids,
+            frames,
+            tokens,
+            context,
+        )
+    }
+
+    /// The same with tokenizer `tok`.
+    fn granite_pass_with(
+        tok: &Tokenizer,
+        ids: &[u32],
+        frames: Range<usize>,
+        tokens: &[(u32, usize, usize)],
+        context: usize,
+    ) -> String {
+        let mut s = stream_for(&SpecialWords::new(), tok, 50);
+        s.recent = vec![settled(tok, ids, frames.clone())];
         s.last_settled = ids.last().copied();
         s.resume = Resume::Ctc {
             frame: frames.end,
@@ -2546,7 +2576,7 @@ mod tests {
             tokens,
             new: context,
         };
-        s.settle(&tok, heard, &PassConfig::default(), PassMode::Tentative)
+        s.settle(tok, heard, &PassConfig::default(), PassMode::Tentative)
             .tentative
     }
 
@@ -2562,6 +2592,24 @@ mod tests {
         // Right after the settled word's comma, it was said again too ("No, no").
         let after_comma = [(6, 0, 2), (7, 2, 3), (6, 3, 4), (42, 40, 41)];
         assert_eq!(granite_pass(&[6, 7], 0..3, &after_comma, 2), " the New");
+    }
+
+    #[test]
+    fn a_settled_word_heard_in_place_cut_short_keeps_a_copy_after_it() {
+        // Granite settled "cube" on frames 10 to 12, and a later pass hears "cu" there and "cube"
+        // two frames after it ("beep beep" heard as "be | beep").
+        let cut = [(36, 11, 12), (4, 14, 15), (42, 40, 41)];
+        assert_eq!(granite_pass(&[4], 10..13, &cut, 1), " cube New");
+        // A common word that starts the settled one counts the same way ("the" for "there").
+        let tok = word_tokenizer(&["there", "the", "New"]);
+        let common = [(2, 11, 12), (1, 14, 15), (3, 40, 41)];
+        assert_eq!(
+            granite_pass_with(&tok, &[1], 10..13, &common, 1),
+            " there New"
+        );
+        // With nothing heard in place, the copy is still the settled word placed later.
+        let moved = [(4, 14, 15), (42, 40, 41)];
+        assert_eq!(granite_pass(&[4], 10..13, &moved, 0), " New");
     }
 
     #[test]

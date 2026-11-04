@@ -77,7 +77,9 @@ followed only by hesitations is the last. When the first copy of a stutter has s
 goes instead. A sentence end left by a hesitation follows the settled text, unless that ends in a
 comma, and a comma already settled stays even where a hesitation after it would take it. A pass often hears the settled words again, and a stream drops those, but a word said twice
 ("no, no") keeps both copies. Each settled word stands for one word of the pass, heard on its audio
-or starting less than 240 ms after it, and any other copy was said again.
+or starting less than 240 ms after it, and any other copy was said again. A word heard on its audio
+that starts it, cut short ("be" for "beep"), stands for it too, so a copy right after that was
+said again.
 
 An utterance goes on from the last words the one before it settled, so a stutter split by a pause
 loses its second copy ("to design the" then "the product"), unless a sentence end comes between
