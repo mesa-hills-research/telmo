@@ -222,6 +222,41 @@ impl std::fmt::Debug for Tagger {
     }
 }
 
+/// Rules that keep a word any stage of the cleanup, the fillers' included, would take where
+/// dictation needs it. They keep a spoken symbol and the words beside it ("dash dash force
+/// dash push"), a short unit after a number ("5 mm"), a filler talked about as a word ("delete
+/// ums") or a quoted word, list items that share their first word ("cleaner build, cleaner
+/// layout"), a cut that would leave a broken repeat ("we just need to uh we need to"), and a
+/// phrase said again in parallel or in contrast ("what they prefer what they not prefer"). They
+/// read at most three words ahead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Guards {
+    _english: (),
+}
+
+impl Guards {
+    /// The guards of a language given as an ISO 639-1 code, with or without a region, or none
+    /// if Telmo has none for it. English is the only one so far.
+    pub fn for_language(code: &str) -> Option<Guards> {
+        Fillers::for_language(code).map(|_| Guards { _english: () })
+    }
+
+    /// Which of the `deleted` words of `words`, a whole utterance, these guards keep.
+    pub fn veto(&self, words: &[&str], deleted: &[bool]) -> Vec<bool> {
+        (units::vetoes(words, deleted).iter())
+            .map(|kinds| !kinds.is_empty())
+            .collect()
+    }
+
+    /// `deleted` without the deletions these guards veto.
+    pub(crate) fn apply(&self, words: &[&str], deleted: &mut [bool]) {
+        let vetoed = self.veto(words, deleted);
+        for (d, v) in deleted.iter_mut().zip(vetoed) {
+            *d &= !v;
+        }
+    }
+}
+
 /// Converts a tagger's checkpoint into pack entries in `precision`. `src` holds the weights
 /// under Hugging Face's names, each member's after `members.N.` when there are several, and
 /// `tagger_json` the settings. The matrices and the token embedding take `precision`, which
@@ -353,7 +388,7 @@ impl Tagger {
     /// spaces.
     pub fn remove(&self, text: &str) -> String {
         let words: Vec<&str> = text.split_whitespace().collect();
-        Fillers::text(&words, &self.plan(&words, &Protected::default()))
+        Fillers::text(&words, &self.plan(&words, &Protected::default(), None))
     }
 
     /// What happens to each of `words`, a whole utterance as the speech model wrote it.
@@ -361,11 +396,20 @@ impl Tagger {
         self.decide_protected(words, &Protected::default())
     }
 
-    /// The edits of `words`, a whole utterance, with the words of a `protected` spelling kept.
-    pub(crate) fn plan(&self, words: &[&str], protected: &Protected) -> Vec<Edit> {
-        let deleted: Vec<bool> = (self.decide_protected(words, protected).iter())
+    /// The edits of `words`, a whole utterance, with the words of a `protected` spelling kept
+    /// and the deletions `guards` veto undone.
+    pub(crate) fn plan(
+        &self,
+        words: &[&str],
+        protected: &Protected,
+        guards: Option<&Guards>,
+    ) -> Vec<Edit> {
+        let mut deleted: Vec<bool> = (self.decide_protected(words, protected).iter())
             .map(|d| d.deleted)
             .collect();
+        if let Some(guards) = guards {
+            guards.apply(words, &mut deleted);
+        }
         self.fillers.tidy_deletions(words, &deleted, protected)
     }
 
@@ -560,6 +604,7 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::fillers::Context;
 
     /// Random tensors under Hugging Face's names.
     struct Random {
@@ -673,7 +718,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_light_tagger_needs_no_model() {
+    fn the_light_tagger_needs_no_model_and_guards_veto_any_stage() {
         let light = Tagger::light();
         assert_eq!((light.members(), light.config().is_none()), (0, true));
         let words: Vec<&str> = "Um the des design is small".split(' ').collect();
@@ -683,6 +728,23 @@ pub(crate) mod tests {
             light.remove("Um the des design is small"),
             "The design is small"
         );
+        // The light network takes the first "Dash" for a repeat, and the guards keep it.
+        let guards = Guards::for_language("en-US").unwrap();
+        let flag: Vec<&str> = "Dash dash force dash push".split(' ').collect();
+        let plan = |g| Fillers::text(&flag, &light.plan(&flag, &Protected::default(), g));
+        assert_eq!(plan(None), "Dash force dash push");
+        assert_eq!(plan(Some(&guards)), "Dash dash force dash push");
+        // Tier 1 alone: a hesitation beside a spoken symbol stays too.
+        let fillers = Fillers::for_language("en").unwrap();
+        let words: Vec<&str> = "type dash um v".split(' ').collect();
+        let edits = fillers.plan_guarded(
+            &Context::default(),
+            &words,
+            &Protected::default(),
+            Some(&guards),
+        );
+        assert_eq!(Fillers::text(&words, &edits), "type dash um v");
+        assert!(Guards::for_language("de").is_none());
     }
 
     #[test]

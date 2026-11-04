@@ -1,5 +1,6 @@
-//! A network of hand-set units over each word's spelling, its word classes and whether it
-//! matches the next words, the light cleanup, which deletes disfluencies.
+//! Networks of hand-set units over each word's spelling, its word classes and whether it
+//! matches the next words. One, the light cleanup, deletes disfluencies. The other, the guards,
+//! vetoes deletions that change what dictation says.
 //!
 //! Every input is 0 or 1. A unit adds 1 for each input it needs or takes any of, subtracts 3 for
 //! each that blocks it, adds its bias (1 less the count of needs by default) and clips the sum to
@@ -58,20 +59,52 @@ dunno reckon say said maybe no right sure just also even actually basically real
 yes";
 /// Short words the cut-off rules took for fragments in meeting transcripts.
 const MORE_KNOWN: &str = "wee mac mic sec veg alt ooh ada ami ass eh ta hi";
+/// Spoken names of symbols, as in a dictated flag or path ("dash dash force dash push").
+const SYMBOLS: &str =
+    "dash hyphen slash backslash underscore tilde caret ampersand asterisk pipe hashtag";
+const NUMBER_WORDS: &str = "zero one two three four five six seven eight nine ten eleven twelve
+thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty
+seventy eighty ninety hundred thousand million billion";
+const NEGATION: &str = "not no never none nothing don't doesn't didn't isn't aren't wasn't weren't
+won't can't cannot couldn't shouldn't wouldn't haven't hasn't hadn't ain't nor neither without";
+/// Units a spelled-out number may take ("five mm").
+const UNIT_NAMES: &str = "mm cm km kg mg ml ms sec secs min mins hr hrs gb mb kb tb hz khz mhz ghz
+px pt db dpi fps ft lb lbs oz mph kph";
+/// The second words of filler phrases ("I mean,", "you know,", "let's see,").
+const PHRASE_TAILS: &str = "mean know think guess see dunno";
+
 /// The spelling and punctuation features of a word.
-const SPELLING: [&str; 12] = [
-    "hes", "comma", "end", "punct", "bare", "cap", "allcaps", "letters", "ordinary", "quote",
-    "start", "last",
+const SPELLING: [&str; 18] = [
+    "hes",
+    "comma",
+    "end",
+    "punct",
+    "bare",
+    "cap",
+    "allcaps",
+    "letters",
+    "ordinary",
+    "quote",
+    "start",
+    "last",
+    "numeric",
+    "digits",
+    "short3",
+    "hes_um",
+    "plural_hes",
+    "quoted",
 ];
 /// Whether a word equals the word k places on (`same_k`), or is a proper prefix of it
 /// (`pre_k`), with how far ahead each looks.
-const MATCHES: [(&str, i32); 6] = [
+const MATCHES: [(&str, i32); 8] = [
     ("same1", 1),
     ("same2", 2),
     ("same3", 3),
     ("pre1", 1),
     ("pre2", 2),
     ("pre3", 3),
+    ("same4", 4),
+    ("same5", 5),
 ];
 
 /// The word classes, by feature name.
@@ -124,6 +157,11 @@ fn classes() -> &'static Vec<(String, HashSet<String>)> {
             ("clause_before".into(), set(&[CLAUSE_BEFORE])),
             ("i_cut".into(), set(&[I_CUT])),
             ("w_a".into(), set(&["a"])),
+            ("symbol".into(), set(&[SYMBOLS])),
+            ("numword".into(), set(&[NUMBER_WORDS])),
+            ("neg".into(), set(&[NEGATION])),
+            ("unitname".into(), set(&[UNIT_NAMES])),
+            ("phrase_tail".into(), set(&[PHRASE_TAILS])),
         ];
         for w in WORD_FLAGS.split_whitespace() {
             out.push((format!("w_{w}"), set(&[w])));
@@ -132,7 +170,7 @@ fn classes() -> &'static Vec<(String, HashSet<String>)> {
     })
 }
 
-/// One unit: its name, the kind of tag it gives (empty for one other units read), its
+/// One unit: its name, the kind of tag or guard it gives (empty for one other units read), its
 /// inputs as (offset, feature, weight), and its bias.
 struct Unit {
     name: String,
@@ -155,7 +193,7 @@ struct Network {
 type Input<'a> = (i32, &'a str);
 
 impl Network {
-    fn new() -> Network {
+    fn new(extra: &[(&str, i32)]) -> Network {
         let mut network = Network {
             index: HashMap::new(),
             look: Vec::new(),
@@ -170,7 +208,7 @@ impl Network {
         {
             network.push(name, 0);
         }
-        for (name, look) in MATCHES {
+        for &(name, look) in MATCHES.iter().chain(extra) {
             network.push(name, look);
         }
         network
@@ -254,13 +292,24 @@ impl Network {
         z
     }
 
-    /// The units of every layer that give a tag, with their features.
+    /// The units of every layer that give a tag or a guard, with their features.
     fn outputs(&self) -> Vec<(usize, &'static str)> {
         (self.layers.iter().flatten())
             .filter(|u| !u.kind.is_empty())
             .map(|u| (self.feature(&u.name), u.kind))
             .collect()
     }
+}
+
+/// The letters of `word` with each run of one letter written once ("umm" gives "um").
+fn runs(word: &str) -> String {
+    let mut out = String::new();
+    for c in word.chars() {
+        if !out.ends_with(c) {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// The features of each word that no unit computes, as `network` indexes them.
@@ -277,7 +326,10 @@ fn base(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
         let end = stripped.ends_with(['.', '?', '!']);
         let allcaps = core.chars().count() >= 2 && rules::is_upper(core);
         let only = |s: &str, f: fn(char) -> bool| !s.is_empty() && s.chars().all(f);
+        let digit = a.chars().any(|c| c.is_ascii_digit());
         let length = a.chars().count();
+        let rest = a.strip_suffix('s').unwrap_or("");
+        let squeezed = runs(rest);
         let mut set = |name: &str| z[i][network.feature(name)] = 1.0;
         let pairs = [
             ("hes", hes),
@@ -298,8 +350,33 @@ fn base(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
                     && !hes,
             ),
             ("quote", w.starts_with(['\'', '"'])),
+            // An opening quote mark, or a closing double one. A word that is all punctuation
+            // counts too, as the reference's empty last character matches any mark.
+            (
+                "quoted",
+                w.starts_with(['\'', '"', '“', '‘'])
+                    || (w
+                        .trim_end_matches(['.', ',', '?', '!', ';', ':'])
+                        .chars()
+                        .next_back())
+                    .is_none_or(|c| c == '"' || c == '”'),
+            ),
             ("start", i == 0),
             ("last", i + 1 == n),
+            ("numeric", digit || has_class("numword", a)),
+            ("digits", digit),
+            ("short3", (1..=3).contains(&length)),
+            // A hesitation that is never a unit or a word ("um", "uhm", "err").
+            (
+                "hes_um",
+                ["um", "uh", "uhm", "er", "erm"].contains(&runs(a).as_str()),
+            ),
+            // A hesitation talked about as a word ("ums", "ahs").
+            (
+                "plural_hes",
+                ["um", "uh", "er", "erm", "ah", "hm"].contains(&squeezed.as_str())
+                    || (squeezed == "m" && rest.len() >= 2),
+            ),
         ];
         for (name, on) in pairs {
             if on {
@@ -314,14 +391,15 @@ fn base(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
                 set(name);
             }
         }
-        // Matches with the words 1 to 3 places on.
+        // Matches with the words 1 to 5 places on.
         let chars: Vec<char> = a.chars().collect();
-        for k in 1..=3 {
+        for k in 1..=5 {
             let Some(b) = norms.get(i + k) else { break };
             if !a.is_empty() && a == b {
                 set(&format!("same{k}"));
             }
-            if (1..=MAXP).contains(&chars.len())
+            if k <= 3
+                && (1..=MAXP).contains(&chars.len())
                 && b.chars().count() > chars.len()
                 && b.chars().zip(&chars).all(|(x, &y)| x == y)
             {
@@ -342,7 +420,7 @@ fn has_class(name: &str, word: &str) -> bool {
 fn light_network() -> &'static (Network, Vec<(usize, &'static str)>) {
     static NETWORK: OnceLock<(Network, Vec<(usize, &'static str)>)> = OnceLock::new();
     NETWORK.get_or_init(|| {
-        let mut s = Network::new();
+        let mut s = Network::new(&[]);
         let longer: Vec<String> = (4..=MAXP + 1).map(|l| format!("len{l}")).collect();
         let longer: Vec<Input> = longer.iter().map(|l| (0, l.as_str())).collect();
 
@@ -887,6 +965,241 @@ fn light_network() -> &'static (Network, Vec<(usize, &'static str)>) {
     })
 }
 
+/// The guards' network and their features and kinds.
+fn guard_network() -> &'static (Network, Vec<(usize, &'static str)>) {
+    static NETWORK: OnceLock<(Network, Vec<(usize, &'static str)>)> = OnceLock::new();
+    NETWORK.get_or_init(|| {
+        let mut s = Network::new(&[("del", 0)]);
+        let mut g = Vec::new();
+        // A spoken symbol, or a word next to one ("dash dash force dash push").
+        s.unit(
+            &mut g,
+            "g_symbol",
+            "symbol",
+            &[],
+            &[(0, "symbol"), (-1, "symbol"), (1, "symbol")],
+            &[],
+            Some(0.0),
+        );
+        // A short token after digits ("5 mm", "3 d"), or a unit name after a spelled-out number.
+        s.unit(
+            &mut g,
+            "g_unit",
+            "unit",
+            &[(-1, "digits"), (0, "short3")],
+            &[],
+            &[(0, "hes_um"), (0, "known"), (0, "same1"), (-1, "del")],
+            None,
+        );
+        s.unit(
+            &mut g,
+            "g_unit_name",
+            "unit",
+            &[(-1, "numeric"), (0, "unitname")],
+            &[],
+            &[(0, "same1"), (-1, "del")],
+            None,
+        );
+        // A filler talked about as a word ("delete ums"), or a quoted word.
+        s.unit(
+            &mut g,
+            "g_mention",
+            "mention",
+            &[],
+            &[(0, "plural_hes"), (0, "quoted")],
+            &[],
+            Some(0.0),
+        );
+        // List items of two or three words whose first word starts the next item too ("cleaner
+        // build, cleaner layout"), with no marker, "like" or hesitation in them.
+        let lead = |o| [(o, "marker"), (o, "backch"), (o, "w_like"), (o, "hes")];
+        let block: Vec<Input> = lead(0)
+            .into_iter()
+            .chain([(1, "hes"), (1, "same2"), (1, "phrase_tail")])
+            .collect();
+        s.unit(
+            &mut g,
+            "g_list_2a",
+            "list",
+            &[(0, "bare"), (0, "same2"), (1, "comma")],
+            &[],
+            &block,
+            None,
+        );
+        let block: Vec<Input> = lead(-1)
+            .into_iter()
+            .chain([(0, "hes"), (0, "same2"), (0, "phrase_tail")])
+            .collect();
+        s.unit(
+            &mut g,
+            "g_list_2b",
+            "list",
+            &[(0, "comma"), (-1, "same2")],
+            &[],
+            &block,
+            None,
+        );
+        let block: Vec<Input> = lead(0)
+            .into_iter()
+            .chain([(1, "punct"), (1, "hes"), (2, "hes")])
+            .collect();
+        s.unit(
+            &mut g,
+            "g_list_3a",
+            "list",
+            &[(0, "bare"), (0, "same3"), (2, "comma")],
+            &[],
+            &block,
+            None,
+        );
+        let block: Vec<Input> = lead(-1)
+            .into_iter()
+            .chain([(0, "punct"), (0, "hes"), (1, "hes")])
+            .collect();
+        s.unit(
+            &mut g,
+            "g_list_3b",
+            "list",
+            &[(-1, "same3"), (1, "comma")],
+            &[],
+            &block,
+            None,
+        );
+        let block: Vec<Input> = lead(-2)
+            .into_iter()
+            .chain([(-1, "punct"), (-1, "hes"), (0, "hes")])
+            .collect();
+        s.unit(
+            &mut g,
+            "g_list_3c",
+            "list",
+            &[(0, "comma"), (-2, "same3")],
+            &[],
+            &block,
+            None,
+        );
+        // A cut of one to three words with a subject pronoun two before it, one kept word
+        // between, and the same pronoun right after it ("we just [need to] we need to").
+        for l in 1..=3i32 {
+            let around = format!("same{}", l + 2);
+            let first_copy = format!("same{l}");
+            let mut need: Vec<Input> = (0..l).map(|o| (o, "del")).collect();
+            need.extend([(-2, "subj"), (-2, around.as_str())]);
+            let mut block: Vec<Input> = vec![
+                (-1, "del"),
+                (l, "del"),
+                (-2, "del"),
+                (0, "hes"),
+                (0, "short3"),
+                (0, first_copy.as_str()),
+            ];
+            if l <= 2 {
+                block.push((-1, around.as_str()));
+            }
+            s.unit(
+                &mut g,
+                &format!("g_str_subj_{l}"),
+                "straddle",
+                &need,
+                &[],
+                &block,
+                None,
+            );
+        }
+        // Parallel and contrasting phrases: a one-word content cut whose frame comes back right
+        // after it, with or without a negation, or a lone cut word that returns three on.
+        let content = [
+            (0, "hes"),
+            (0, "short3"),
+            (0, "func"),
+            (0, "w_like"),
+            (0, "marker"),
+            (0, "backch"),
+            (0, "neg"),
+        ];
+        let with = |more: &[Input<'static>]| -> Vec<Input<'static>> {
+            content
+                .iter()
+                .copied()
+                .chain(more.iter().copied())
+                .collect()
+        };
+        s.unit(
+            &mut g,
+            "g_par_frame2",
+            "parallel",
+            &[(0, "del"), (-2, "same3"), (-1, "same3")],
+            &[],
+            &with(&[
+                (-2, "del"),
+                (-1, "del"),
+                (1, "del"),
+                (-1, "hes"),
+                (-2, "hes"),
+            ]),
+            None,
+        );
+        s.unit(
+            &mut g,
+            "g_par_lead",
+            "parallel",
+            &[(0, "del"), (0, "same3")],
+            &[],
+            &with(&[(1, "del"), (2, "del"), (3, "del"), (1, "hes"), (2, "hes")]),
+            None,
+        );
+        s.unit(
+            &mut g,
+            "g_con_frame2",
+            "contrast",
+            &[(0, "del"), (-2, "same3"), (-1, "same3"), (3, "neg")],
+            &[],
+            &with(&[(-2, "del"), (-1, "del"), (1, "del")]),
+            None,
+        );
+        s.unit(
+            &mut g,
+            "g_con_frame1",
+            "contrast",
+            &[(0, "del"), (-1, "same2"), (2, "neg")],
+            &[],
+            &with(&[(-1, "del"), (1, "del"), (-1, "hes")]),
+            None,
+        );
+        s.close(g);
+        // The straddle veto reaches the later words of the cut.
+        let mut h = Vec::new();
+        let any: Vec<Input> = [("g_str_subj_1"), ("g_str_subj_2"), ("g_str_subj_3")]
+            .iter()
+            .map(|&u| (0, u))
+            .collect();
+        s.unit(&mut h, "g_str_any", "", &[], &any, &[], Some(0.0));
+        s.close(h);
+        let mut r = Vec::new();
+        s.unit(
+            &mut r,
+            "g_str_run1",
+            "straddle",
+            &[(0, "del"), (-1, "del"), (-1, "g_str_any")],
+            &[],
+            &[(0, "hes")],
+            None,
+        );
+        s.unit(
+            &mut r,
+            "g_str_run2",
+            "straddle",
+            &[(0, "del"), (-1, "del"), (-2, "del"), (-2, "g_str_any")],
+            &[],
+            &[(0, "hes")],
+            None,
+        );
+        s.close(r);
+        let outputs = s.outputs();
+        (s, outputs)
+    })
+}
+
 /// For each of `words`, the kind of the light cleanup's first detector that deletes it ("H",
 /// "RM" or "F"), or none.
 pub(crate) fn light(words: &[&str]) -> Vec<Option<&'static str>> {
@@ -897,6 +1210,29 @@ pub(crate) fn light(words: &[&str]) -> Vec<Option<&'static str>> {
             (detectors.iter())
                 .find(|&&(f, _)| row[f] > 0.0)
                 .map(|&(_, kind)| kind)
+        })
+        .collect()
+}
+
+/// For each of `words`, the kinds of guard that veto its deletion, `deleted` being any stage's
+/// deletions. A word that isn't deleted has none.
+pub(crate) fn vetoes(words: &[&str], deleted: &[bool]) -> Vec<Vec<&'static str>> {
+    let (network, guards) = guard_network();
+    let mut z = base(network, words);
+    let del = network.feature("del");
+    for (row, &d) in z.iter_mut().zip(deleted) {
+        row[del] = if d { 1.0 } else { 0.0 };
+    }
+    let z = network.run(z);
+    (z.iter().zip(deleted))
+        .map(|(row, &d)| {
+            let mut kinds: Vec<&'static str> = (guards.iter())
+                .filter(|&&(f, _)| d && row[f] > 0.5)
+                .map(|&(_, kind)| kind)
+                .collect();
+            kinds.sort_unstable();
+            kinds.dedup();
+            kinds
         })
         .collect()
 }
@@ -931,7 +1267,79 @@ mod tests {
 
     #[test]
     fn the_networks_look_three_words_ahead_at_most() {
-        let (network, _) = light_network();
-        assert!(network.layers.iter().flatten().all(|u| u.look <= LOOK));
+        for (network, _) in [light_network(), guard_network()] {
+            assert!(network.layers.iter().flatten().all(|u| u.look <= LOOK));
+        }
+    }
+
+    #[test]
+    fn guards_veto_deletions_that_change_the_meaning() {
+        let veto = |text: &str, deleted: &[usize]| {
+            let words: Vec<&str> = text.split(' ').collect();
+            let mask: Vec<bool> = (0..words.len()).map(|i| deleted.contains(&i)).collect();
+            vetoes(&words, &mask)
+        };
+        for (text, deleted, kept, kind) in [
+            ("Dash dash force dash push", &[2][..], &[2][..], "symbol"),
+            ("Dash dash force dash push", &[1], &[1], "symbol"),
+            ("the dash v build option", &[2], &[2], "symbol"),
+            ("The panel is 3 cm too tall", &[4], &[4], "unit"),
+            (
+                "Editors should usually delete ums and then fix spacing",
+                &[4],
+                &[4],
+                "mention",
+            ),
+            (
+                "set up like a cleaner build, cleaner layout for that one screen, cleaner tests around it",
+                &[4, 5],
+                &[4, 5],
+                "list",
+            ),
+            (
+                "we just need to uh we need to check it",
+                &[2, 3, 4],
+                &[2, 3],
+                "straddle",
+            ),
+            (
+                "what they prefer what they not prefer",
+                &[2],
+                &[2],
+                "parallel",
+            ),
+            (
+                "what they prefer what they not prefer",
+                &[2],
+                &[2],
+                "contrast",
+            ),
+            ("they prefer they not prefer", &[1], &[1], "contrast"),
+            (
+                "enhance our profit enhance our sales",
+                &[0],
+                &[0],
+                "parallel",
+            ),
+        ] {
+            let got = veto(text, deleted);
+            for &i in kept {
+                assert!(got[i].contains(&kind), "{text:?} word {i}: {:?}", got[i]);
+            }
+        }
+        for (text, deleted) in [
+            ("I I think the the idea is good", &[0, 3][..]),
+            ("we need some uh some help", &[2, 3]),
+            ("it was 5 uh 5 mm wide", &[3]),
+            ("the red, sorry, the blue one", &[1, 2, 3]),
+            ("yeah so des design a new remote", &[2]),
+            ("I know i i like to have", &[2]),
+            ("I added slides, um, I added a", &[2, 3]),
+            ("I mean, I suppose it would", &[0, 1]),
+            ("do you wan do you wanna finish", &[2]),
+            ("twenty s functions of a remote", &[1]),
+        ] {
+            assert!(veto(text, deleted).iter().all(Vec::is_empty), "{text:?}");
+        }
     }
 }

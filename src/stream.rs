@@ -1325,12 +1325,12 @@ fn remove_fillers(
     else {
         return hyp;
     };
-    fillers.rewrite(
+    let guards = words.guards.as_ref();
+    crate::fillers::rewrite(
         tokenizer,
         hyp,
         |h| h.id,
-        context,
-        &words.protected,
+        |texts| fillers.plan_guarded(context, texts, &words.protected, guards),
         |word, ids| {
             let (first, last) = (&word[0], &word[word.len() - 1]);
             (ids.iter().enumerate())
@@ -1361,10 +1361,15 @@ fn hold_until_last(
     let text = format!("{utterance}{tentative}");
     let list: Vec<&str> = text.split_whitespace().collect();
     let edits = match &words.disfluencies {
-        Some(tagger) if last => tagger.plan(&list, &words.protected),
+        Some(tagger) if last => tagger.plan(&list, &words.protected, words.guards.as_ref()),
         _ => fillers::Fillers::for_language("en")
             .expect("English has filler rules")
-            .plan(&Context::default(), &list, &words.protected),
+            .plan_guarded(
+                &Context::default(),
+                &list,
+                &words.protected,
+                words.guards.as_ref(),
+            ),
     };
     let mut text = fillers::Fillers::text(&list, &edits);
     if !text.is_empty() {

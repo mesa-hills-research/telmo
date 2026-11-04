@@ -2,8 +2,8 @@
 //! another implementation.
 //!
 //! ```text
-//! cargo run --release --example disfluency -- TAGGER ROWS.jsonl [--threads N] > OUT.jsonl
-//! cargo run --release --example disfluency -- --light ROWS.jsonl > OUT.jsonl
+//! cargo run --release --example disfluency -- TAGGER ROWS.jsonl [--threads N] [--guards] > OUT.jsonl
+//! cargo run --release --example disfluency -- --light ROWS.jsonl [--guards] > OUT.jsonl
 //! ```
 //!
 //! TAGGER is a pack or an export directory (converted to f32), and `--light` takes the light
@@ -11,14 +11,15 @@
 //! wrote them. Each output line holds the `id`, whether each word is `deleted`, the tagger's
 //! probability `p` (1 where the filler rules delete the word), its most likely deleting tag's
 //! first letter in `letters`, and whether the filler rules (`filler`), the other rules or the
-//! light network (`rule`), or either (`rules`) delete it.
+//! light network (`rule`), or either (`rules`) delete it. With `--guards`, `guarded` is
+//! `deleted` with the guards' vetoes undone.
 
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use telmo::disfluency::Tagger;
+use telmo::disfluency::{Guards, Tagger};
 use telmo::json::{self, Value};
 use telmo::{Options, Precision};
 
@@ -44,10 +45,11 @@ fn run() -> Result<(), String> {
         ..Options::default()
     };
     let mut paths: Vec<PathBuf> = Vec::new();
-    let mut light = false;
+    let (mut light, mut guards) = (false, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--light" => light = true,
+            "--guards" => guards = Guards::for_language("en"),
             "--threads" => {
                 options.threads =
                     (args.next().and_then(|t| t.parse().ok())).ok_or("--threads takes a number")?
@@ -63,7 +65,7 @@ fn run() -> Result<(), String> {
         ),
         _ => {
             return Err(
-                "Usage: disfluency TAGGER ROWS.jsonl [--threads N], or disfluency --light ROWS.jsonl".into(),
+                "Usage: disfluency TAGGER ROWS.jsonl [--threads N] [--guards], or disfluency --light ROWS.jsonl [--guards]".into(),
             );
         }
     };
@@ -83,9 +85,17 @@ fn run() -> Result<(), String> {
             .map(|d| format!("{:?}", if d.filler { 1.0 } else { d.probability }))
             .collect();
         let deleted: Vec<bool> = decided.iter().map(|d| d.deleted).collect();
+        let guarded = match &guards {
+            Some(g) => {
+                let vetoed = g.veto(&words, &deleted);
+                let kept = (deleted.iter().zip(vetoed)).map(|(&d, v)| d && !v);
+                format!(r#","guarded":{}"#, flags(kept))
+            }
+            None => String::new(),
+        };
         writeln!(
             out,
-            r#"{{"id":{},"deleted":{},"p":[{}],"letters":"{}","filler":{},"rule":{},"rules":{}}}"#,
+            r#"{{"id":{},"deleted":{},"p":[{}],"letters":"{}","filler":{},"rule":{},"rules":{}{guarded}}}"#,
             id.to_json(),
             flags(deleted.iter().copied()),
             p.join(","),
