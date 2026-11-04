@@ -46,7 +46,9 @@ stream.finish()?;
    words still changes and often hears a word said twice as one. That costs about a second. On
    151 streamed AMI meeting clips, Parakeet's first settled word came a median 2.8 s after speech
    started instead of 1.7 s, and 4.0 s instead of 3.7 s at the 90th percentile. Tentative text
-   shows as early as before. When the utterance ends, a last pass settles everything.
+   shows as early as before. When the utterance ends, a last pass settles everything. With a
+   list that leaves out [disfluencies](disfluencies.md), nothing settles before then, and the
+   last pass settles the whole utterance cleaned.
 5. A sentence end that closes an utterance stays tentative until the next utterance's first
    words settle, or the stream finishes, since a pause can split a sentence. It goes when they
    start with a comma or a lower-case word that joins words, such as "and", "rather", "of" or
