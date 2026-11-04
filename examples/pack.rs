@@ -7,15 +7,17 @@
 //!
 //! MODEL is a directory holding `model.safetensors`, `config.json` and `tokenizer.json` of
 //! Parakeet TDT or Granite Speech, or NVIDIA's Parakeet GGUF file with `tokenizer.json` beside
-//! it. `--precision` is f32, f16, bf16, int8 or q8_0. By default it is the model's recommended
-//! 8-bit precision, q8_0 for Parakeet (which keeps a GGUF file's blocks as they are) and int8 for
-//! Granite. `--list` prints a pack's metadata and entries.
+//! it, or a disfluency tagger's directory, which also holds `tagger.json`. `--precision` is f32,
+//! f16, bf16, int8 or q8_0. By default it is the model's recommended 8-bit precision, q8_0 for
+//! Parakeet (which keeps a GGUF file's blocks as they are) and the tagger, and int8 for Granite.
+//! `--list` prints a pack's metadata and entries.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
 use telmo::Precision;
+use telmo::disfluency;
 use telmo::model::ModelType;
 use telmo::pack::{self, FileSink, Kind, Pack};
 
@@ -71,18 +73,29 @@ fn run() -> Result<(), String> {
         return Err("Usage: pack MODEL OUT.pack [--precision P], or pack --list FILE.pack".into());
     };
     let start = Instant::now();
-    let model = ModelType::detect(input).map_err(|e| e.to_string())?;
-    let precision = precision.unwrap_or(model.recommended_precision());
-    let mut sink = FileSink::create(
-        output,
-        model.pack_model(),
-        pack::metadata_for(input, precision),
-    )
-    .map_err(|e| e.to_string())?;
-    model
-        .convert_path(input, precision, &mut sink)
+    let precision = if input.join("tagger.json").is_file() {
+        let precision = precision.unwrap_or(disfluency::RECOMMENDED_PRECISION);
+        let metadata = pack::metadata_for(input, precision);
+        let mut sink = FileSink::create(output, disfluency::PACK_MODEL, metadata)
+            .map_err(|e| e.to_string())?;
+        disfluency::convert_path(input, precision, &mut sink).map_err(|e| e.to_string())?;
+        sink.finish().map_err(|e| e.to_string())?;
+        precision
+    } else {
+        let model = ModelType::detect(input).map_err(|e| e.to_string())?;
+        let precision = precision.unwrap_or(model.recommended_precision());
+        let mut sink = FileSink::create(
+            output,
+            model.pack_model(),
+            pack::metadata_for(input, precision),
+        )
         .map_err(|e| e.to_string())?;
-    sink.finish().map_err(|e| e.to_string())?;
+        model
+            .convert_path(input, precision, &mut sink)
+            .map_err(|e| e.to_string())?;
+        sink.finish().map_err(|e| e.to_string())?;
+        precision
+    };
     let bytes = std::fs::metadata(output).map_err(|e| e.to_string())?.len();
     eprintln!(
         "Wrote {} ({:.0} MB, {precision}) in {:.1} s.",
