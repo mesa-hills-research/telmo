@@ -37,7 +37,7 @@ const PUNCT: [char; 6] = [',', '.', '?', '!', ';', ':'];
 const SENTENCE_END: [char; 3] = ['.', '?', '!'];
 
 /// English words of one to four letters, never taken for a cut-off word.
-const WORDS: &str = "
+pub(crate) const WORDS: &str = "
 a i
 ad am an as at be by do go he hi if in is it me my no of oh ok on or so to up us we
 ace act add ado age ago aid aim air all and ant any ape apt arc are ark arm art ash ask ate awe
@@ -226,7 +226,7 @@ fn split(word: &str) -> (&str, &str, &str) {
 }
 
 /// Whether the word is a hesitation sound ("um", "Uh", "hmm"), a capitalized "Ah" included.
-fn is_hesitation(word: &str) -> bool {
+pub(crate) fn is_hesitation(word: &str) -> bool {
     let core = split(word).1;
     if core.is_empty() {
         return false;
@@ -264,7 +264,7 @@ pub(crate) fn norm(word: &str) -> String {
 }
 
 /// Whether `word` has a cased letter and every cased letter is a capital.
-fn is_upper(word: &str) -> bool {
+pub(crate) fn is_upper(word: &str) -> bool {
     word.chars().any(char::is_uppercase) && !word.chars().any(char::is_lowercase)
 }
 
