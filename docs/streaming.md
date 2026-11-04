@@ -50,7 +50,8 @@ stream.finish()?;
    meeting clips holding a word said twice, Parakeet wrote both copies of 96.4% of those doubles
    with the 4 s margin against 94.4% with 1 s, and a word settled a median 4.0 s after it ended
    instead of 1.3 s. Tentative text shows as early as before. When the utterance ends, a last
-   pass settles everything.
+   pass settles everything. With a list that leaves out [disfluencies](disfluencies.md),
+   nothing settles before then, and the last pass settles the whole utterance cleaned.
 5. A sentence end that closes an utterance stays tentative until the next utterance's first
    words settle, or the stream finishes, since a pause can split a sentence. It goes when they
    start with a comma or a lower-case word that joins words, such as "and", "rather", "of" or

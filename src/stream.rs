@@ -15,7 +15,8 @@
 //! wait. Fillers a list leaves out go from each pass's words before any settle, so tentative
 //! text never shows them. Settled words never change. When the utterance ends, one
 //! last pass settles everything, except a sentence end at its end, which waits for the next
-//! utterance's first words, since a pause can split a sentence.
+//! utterance's first words, since a pause can split a sentence. With a list that leaves out
+//! disfluencies, nothing settles before that last pass, which settles the utterance cleaned.
 //!
 //! [`Stream`] runs it all on a thread of its own. Audio of any sample rate goes in as it comes,
 //! voice activity splits it into utterances, passes run as often as the computer keeps up with,
@@ -428,6 +429,17 @@ impl UtteranceStream {
         let settled = tokenizer.decode_raw(&settled_ids);
         let tentative = tokenizer.decode_raw(&tentative_ids);
         self.settled.push_str(&settled);
+        let (settled, tentative) = match self.words.as_deref() {
+            Some(words) if words.disfluencies.is_some() => {
+                let (settled, tentative) = hold_until_last(words, &self.settled, &tentative, last);
+                if last {
+                    // The next utterance goes on from the text this one settled, cleaned.
+                    self.settled = settled.clone();
+                }
+                (settled, tentative)
+            }
+            _ => (settled, tentative),
+        };
         PassText {
             settled,
             tentative,
@@ -1389,7 +1401,13 @@ fn remove_fillers(
     context: &Context,
     hyp: Vec<Hyp>,
 ) -> Vec<Hyp> {
-    let Some(fillers) = &words.fillers else {
+    // With a disfluency tagger, the fillers stay until the utterance ends, as the tagger reads
+    // them.
+    let Some(fillers) = words
+        .fillers
+        .as_ref()
+        .filter(|_| words.disfluencies.is_none())
+    else {
         return hyp;
     };
     fillers.rewrite(
@@ -1413,6 +1431,35 @@ fn remove_fillers(
                 .collect()
         },
     )
+}
+
+/// The settled and tentative text of a pass when `words` leave out disfluencies, given the
+/// utterance's text settled so far, fillers in, and the pass's tentative text. Nothing settles
+/// before the `last` pass, which settles the whole utterance cleaned. Until then the tentative
+/// text is the utterance so far without its fillers.
+fn hold_until_last(
+    words: &Compiled,
+    utterance: &str,
+    tentative: &str,
+    last: bool,
+) -> (String, String) {
+    let text = format!("{utterance}{tentative}");
+    let list: Vec<&str> = text.split_whitespace().collect();
+    let edits = match &words.disfluencies {
+        Some(tagger) if last => tagger.plan(&list, &words.protected),
+        _ => fillers::Fillers::for_language("en")
+            .expect("English has filler rules")
+            .plan(&Context::default(), &list, &words.protected),
+    };
+    let mut text = fillers::Fillers::text(&list, &edits);
+    if !text.is_empty() {
+        text.insert(0, ' ');
+    }
+    if last {
+        (text, String::new())
+    } else {
+        (String::new(), text)
+    }
 }
 
 /// Joins settled words that spell an entry's spoken form or word whole into one with its
@@ -2048,6 +2095,32 @@ mod tests {
         assert_eq!(shown[1], "| the");
         assert_eq!(settled, " the city the");
         assert!(shown.iter().all(|s| !s.contains("uh")), "{shown:?}");
+    }
+
+    #[test]
+    fn with_disfluencies_an_utterance_settles_once_cleaned_when_it_ends() {
+        let mut words = SpecialWords::new();
+        let tagger = crate::disfluency::tests::tiny(2.0, 128, crate::Precision::F32);
+        words.set_disfluencies(Some(tagger));
+        let (mut s, tok) = stream_with(&words, 50);
+        let config = PassConfig::default();
+        let first: Vec<(u32, usize)> = [(6, 0)].into_iter().chain(uh(2)).collect();
+        let later: Vec<(u32, usize)> = (first.iter().copied())
+            .chain([(6, 3), (44, 4), (6, 40)])
+            .collect();
+        let mut shown = Vec::new();
+        for heard in [&first, &first, &later, &later] {
+            let out = s.settle(&tok, window(&s, heard), &config, PassMode::Tentative);
+            assert_eq!(out.settled, "");
+            shown.push(out.tentative);
+        }
+        // The tentative text is the utterance so far, fillers left out.
+        assert_eq!(shown, [" the", " the", " the city the", " the city the"]);
+        let out = s.settle(&tok, window(&s, &later), &config, PassMode::Final);
+        assert_eq!(
+            (out.settled.as_str(), out.tentative.as_str()),
+            (" the city the", "")
+        );
     }
 
     #[test]

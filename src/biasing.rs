@@ -23,7 +23,9 @@ pub(crate) mod tdt_beam;
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::Arc;
 
+use crate::disfluency::Tagger;
 use crate::error::{Error, Result};
 use crate::fillers::{Context, Fillers, Protected};
 use crate::parakeet::Token;
@@ -186,7 +188,7 @@ impl fmt::Display for Rejection {
 impl std::error::Error for Rejection {}
 
 /// Words to favour while decoding, each in its usual spelling, spoken forms to write as words,
-/// and fillers to leave out.
+/// and fillers and disfluencies to leave out.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SpecialWords {
     words: Vec<String>,
@@ -194,6 +196,17 @@ pub struct SpecialWords {
     spoken: Vec<(String, String)>,
     boost: Boost,
     fillers: Option<Fillers>,
+    disfluencies: Option<SharedTagger>,
+}
+
+/// A tagger shared by lists, equal to another only when it's the same one.
+#[derive(Debug, Clone)]
+struct SharedTagger(Arc<Tagger>);
+
+impl PartialEq for SharedTagger {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 impl SpecialWords {
@@ -302,6 +315,19 @@ impl SpecialWords {
     /// word with `None`, the default. A special word is never taken for a filler.
     pub fn set_fillers(&mut self, fillers: Option<Fillers>) {
         self.fillers = fillers;
+    }
+
+    pub fn disfluencies(&self) -> Option<&Arc<Tagger>> {
+        self.disfluencies.as_ref().map(|t| &t.0)
+    }
+
+    /// Leaves out the disfluencies `tagger` finds, English fillers included whatever
+    /// [`SpecialWords::set_fillers`] says, or none with `None`, the default. It runs once over
+    /// each transcript, and in a stream once over each utterance when it ends, so an utterance's
+    /// text stays tentative until then. A special word is never taken for one. The tagger is
+    /// trained on English, so set it only for English speech.
+    pub fn set_disfluencies(&mut self, tagger: Option<Arc<Tagger>>) {
+        self.disfluencies = tagger.map(SharedTagger);
     }
 }
 
@@ -650,6 +676,8 @@ pub(crate) struct Compiled {
     pub spoken: Spoken,
     /// The fillers to leave out after that.
     pub fillers: Option<Fillers>,
+    /// The tagger that leaves out disfluencies, fillers included, in place of `fillers`.
+    pub disfluencies: Option<Arc<Tagger>>,
     /// The special words and spoken forms' words, which keep their spelling.
     pub protected: Protected,
 }
@@ -763,6 +791,7 @@ impl Compiled {
                 boost,
                 spoken,
                 fillers: words.fillers,
+                disfluencies: words.disfluencies().cloned(),
                 protected: Protected::new(
                     words
                         .words()
@@ -775,7 +804,10 @@ impl Compiled {
 
     /// Whether there's nothing to favour, rewrite or leave out.
     pub fn is_empty(&self) -> bool {
-        self.forms.is_empty() && self.spoken.is_empty() && self.fillers.is_none()
+        self.forms.is_empty()
+            && self.spoken.is_empty()
+            && self.fillers.is_none()
+            && self.disfluencies.is_none()
     }
 
     /// The first token of `ids` before token `frontier` from which a spoken form, an entry's word
@@ -804,31 +836,36 @@ impl Compiled {
         spoken.into_iter().chain(special).min()
     }
 
-    /// `tokens` with the fillers left out, if any are to go. A word's new tokens share its
-    /// frames.
+    /// `tokens` with the fillers, or the fillers and disfluencies, left out, if any are to go.
+    /// A word's new tokens share its frames.
     pub fn remove_fillers(&self, tokenizer: &Tokenizer, tokens: Vec<Token>) -> Vec<Token> {
+        let respell = |word: &[Token], ids: Vec<u32>| {
+            let (first, last) = (word[0], word[word.len() - 1]);
+            let frame = |k| place(first.frame as usize, last.frame as usize, ids.len(), k) as u32;
+            let end = last.frame + last.duration;
+            (ids.iter().enumerate())
+                .map(|(k, &id)| Token {
+                    id,
+                    frame: frame(k),
+                    duration: if k + 1 < ids.len() { frame(k + 1) } else { end } - frame(k),
+                })
+                .collect()
+        };
+        if let Some(tagger) = &self.disfluencies {
+            let plan = |texts: &[&str]| tagger.plan(texts, &self.protected);
+            return crate::fillers::rewrite(tokenizer, tokens, |t| t.id, plan, respell);
+        }
         let Some(fillers) = &self.fillers else {
             return tokens;
         };
+        let context = Context::default();
         fillers.rewrite(
             tokenizer,
             tokens,
             |t| t.id,
-            &Context::default(),
+            &context,
             &self.protected,
-            |word, ids| {
-                let (first, last) = (word[0], word[word.len() - 1]);
-                let frame =
-                    |k| place(first.frame as usize, last.frame as usize, ids.len(), k) as u32;
-                let end = last.frame + last.duration;
-                (ids.iter().enumerate())
-                    .map(|(k, &id)| Token {
-                        id,
-                        frame: frame(k),
-                        duration: if k + 1 < ids.len() { frame(k + 1) } else { end } - frame(k),
-                    })
-                    .collect()
-            },
+            respell,
         )
     }
 }
@@ -947,6 +984,48 @@ pub(crate) mod tests {
         // Without fillers to remove, the transcript stays as decoded.
         let (c, _) = Compiled::new(&SpecialWords::new(), &tok);
         assert_eq!(c.remove_fillers(&tok, heard.clone()), heard);
+    }
+
+    #[test]
+    fn disfluencies_go_from_a_transcript_and_special_words_stay() {
+        let tok = tokenizer();
+        let token = |id, frame| Token {
+            id,
+            frame,
+            duration: 1,
+        };
+        // "the uh the city", "uh" on frame 1.
+        let heard = vec![
+            token(6, 0),
+            token(11, 1),
+            token(13, 1),
+            token(26, 1),
+            token(6, 2),
+            token(44, 3),
+        ];
+        let tagger =
+            |threshold| crate::disfluency::tests::tiny(threshold, 128, crate::Precision::F32);
+        // At a threshold no probability reaches, the fillers go, whatever `set_fillers` says.
+        let mut words = SpecialWords::new();
+        words.set_disfluencies(Some(tagger(2.0)));
+        let (c, _) = Compiled::new(&words, &tok);
+        assert_eq!(
+            c.remove_fillers(&tok, heard.clone()),
+            [token(6, 2), token(44, 3)]
+        );
+        // At one every probability reaches, only the special word stays.
+        let mut words = special(&["city"]);
+        words.set_disfluencies(Some(tagger(0.0)));
+        let (c, _) = Compiled::new(&words, &tok);
+        assert_eq!(c.remove_fillers(&tok, heard), [token(44, 3)]);
+        // Lists are equal when they share the tagger.
+        let shared = tagger(2.0);
+        let (mut a, mut b) = (SpecialWords::new(), SpecialWords::new());
+        a.set_disfluencies(Some(shared.clone()));
+        b.set_disfluencies(Some(shared));
+        assert_eq!(a, b);
+        b.set_disfluencies(Some(tagger(2.0)));
+        assert_ne!(a, b);
     }
 
     #[test]
