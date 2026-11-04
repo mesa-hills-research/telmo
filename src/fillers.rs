@@ -24,9 +24,12 @@
 //! starts and words such as "like" or "you know" are left alone.
 //!
 //! Punctuation on a removed word goes with it, except a sentence end, which moves to the word
-//! before ("We go there um. And then" becomes "We go there. And then"). When the removed word
-//! had a capital at the start of a sentence, the next word takes it if it's in lower case and
-//! isn't a special word ("Um, so I think" becomes "So I think").
+//! before ("We go there um. And then" becomes "We go there. And then"). A hesitation set off by
+//! commas takes the comma before it too when the word before can't end a phrase, such as "the",
+//! "to" or "is" ("click the, uh, little arrow" becomes "click the little arrow"), since that comma
+//! marks the pause. After a word that can end one the comma stays ("Okay, um, so" becomes "Okay,
+//! so"). When the removed word had a capital at the start of a sentence, the next word takes it if
+//! it's in lower case and isn't a special word ("Um, so I think" becomes "So I think").
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -55,6 +58,21 @@ const REPEATED: [&str; 35] = [
 ];
 
 const SENTENCE_END: [char; 3] = ['.', '?', '!'];
+
+/// Words that can't end a phrase, so a comma after one before a removed hesitation set off by
+/// commas is the pause's. They're the words of [`REPEATED`], the prepositions, "to", the
+/// auxiliaries and modals, and the determiners other than "no", which is mostly an interjection.
+/// An auxiliary can end a clause ("Yes we can, um, so"), but that's rare in dictation.
+const PHRASE_GOES_ON: [&str; 90] = [
+    "a", "an", "the", "and", "or", "but", "i", "my", "our", "your", "their", "we", "they", "he",
+    "she", "it's", "that's", "there's", "what's", "let's", "i'm", "we're", "they're", "you're",
+    "he's", "she's", "i've", "we've", "they've", "you've", "i'll", "we'll", "they'll", "you'll",
+    "it'll", "to", "of", "in", "on", "at", "for", "with", "from", "by", "about", "into", "onto",
+    "than", "as", "like", "over", "under", "after", "before", "through", "without", "between",
+    "is", "are", "was", "were", "be", "been", "am", "can", "could", "should", "would", "will",
+    "might", "must", "may", "do", "does", "did", "have", "has", "had", "shall", "this", "that",
+    "these", "those", "some", "any", "each", "every", "its", "his", "her",
+];
 
 /// Quote marks. A quoted word is a mention rather than a filler, and a mark between two copies
 /// keeps both.
@@ -251,6 +269,7 @@ impl Fillers {
             deleted[i] =
                 !kept[i] && !quoted[i] && !core.is_empty() && is_hesitation(core, previous);
         }
+        let hesitations = deleted.clone();
         // The first of two copies goes, or the second when the first can't change. The copy
         // before is held with whether it may go, and `between` gathers the punctuation since it,
         // that of removed hesitations included.
@@ -287,15 +306,17 @@ impl Fillers {
             previous = Some((Some(i), core, may_go));
             between = trail.to_string();
         }
-        self.tidy(before, &parts, &deleted, &kept, protected)
+        self.tidy(before, &parts, &deleted, &hesitations, &kept, protected)
     }
 
-    /// The edits that delete `deleted`, with punctuation and capitals as the module describes.
+    /// The edits that delete `deleted`, of which `hesitations` are hesitations, with punctuation
+    /// and capitals as the module describes.
     fn tidy(
         &self,
         before: Option<(&str, &str, &str)>,
         parts: &[(&str, &str, &str)],
         deleted: &[bool],
+        hesitations: &[bool],
         kept: &[bool],
         protected: &Protected,
     ) -> Vec<Edit> {
@@ -330,6 +351,16 @@ impl Fillers {
                         }
                     }
                     sentence_start = true;
+                } else if hesitations[i]
+                    && trail.starts_with(',')
+                    && let Some((Some(j), lead, core, trail)) = &mut last
+                    && trail == ","
+                    && PHRASE_GOES_ON.contains(&core.to_lowercase().as_str())
+                {
+                    // The comma before a hesitation set off by commas is the pause's when the
+                    // word before can't end a phrase, so it goes too.
+                    trail.clear();
+                    edits[*j] = Edit::Change(format!("{lead}{core}{trail}"));
                 }
                 continue;
             }
@@ -651,6 +682,39 @@ mod tests {
             "Ahh, I see.",
         ] {
             assert_eq!(english().remove(text), text, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_comma_that_splits_a_phrase_goes_with_the_hesitation() {
+        for (text, want) in [
+            ("click the, uh, little arrow", "click the little arrow"),
+            (
+                "I'd like you to, um, explain it",
+                "I'd like you to explain it",
+            ),
+            (
+                "It builds but, hmm, fails in CI",
+                "It builds but fails in CI",
+            ),
+            (
+                "The tests take about, erm, four minutes",
+                "The tests take about four minutes",
+            ),
+            ("It is, uh, the third one", "It is the third one"),
+            // A comma after a word that can end a phrase marks a boundary, and stays.
+            (
+                "That test is flaky, hmm, probably",
+                "That test is flaky, probably",
+            ),
+            ("Thank you, um, you saved me", "Thank you, you saved me"),
+            ("No, um, the other file", "No, the other file"),
+            ("Okay, hmm, so the first step", "Okay, so the first step"),
+            // Only a hesitation set off by commas on both sides takes the comma before it.
+            ("click the, uh little arrow", "click the, little arrow"),
+            ("the, uh. Then", "the. Then"),
+        ] {
+            assert_eq!(english().remove(text), want, "{text}");
         }
     }
 
