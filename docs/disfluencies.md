@@ -26,9 +26,9 @@ let clean = tagger.remove("Um, so I think we should move the the config.");
 The tagger is trained on English, so set it only for English speech. The filler rules run as
 part of it, whatever `set_fillers` says. Special words and spoken forms' words always stay.
 
-`Tagger::light()` is a light tagger with no pack, a network of hand-set rules over each word's
+`Tagger::hand_written()` is a tagger with no pack, a network of hand-set rules over each word's
 spelling, its word class and the next three words. Beside the fillers it takes out cut-off words
-and fragments ("the mi mic microphone"), a word or two-word phrase said again, also across a
+and fragments ("the des design"), a word or two-word phrase said again, also across a
 hesitation or fragment ("who w who"), and sentence-opening and trailing markers. It runs an
 utterance in well under a millisecond.
 

@@ -1,6 +1,6 @@
 //! Networks of hand-set units over each word's spelling, its word classes and whether it
-//! matches the next words. One, the light cleanup, deletes disfluencies. The other, the guards,
-//! vetoes deletions that change what dictation says.
+//! matches the next words. One, the hand-written cleanup, deletes disfluencies. The other, the
+//! guards, vetoes deletions that change what dictation says.
 //!
 //! Every input is 0 or 1. A unit adds 1 for each input it needs or takes any of, subtracts 3 for
 //! each that blocks it, adds its bias (1 less the count of needs by default) and clips the sum to
@@ -416,8 +416,8 @@ fn has_class(name: &str, word: &str) -> bool {
         .is_some_and(|(_, list)| list.contains(word))
 }
 
-/// The light cleanup's network and its detectors' features and tags.
-fn light_network() -> &'static (Network, Vec<(usize, &'static str)>) {
+/// The hand-written cleanup's network and its detectors' features and tags.
+fn hand_written_network() -> &'static (Network, Vec<(usize, &'static str)>) {
     static NETWORK: OnceLock<(Network, Vec<(usize, &'static str)>)> = OnceLock::new();
     NETWORK.get_or_init(|| {
         let mut s = Network::new(&[]);
@@ -1200,10 +1200,10 @@ fn guard_network() -> &'static (Network, Vec<(usize, &'static str)>) {
     })
 }
 
-/// For each of `words`, the kind of the light cleanup's first detector that deletes it ("H",
+/// For each of `words`, the kind of the hand-written cleanup's first detector that deletes it ("H",
 /// "RM" or "F"), or none.
-pub(crate) fn light(words: &[&str]) -> Vec<Option<&'static str>> {
-    let (network, detectors) = light_network();
+pub(crate) fn hand_written(words: &[&str]) -> Vec<Option<&'static str>> {
+    let (network, detectors) = hand_written_network();
     let z = network.run(base(network, words));
     (z.iter())
         .map(|row| {
@@ -1243,7 +1243,7 @@ mod tests {
 
     fn marked(text: &str) -> String {
         let words: Vec<&str> = text.split(' ').collect();
-        (words.iter().zip(light(&words)))
+        (words.iter().zip(hand_written(&words)))
             .map(|(w, k)| match k {
                 Some(k) => format!("[{w}/{k}]"),
                 None => w.to_string(),
@@ -1253,7 +1253,7 @@ mod tests {
     }
 
     #[test]
-    fn the_light_network_deletes_fragments_repeats_and_openers() {
+    fn the_hand_written_network_deletes_fragments_repeats_and_openers() {
         assert_eq!(
             marked("Um so I I think the the uh the des design is is good so."),
             "[Um/H] [so/F] [I/RM] I think [the/RM] [the/RM] [uh/H] the [des/RM] design [is/RM] is good [so./F]"
@@ -1262,12 +1262,12 @@ mod tests {
             marked("we will move to f conceptual design"),
             "we will move to [f/RM] conceptual design"
         );
-        assert!(light(&[]).is_empty());
+        assert!(hand_written(&[]).is_empty());
     }
 
     #[test]
     fn the_networks_look_three_words_ahead_at_most() {
-        for (network, _) in [light_network(), guard_network()] {
+        for (network, _) in [hand_written_network(), guard_network()] {
             assert!(network.layers.iter().flatten().all(|u| u.look <= LOOK));
         }
     }

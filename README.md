@@ -103,7 +103,7 @@ For dictation, the list can also leave out English hesitations (um, uh) and stut
 `telmo transcribe --remove-fillers` does the same. [docs/fillers.md](docs/fillers.md) says what
 goes and what stays. A disfluency tagger goes further, taking out false starts, repairs and
 repeated phrases once over each utterance, with `words.set_disfluencies(Some(tagger))`, and
-`Tagger::light()` does a lighter cleanup with no model. Guards keep the words code dictation
+`Tagger::hand_written()` does a lighter cleanup with no model. Guards keep the words code dictation
 needs, such as spoken flags and units. [docs/disfluencies.md](docs/disfluencies.md) describes
 them.
 

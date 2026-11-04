@@ -195,8 +195,8 @@ pub struct Decision {
     pub tag: char,
 }
 
-/// A loaded disfluency tagger, with its rules: the light one, whose rules are built in, or one
-/// with a trained model from a pack.
+/// A loaded disfluency tagger, with its rules, either the hand-written one, whose rules are built
+/// in, or one with a trained model from a pack.
 pub struct Tagger {
     model: Option<Model>,
     fillers: Fillers,
@@ -324,12 +324,12 @@ fn check_tokenizer(tokenizer: &ByteLevelTokenizer, config: &Config) -> Result<()
 }
 
 impl Tagger {
-    /// The light tagger, a network of hand-set units over each word's spelling, its word class
-    /// and the next three words, whose rules are built in. Beside the fillers, it deletes cut-off
-    /// words and fragments ("the mi mic microphone"), repeats of a word or a two-word phrase, also
-    /// across a hesitation or fragment ("who w who"), and sentence-opening and trailing markers
-    /// ("So I think", "I don't have a pen so").
-    pub fn light() -> Tagger {
+    /// The hand-written tagger, a network of hand-set units over each word's spelling, its word
+    /// class and the next three words, whose rules are built in. Beside the fillers, it deletes
+    /// cut-off words and fragments ("the des design"), repeats of a word or a two-word phrase,
+    /// also across a hesitation or fragment ("who w who"), and sentence-opening and trailing
+    /// markers ("So I think", "I don't have a pen so").
+    pub fn hand_written() -> Tagger {
         Tagger {
             model: None,
             fillers: Fillers::for_language("en").expect("English has filler rules"),
@@ -380,7 +380,7 @@ impl Tagger {
         };
         Ok(Tagger {
             model: Some(model),
-            ..Tagger::light()
+            ..Tagger::hand_written()
         })
     }
 
@@ -417,7 +417,7 @@ impl Tagger {
         let filler = self.fillers.deletions(words, protected);
         let kept = protected.words(&[], words);
         let Some(model) = &self.model else {
-            return (units::light(words).into_iter().enumerate())
+            return (units::hand_written(words).into_iter().enumerate())
                 .map(|(i, kind)| {
                     let rule = kind.is_some() && !kept[i];
                     Decision {
@@ -450,7 +450,7 @@ impl Tagger {
     }
 
     /// The token ids of one window over `words` from the first, between the classifier's start
-    /// and end tokens, and where each word that fits starts, or none for the light tagger.
+    /// and end tokens, and where each word that fits starts, or none for the hand-written tagger.
     /// Words after the first take a space before them, and the window ends before the first
     /// word that doesn't fit.
     pub fn token_ids(&self, words: &[&str]) -> Option<(Vec<u32>, Vec<usize>)> {
@@ -458,7 +458,7 @@ impl Tagger {
     }
 
     /// Member `member`'s logits for every token of `ids`, `[ids.len(), tags]`, or none for the
-    /// light tagger. `tap` sees the embeddings' output (`"embeddings"`), each layer's
+    /// hand-written tagger. `tap` sees the embeddings' output (`"embeddings"`), each layer's
     /// (`"layer.0"`, ...), the final norm's (`"final_norm"`) and the head's before the
     /// classifier (`"head"`), each `[tokens, hidden]`.
     pub fn logits(
@@ -470,12 +470,12 @@ impl Tagger {
         Some(self.model.as_ref()?.logits(member, ids, tap))
     }
 
-    /// The model's architecture, or none for the light tagger.
+    /// The model's architecture, or none for the hand-written tagger.
     pub fn config(&self) -> Option<&Config> {
         self.model.as_ref().map(|m| &m.config)
     }
 
-    /// The members whose probabilities are averaged, none for the light tagger.
+    /// The members whose probabilities are averaged, none for the hand-written tagger.
     pub fn members(&self) -> usize {
         self.model.as_ref().map_or(0, |m| m.members.len())
     }
@@ -718,20 +718,27 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_light_tagger_needs_no_model_and_guards_veto_any_stage() {
-        let light = Tagger::light();
-        assert_eq!((light.members(), light.config().is_none()), (0, true));
+    fn the_hand_written_tagger_needs_no_model_and_guards_veto_any_stage() {
+        let hand_written = Tagger::hand_written();
+        assert_eq!(
+            (hand_written.members(), hand_written.config().is_none()),
+            (0, true)
+        );
         let words: Vec<&str> = "Um the des design is small".split(' ').collect();
-        let gone: Vec<bool> = light.decide(&words).iter().map(|d| d.deleted).collect();
+        let gone: Vec<bool> = hand_written
+            .decide(&words)
+            .iter()
+            .map(|d| d.deleted)
+            .collect();
         assert_eq!(gone, [true, false, true, false, false, false]);
         assert_eq!(
-            light.remove("Um the des design is small"),
+            hand_written.remove("Um the des design is small"),
             "The design is small"
         );
-        // The light network takes the first "Dash" for a repeat, and the guards keep it.
+        // The hand-written network takes the first "Dash" for a repeat, and the guards keep it.
         let guards = Guards::for_language("en-US").unwrap();
         let flag: Vec<&str> = "Dash dash force dash push".split(' ').collect();
-        let plan = |g| Fillers::text(&flag, &light.plan(&flag, &Protected::default(), g));
+        let plan = |g| Fillers::text(&flag, &hand_written.plan(&flag, &Protected::default(), g));
         assert_eq!(plan(None), "Dash force dash push");
         assert_eq!(plan(Some(&guards)), "Dash dash force dash push");
         // Tier 1 alone: a hesitation beside a spoken symbol stays too.
