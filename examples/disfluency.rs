@@ -3,16 +3,16 @@
 //!
 //! ```text
 //! cargo run --release --example disfluency -- TAGGER ROWS.jsonl [--threads N] [--guards] > OUT.jsonl
-//! cargo run --release --example disfluency -- --light ROWS.jsonl [--guards] > OUT.jsonl
+//! cargo run --release --example disfluency -- --hand-written ROWS.jsonl [--guards] > OUT.jsonl
 //! ```
 //!
-//! TAGGER is a pack or an export directory (converted to f32), and `--light` takes the light
-//! tagger. Each line of ROWS.jsonl is an object with an `id` and its `words`, as the speech model
-//! wrote them. Each output line holds the `id`, whether each word is `deleted`, the tagger's
-//! probability `p` (1 where the filler rules delete the word), its most likely deleting tag's
-//! first letter in `letters`, and whether the filler rules (`filler`), the other rules or the
-//! light network (`rule`), or either (`rules`) delete it. With `--guards`, `guarded` is
-//! `deleted` with the guards' vetoes undone.
+//! TAGGER is a pack or an export directory (converted to f32), and `--hand-written` takes the
+//! hand-written tagger. Each line of ROWS.jsonl is an object with an `id` and its `words`, as the
+//! speech model wrote them. Each output line holds the `id`, whether each word is `deleted`, the
+//! tagger's probability `p` (1 where the filler rules delete the word), its most likely deleting
+//! tag's first letter in `letters`, and whether the filler rules (`filler`), the other rules or
+//! the hand-written network (`rule`), or either (`rules`) delete it. With `--guards`, `guarded`
+//! is `deleted` with the guards' vetoes undone.
 
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -45,10 +45,10 @@ fn run() -> Result<(), String> {
         ..Options::default()
     };
     let mut paths: Vec<PathBuf> = Vec::new();
-    let (mut light, mut guards) = (false, None);
+    let (mut hand_written, mut guards) = (false, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--light" => light = true,
+            "--hand-written" => hand_written = true,
             "--guards" => guards = Guards::for_language("en"),
             "--threads" => {
                 options.threads =
@@ -57,15 +57,15 @@ fn run() -> Result<(), String> {
             _ => paths.push(arg.into()),
         }
     }
-    let (tagger, rows) = match (light, paths.as_slice()) {
-        (true, [rows]) => (Tagger::light(), rows),
+    let (tagger, rows) = match (hand_written, paths.as_slice()) {
+        (true, [rows]) => (Tagger::hand_written(), rows),
         (false, [tagger, rows]) => (
             Tagger::load(tagger, &options).map_err(|e| e.to_string())?,
             rows,
         ),
         _ => {
             return Err(
-                "Usage: disfluency TAGGER ROWS.jsonl [--threads N] [--guards], or disfluency --light ROWS.jsonl [--guards]".into(),
+                "Usage: disfluency TAGGER ROWS.jsonl [--threads N] [--guards], or disfluency --hand-written ROWS.jsonl [--guards]".into(),
             );
         }
     };
