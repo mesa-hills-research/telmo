@@ -25,7 +25,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::disfluency::Tagger;
+use crate::disfluency::{Guards, Tagger};
 use crate::error::{Error, Result};
 use crate::fillers::{Context, Fillers, Protected};
 use crate::parakeet::Token;
@@ -197,6 +197,7 @@ pub struct SpecialWords {
     boost: Boost,
     fillers: Option<Fillers>,
     disfluencies: Option<SharedTagger>,
+    guards: Option<Guards>,
 }
 
 /// A tagger shared by lists, equal to another only when it's the same one.
@@ -328,6 +329,16 @@ impl SpecialWords {
     /// trained on English, so set it only for English speech.
     pub fn set_disfluencies(&mut self, tagger: Option<Arc<Tagger>>) {
         self.disfluencies = tagger.map(SharedTagger);
+    }
+
+    pub fn guards(&self) -> Option<Guards> {
+        self.guards
+    }
+
+    /// Keeps the words these guards protect from the fillers and disfluencies that go, or
+    /// lets every stage delete what it finds with `None`, the default.
+    pub fn set_guards(&mut self, guards: Option<Guards>) {
+        self.guards = guards;
     }
 }
 
@@ -678,6 +689,8 @@ pub(crate) struct Compiled {
     pub fillers: Option<Fillers>,
     /// The tagger that leaves out disfluencies, fillers included, in place of `fillers`.
     pub disfluencies: Option<Arc<Tagger>>,
+    /// The guards that keep words from either.
+    pub guards: Option<Guards>,
     /// The special words and spoken forms' words, which keep their spelling.
     pub protected: Protected,
 }
@@ -792,6 +805,7 @@ impl Compiled {
                 spoken,
                 fillers: words.fillers,
                 disfluencies: words.disfluencies().cloned(),
+                guards: words.guards,
                 protected: Protected::new(
                     words
                         .words()
@@ -851,22 +865,17 @@ impl Compiled {
                 })
                 .collect()
         };
+        let guards = self.guards.as_ref();
         if let Some(tagger) = &self.disfluencies {
-            let plan = |texts: &[&str]| tagger.plan(texts, &self.protected);
+            let plan = |texts: &[&str]| tagger.plan(texts, &self.protected, guards);
             return crate::fillers::rewrite(tokenizer, tokens, |t| t.id, plan, respell);
         }
         let Some(fillers) = &self.fillers else {
             return tokens;
         };
         let context = Context::default();
-        fillers.rewrite(
-            tokenizer,
-            tokens,
-            |t| t.id,
-            &context,
-            &self.protected,
-            respell,
-        )
+        let plan = |texts: &[&str]| fillers.plan_guarded(&context, texts, &self.protected, guards);
+        crate::fillers::rewrite(tokenizer, tokens, |t| t.id, plan, respell)
     }
 }
 

@@ -72,7 +72,9 @@ fn main() {
     }
     times.sort_by(f64::total_cmp);
     let at = |q: f64| times[((times.len() - 1) as f64 * q).round() as usize];
-    let tokens: Vec<usize> = texts.iter().map(|t| tagger.token_ids(t).0.len()).collect();
+    let tokens: Vec<usize> = (texts.iter())
+        .map(|t| tagger.token_ids(t).map_or(0, |(ids, _)| ids.len()))
+        .collect();
     let mean_tokens = tokens.iter().sum::<usize>() as f64 / tokens.len() as f64;
     let size = (tagger_path.is_file())
         .then(|| std::fs::metadata(tagger_path).map(|m| m.len()).ok())
@@ -85,7 +87,7 @@ fn main() {
         tagger.members(),
         tagger.precision(),
         tagger.threads(),
-        tagger.isa().name(),
+        tagger.isa().map_or("no kernels", |isa| isa.name()),
     );
     println!(
         "median {:.1} ms, 95th percentile {:.1} ms, slowest {:.1} ms over {} passes",

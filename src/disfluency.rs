@@ -30,6 +30,7 @@
 mod bpe;
 mod encoder;
 mod rules;
+mod units;
 
 use std::path::Path;
 
@@ -194,8 +195,15 @@ pub struct Decision {
     pub tag: char,
 }
 
-/// A loaded disfluency tagger, with its rules.
+/// A loaded disfluency tagger, with its rules: the light one, whose rules are built in, or one
+/// with a trained model from a pack.
 pub struct Tagger {
+    model: Option<Model>,
+    fillers: Fillers,
+}
+
+/// A trained tagger's weights, tokenizer and settings.
+struct Model {
     config: Config,
     settings: Settings,
     tokenizer: ByteLevelTokenizer,
@@ -203,15 +211,49 @@ pub struct Tagger {
     kernels: Kernels,
     pool: Pool,
     precision: Option<Precision>,
-    fillers: Fillers,
 }
 
 impl std::fmt::Debug for Tagger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tagger")
-            .field("members", &self.members.len())
-            .field("precision", &self.precision)
+            .field("members", &self.members())
+            .field("precision", &self.precision())
             .finish_non_exhaustive()
+    }
+}
+
+/// Rules that keep a word any stage of the cleanup, the fillers' included, would take where
+/// dictation needs it. They keep a spoken symbol and the words beside it ("dash dash force
+/// dash push"), a short unit after a number ("5 mm"), a filler talked about as a word ("delete
+/// ums") or a quoted word, list items that share their first word ("cleaner build, cleaner
+/// layout"), a cut that would leave a broken repeat ("we just need to uh we need to"), and a
+/// phrase said again in parallel or in contrast ("what they prefer what they not prefer"). They
+/// read at most three words ahead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Guards {
+    _english: (),
+}
+
+impl Guards {
+    /// The guards of a language given as an ISO 639-1 code, with or without a region, or none
+    /// if Telmo has none for it. English is the only one so far.
+    pub fn for_language(code: &str) -> Option<Guards> {
+        Fillers::for_language(code).map(|_| Guards { _english: () })
+    }
+
+    /// Which of the `deleted` words of `words`, a whole utterance, these guards keep.
+    pub fn veto(&self, words: &[&str], deleted: &[bool]) -> Vec<bool> {
+        (units::vetoes(words, deleted).iter())
+            .map(|kinds| !kinds.is_empty())
+            .collect()
+    }
+
+    /// `deleted` without the deletions these guards veto.
+    pub(crate) fn apply(&self, words: &[&str], deleted: &mut [bool]) {
+        let vetoed = self.veto(words, deleted);
+        for (d, v) in deleted.iter_mut().zip(vetoed) {
+            *d &= !v;
+        }
     }
 }
 
@@ -282,6 +324,18 @@ fn check_tokenizer(tokenizer: &ByteLevelTokenizer, config: &Config) -> Result<()
 }
 
 impl Tagger {
+    /// The light tagger, a network of hand-set units over each word's spelling, its word class
+    /// and the next three words, whose rules are built in. Beside the fillers, it deletes cut-off
+    /// words and fragments ("the mi mic microphone"), repeats of a word or a two-word phrase, also
+    /// across a hesitation or fragment ("who w who"), and sentence-opening and trailing markers
+    /// ("So I think", "I don't have a pen so").
+    pub fn light() -> Tagger {
+        Tagger {
+            model: None,
+            fillers: Fillers::for_language("en").expect("English has filler rules"),
+        }
+    }
+
     /// Loads a tagger from a pack file or a checkpoint directory, which is converted in memory
     /// to `options.precision`.
     pub fn load(path: &Path, options: &Options) -> Result<Tagger> {
@@ -315,7 +369,7 @@ impl Tagger {
         let members = (0..settings.members)
             .map(|m| Member::from_pack(pack, &config, &format!("members.{m}.")))
             .collect::<Result<_>>()?;
-        Ok(Tagger {
+        let model = Model {
             config,
             settings,
             tokenizer,
@@ -323,7 +377,10 @@ impl Tagger {
             kernels,
             pool: Pool::new(options.threads),
             precision: pack.precision(),
-            fillers: Fillers::for_language("en").expect("English has filler rules"),
+        };
+        Ok(Tagger {
+            model: Some(model),
+            ..Tagger::light()
         })
     }
 
@@ -331,7 +388,7 @@ impl Tagger {
     /// spaces.
     pub fn remove(&self, text: &str) -> String {
         let words: Vec<&str> = text.split_whitespace().collect();
-        Fillers::text(&words, &self.plan(&words, &Protected::default()))
+        Fillers::text(&words, &self.plan(&words, &Protected::default(), None))
     }
 
     /// What happens to each of `words`, a whole utterance as the speech model wrote it.
@@ -339,21 +396,44 @@ impl Tagger {
         self.decide_protected(words, &Protected::default())
     }
 
-    /// The edits of `words`, a whole utterance, with the words of a `protected` spelling kept.
-    pub(crate) fn plan(&self, words: &[&str], protected: &Protected) -> Vec<Edit> {
-        let deleted: Vec<bool> = (self.decide_protected(words, protected).iter())
+    /// The edits of `words`, a whole utterance, with the words of a `protected` spelling kept
+    /// and the deletions `guards` veto undone.
+    pub(crate) fn plan(
+        &self,
+        words: &[&str],
+        protected: &Protected,
+        guards: Option<&Guards>,
+    ) -> Vec<Edit> {
+        let mut deleted: Vec<bool> = (self.decide_protected(words, protected).iter())
             .map(|d| d.deleted)
             .collect();
+        if let Some(guards) = guards {
+            guards.apply(words, &mut deleted);
+        }
         self.fillers.tidy_deletions(words, &deleted, protected)
     }
 
     fn decide_protected(&self, words: &[&str], protected: &Protected) -> Vec<Decision> {
         let filler = self.fillers.deletions(words, protected);
-        let rule = rules::deletions(words);
         let kept = protected.words(&[], words);
+        let Some(model) = &self.model else {
+            return (units::light(words).into_iter().enumerate())
+                .map(|(i, kind)| {
+                    let rule = kind.is_some() && !kept[i];
+                    Decision {
+                        deleted: filler[i] || rule,
+                        filler: filler[i],
+                        rule,
+                        probability: if kind.is_some() { 1.0 } else { 0.0 },
+                        tag: kind.and_then(|k| k.chars().next()).unwrap_or('O'),
+                    }
+                })
+                .collect();
+        };
+        let rule = rules::deletions(words);
         let copies = rules::copies(words);
-        let s = &self.settings;
-        (self.scores(words).into_iter().enumerate())
+        let s = &model.settings;
+        (model.scores(words).into_iter().enumerate())
             .map(|(i, (probability, tag))| {
                 let group = s.group(tag, copies.contains(&i));
                 let by_model = probability as f64 >= s.thresholds[group];
@@ -369,6 +449,59 @@ impl Tagger {
             .collect()
     }
 
+    /// The token ids of one window over `words` from the first, between the classifier's start
+    /// and end tokens, and where each word that fits starts, or none for the light tagger.
+    /// Words after the first take a space before them, and the window ends before the first
+    /// word that doesn't fit.
+    pub fn token_ids(&self, words: &[&str]) -> Option<(Vec<u32>, Vec<usize>)> {
+        Some(self.model.as_ref()?.token_ids(words))
+    }
+
+    /// Member `member`'s logits for every token of `ids`, `[ids.len(), tags]`, or none for the
+    /// light tagger. `tap` sees the embeddings' output (`"embeddings"`), each layer's
+    /// (`"layer.0"`, ...), the final norm's (`"final_norm"`) and the head's before the
+    /// classifier (`"head"`), each `[tokens, hidden]`.
+    pub fn logits(
+        &self,
+        member: usize,
+        ids: &[u32],
+        tap: &mut dyn FnMut(&str, &[f32]),
+    ) -> Option<Vec<f32>> {
+        Some(self.model.as_ref()?.logits(member, ids, tap))
+    }
+
+    /// The model's architecture, or none for the light tagger.
+    pub fn config(&self) -> Option<&Config> {
+        self.model.as_ref().map(|m| &m.config)
+    }
+
+    /// The members whose probabilities are averaged, none for the light tagger.
+    pub fn members(&self) -> usize {
+        self.model.as_ref().map_or(0, |m| m.members.len())
+    }
+
+    /// The precision of the weight matrices, if they share one.
+    pub fn precision(&self) -> Option<Precision> {
+        self.model.as_ref().and_then(|m| m.precision)
+    }
+
+    pub fn isa(&self) -> Option<Isa> {
+        self.model.as_ref().map(|m| m.kernels.isa())
+    }
+
+    pub fn threads(&self) -> usize {
+        self.model.as_ref().map_or(1, |m| m.pool.threads())
+    }
+
+    /// Bytes of weights held in memory.
+    pub fn weight_bytes(&self) -> usize {
+        self.model
+            .as_ref()
+            .map_or(0, |m| m.members.iter().map(Member::weight_bytes).sum())
+    }
+}
+
+impl Model {
     /// Each word's probability of a deleting tag and its most likely deleting tag. A text too
     /// long for one window is read in several, each starting `left_context` words before the
     /// first word it decides.
@@ -392,7 +525,6 @@ impl Tagger {
         }
         out
     }
-
     /// The scores of the words whose first tokens are at `positions` of `ids`.
     fn window_scores(&self, ids: &[u32], positions: &[usize]) -> Vec<(f32, usize)> {
         let s = &self.settings;
@@ -429,10 +561,7 @@ impl Tagger {
             .collect()
     }
 
-    /// The token ids of one window over `words` from the first, between the classifier's start
-    /// and end tokens, and where each word that fits starts. Words after the first take a space
-    /// before them, and the window ends before the first word that doesn't fit.
-    pub fn token_ids(&self, words: &[&str]) -> (Vec<u32>, Vec<usize>) {
+    fn token_ids(&self, words: &[&str]) -> (Vec<u32>, Vec<usize>) {
         let mut ids = vec![self.config.cls];
         let mut positions = Vec::new();
         for (i, word) in words.iter().enumerate() {
@@ -451,49 +580,13 @@ impl Tagger {
         (ids, positions)
     }
 
-    /// Member `member`'s logits for every token of `ids`, `[ids.len(), tags]`. `tap` sees the
-    /// embeddings' output (`"embeddings"`), each layer's (`"layer.0"`, ...), the final norm's
-    /// (`"final_norm"`) and the head's before the classifier (`"head"`), each
-    /// `[tokens, hidden]`.
-    pub fn logits(
-        &self,
-        member: usize,
-        ids: &[u32],
-        tap: &mut dyn FnMut(&str, &[f32]),
-    ) -> Vec<f32> {
+    fn logits(&self, member: usize, ids: &[u32], tap: &mut dyn FnMut(&str, &[f32])) -> Vec<f32> {
         let runner = Runner {
             config: &self.config,
             kernels: &self.kernels,
             pool: &self.pool,
         };
         runner.logits(&self.members[member], ids, tap)
-    }
-
-    pub fn config(&self) -> &Config {
-        &self.config
-    }
-
-    /// The members whose probabilities are averaged.
-    pub fn members(&self) -> usize {
-        self.members.len()
-    }
-
-    /// The precision of the weight matrices, if they share one.
-    pub fn precision(&self) -> Option<Precision> {
-        self.precision
-    }
-
-    pub fn isa(&self) -> Isa {
-        self.kernels.isa()
-    }
-
-    pub fn threads(&self) -> usize {
-        self.pool.threads()
-    }
-
-    /// Bytes of weights held in memory.
-    pub fn weight_bytes(&self) -> usize {
-        self.members.iter().map(Member::weight_bytes).sum()
     }
 }
 
@@ -511,6 +604,7 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::fillers::Context;
 
     /// Random tensors under Hugging Face's names.
     struct Random {
@@ -624,12 +718,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_light_tagger_needs_no_model_and_guards_veto_any_stage() {
+        let light = Tagger::light();
+        assert_eq!((light.members(), light.config().is_none()), (0, true));
+        let words: Vec<&str> = "Um the des design is small".split(' ').collect();
+        let gone: Vec<bool> = light.decide(&words).iter().map(|d| d.deleted).collect();
+        assert_eq!(gone, [true, false, true, false, false, false]);
+        assert_eq!(
+            light.remove("Um the des design is small"),
+            "The design is small"
+        );
+        // The light network takes the first "Dash" for a repeat, and the guards keep it.
+        let guards = Guards::for_language("en-US").unwrap();
+        let flag: Vec<&str> = "Dash dash force dash push".split(' ').collect();
+        let plan = |g| Fillers::text(&flag, &light.plan(&flag, &Protected::default(), g));
+        assert_eq!(plan(None), "Dash force dash push");
+        assert_eq!(plan(Some(&guards)), "Dash dash force dash push");
+        // Tier 1 alone: a hesitation beside a spoken symbol stays too.
+        let fillers = Fillers::for_language("en").unwrap();
+        let words: Vec<&str> = "type dash um v".split(' ').collect();
+        let edits = fillers.plan_guarded(
+            &Context::default(),
+            &words,
+            &Protected::default(),
+            Some(&guards),
+        );
+        assert_eq!(Fillers::text(&words, &edits), "type dash um v");
+        assert!(Guards::for_language("de").is_none());
+    }
+
+    #[test]
     fn a_long_text_is_read_in_windows_with_context_before_each() {
         let tagger = tiny(2.0, 12, Precision::F32);
         let words: Vec<&str> = "one two three four five six seven eight nine ten eleven"
             .split(' ')
             .collect();
-        let (ids, positions) = tagger.token_ids(&words);
+        let (ids, positions) = tagger.token_ids(&words).unwrap();
         assert!(ids.len() <= 12 && positions.len() < words.len());
         let whole = tagger.decide(&words);
         assert_eq!(whole.len(), words.len());

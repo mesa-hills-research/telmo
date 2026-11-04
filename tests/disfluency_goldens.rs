@@ -106,19 +106,20 @@ fn each_member_matches_the_reference_layer_by_layer() {
     };
     let tagger = Tagger::load(&dir, &options).expect("the tagger loads");
     let mut goldens = SafeTensors::open(&dir.join("goldens.safetensors")).expect("the goldens");
-    let layers = tagger.config().layers;
-    let tags = tagger.config().labels;
+    let config = tagger.config().expect("a trained tagger");
+    let (layers, tags) = (config.layers, config.labels);
     let mut worst = 0f64;
     let mut checked = 0;
     for (n, s) in sentences(&dir).iter().enumerate() {
         let words: Vec<&str> = s.words.iter().map(String::as_str).collect();
-        let (ids, positions) = tagger.token_ids(&words);
+        let (ids, positions) = tagger.token_ids(&words).expect("a trained tagger");
         assert_eq!(ids, s.ids, "sentence {n}'s tokens");
         assert_eq!(positions, s.positions, "sentence {n}'s word starts");
         for m in 0..tagger.members() {
             let mut taps: Vec<(String, Vec<f32>)> = Vec::new();
             let logits =
                 tagger.logits(m, &ids, &mut |name, x| taps.push((name.into(), x.to_vec())));
+            let logits = logits.expect("a trained tagger");
             // Some sentences have every layer's output, in tap order, so each sits one deeper.
             for (depth, (name, got)) in taps.iter().enumerate() {
                 let Ok(want) = goldens.read_f32(&format!("hidden.{n}.{m}.{name}"), None) else {

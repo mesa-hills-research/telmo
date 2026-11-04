@@ -36,6 +36,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::biasing::SpecialWords;
+use crate::disfluency::Guards;
 use crate::tokenizer::Tokenizer;
 
 /// The fillers of one language that a transcript can leave out, as the [module](self)
@@ -277,6 +278,17 @@ impl Fillers {
         words: &[&str],
         protected: &Protected,
     ) -> Vec<Edit> {
+        self.plan_guarded(context, words, protected, None)
+    }
+
+    /// The same, with the deletions `guards` veto undone.
+    pub(crate) fn plan_guarded(
+        &self,
+        context: &Context,
+        words: &[&str],
+        protected: &Protected,
+        guards: Option<&Guards>,
+    ) -> Vec<Edit> {
         let Language::English = self.language;
         let parts: Vec<(&str, &str, &str)> = words.iter().map(|w| split(w)).collect();
         let before = context.last.as_deref().map(split);
@@ -327,6 +339,9 @@ impl Fillers {
             }
             previous = Some((Some(i), core, may_go));
             between = trail.to_string();
+        }
+        if let Some(guards) = guards {
+            guards.apply(words, &mut deleted);
         }
         self.tidy(before, &parts, &deleted, &hesitations, &kept, protected)
     }
@@ -424,31 +439,6 @@ impl Fillers {
             last = Some((Some(i), lead.into(), core, trail.into()));
         }
         edits
-    }
-
-    /// The edits of `tokens`, whose ids `id` gives, with the words that go left out and the
-    /// words that change spelled anew by `respell` from the word's tokens and its new ids.
-    /// `context` is that of a text that can't change before them, and words of a `protected`
-    /// spelling stay as they are.
-    pub(crate) fn rewrite<T>(
-        &self,
-        tokenizer: &Tokenizer,
-        tokens: Vec<T>,
-        id: impl Fn(&T) -> u32,
-        context: &Context,
-        protected: &Protected,
-        respell: impl Fn(&[T], Vec<u32>) -> Vec<T>,
-    ) -> Vec<T>
-    where
-        T: Clone,
-    {
-        rewrite(
-            tokenizer,
-            tokens,
-            id,
-            |texts| self.plan(context, texts, protected),
-            respell,
-        )
     }
 }
 
