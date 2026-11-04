@@ -26,6 +26,29 @@ let clean = tagger.remove("Um, so I think we should move the the config.");
 The tagger is trained on English, so set it only for English speech. The filler rules run as
 part of it, whatever `set_fillers` says. Special words and spoken forms' words always stay.
 
+`Tagger::light()` is a light tagger with no pack, a network of hand-set rules over each word's
+spelling, its word class and the next three words. Beside the fillers it takes out cut-off words
+and fragments ("the mi mic microphone"), a word or two-word phrase said again, also across a
+hesitation or fragment ("who w who"), and sentence-opening and trailing markers. It runs an
+utterance in well under a millisecond.
+
+## Guards
+
+`words.set_guards(Guards::for_language("en"))` keeps words that some deletion would take where
+dictation needs them, whichever stage made it, the filler rules included.
+
+| Guard | Keeps |
+|---|---|
+| Symbols | a spoken symbol and the words beside it, as in "dash dash force dash push" |
+| Units | a short unit after a number, as in "5 mm" |
+| Mentions | a filler talked about as a word ("delete ums") and a quoted word |
+| Lists | items that share their first word, as in "cleaner build, cleaner layout" |
+| Straddles | a cut that would leave a broken repeat, as in "we just need to uh we need to" |
+| Parallels | a phrase said again in parallel or in contrast, as in "what they prefer what they not prefer" |
+
+On 112,000 words of meeting speech they undo 65 of the tagger's 12,521 deletions.
+`Guards::veto` applies them to any deletions.
+
 ## What goes
 
 A word goes when the filler rules delete it, when one of these rules does, or when the tagger
