@@ -793,6 +793,20 @@ impl Streamer {
         for event in found {
             match event {
                 VadEvent::Start { audio_from, onset } => {
+                    // After a pause the stream still holds, the utterance starts where the last
+                    // one's audio ends, so no audio is in both and quiet words between them, which
+                    // voice activity heard as neither, are in this one.
+                    let audio_from = match (self.active.as_ref()).or(self.closing.back()) {
+                        Some(last) if last.end.is_some() => {
+                            let end = last.start + last.stream.audio().len() as u64;
+                            if end <= onset && onset - end <= self.vad.look_back() {
+                                end.max(self.history_start)
+                            } else {
+                                audio_from
+                            }
+                        }
+                        _ => audio_from,
+                    };
                     if let Some(a) = &self.active {
                         if a.end.is_none() && a.reopened.is_some() {
                             // The model heard more after the end, and speech went on.
@@ -2633,6 +2647,44 @@ mod tests {
         let from = 7 * SAMPLE_RATE / 10;
         assert_eq!(a.start, from as u64);
         assert!(a.stream.audio() == &audio[from..]);
+    }
+
+    #[test]
+    #[ignore = "needs a model, named by GRANITE_SPEECH_DIR"]
+    fn an_utterance_starts_where_the_last_one_ends_after_a_short_pause() {
+        let dir = std::env::var_os("GRANITE_SPEECH_DIR").expect("set GRANITE_SPEECH_DIR");
+        let model = Arc::new(Model::load(dir.as_ref(), &crate::Options::default()).unwrap());
+        // Speech-level noise from 0.5 s to 2 s and again after a pause, with quiet around it.
+        for (pause, contiguous) in [(1.5, true), (3.0, false)] {
+            let second = (2.0 + pause) * SAMPLE_RATE as f64;
+            let mut seed = 0x9e37_79b9u64;
+            let audio: Vec<f32> = (0..(second as usize + 2 * SAMPLE_RATE))
+                .map(|i| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let speech = (SAMPLE_RATE / 2..2 * SAMPLE_RATE).contains(&i)
+                        || (second as usize..second as usize + SAMPLE_RATE).contains(&i);
+                    let level = if speech { 0.2 } else { 0.0005 };
+                    ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * level
+                })
+                .collect();
+            let mut s = Streamer::new(model.clone(), StreamConfig::default());
+            for chunk in audio.chunks(SAMPLE_RATE / 50) {
+                s.push(chunk);
+            }
+            let first = s.closing.front().expect("the first utterance ended");
+            let next = s.active.as_ref().expect("the second utterance is active");
+            let end = first.start + first.stream.audio().len() as u64;
+            if contiguous {
+                // No audio is in both utterances, and none in neither.
+                assert_eq!(next.start, end, "a pause of {pause} s");
+            } else {
+                // After a pause longer than the stream keeps, it starts 300 ms before its onset.
+                assert!(next.start > end, "a pause of {pause} s");
+                assert!((next.start as f64 - (second - 0.3 * SAMPLE_RATE as f64)).abs() < 1600.0);
+            }
+        }
     }
 
     #[test]
