@@ -43,12 +43,14 @@ stream.finish()?;
    recomputes only the attention blocks new audio reaches, keeping the previous 10.24 s block
    live until the next one has 1.28 s.
 4. A word settles once two passes in a row agree on it and on every word before it, it ends a
-   second before the audio does, and the model has heard a word after it. With Parakeet nothing
-   settles before the utterance has 3 s of audio, since until then its hypothesis of the first
-   words still changes and often hears a word said twice as one. That costs about a second. On
-   151 streamed AMI meeting clips, Parakeet's first settled word came a median 2.8 s after speech
-   started instead of 1.7 s, and 4.0 s instead of 3.7 s at the 90th percentile. Tentative text
-   shows as early as before. When the utterance ends, a last pass settles everything.
+   second before the audio does, and the model has heard a word after it. Parakeet's hypothesis
+   of a word can still change until it has heard several seconds after it, and often hears a word
+   said twice ("yeah, yeah") as one before then. So with Parakeet a word must end 4 s before the
+   audio does, and nothing settles before the utterance has 3 s of audio. On 1,695 streamed AMI
+   meeting clips holding a word said twice, Parakeet wrote both copies of 96.4% of those doubles
+   with the 4 s margin against 94.4% with 1 s, and a word settled a median 4.0 s after it ended
+   instead of 1.3 s. Tentative text shows as early as before. When the utterance ends, a last
+   pass settles everything.
 5. A sentence end that closes an utterance stays tentative until the next utterance's first
    words settle, or the stream finishes, since a pause can split a sentence. It goes when they
    start with a comma or a lower-case word that joins words, such as "and", "rather", "of" or
@@ -64,27 +66,29 @@ passes run.
 
 Ten recordings of about two minutes each, made of consecutive LibriSpeech test-clean or
 test-other utterances with pauses of 0.8 to 2 s and quiet noise (163 utterances in all), were
-replayed in real time at 48 kHz in 20 ms pieces, on 5 threads of the machine described in
-[measurements.md](measurements.md#machine). `examples/stream` builds and replays such
-recordings.
+replayed at 48 kHz in 20 ms pieces with a clock that advances with the audio and with each pass's
+measured time, on 5 threads of the machine described in
+[measurements.md](measurements.md#machine), with `TELMO_ISA=avx2`. `examples/stream` builds and
+replays such recordings (`stream run MODEL sessions.tsv --threads 5`).
 
 | | Granite, int8 | Parakeet, q8_0 |
 |---|---:|---:|
-| First tentative word after speech starts, median | 0.77 s | 0.75 s |
-| First tentative word, 90th percentile | 0.97 s | 1.81 s |
-| Words settled after speech ends, median | 1.13 s | 1.09 s |
-| Words settled, 90th percentile | 1.73 s | 1.69 s |
-| Tentative words replaced per 100 settled | 46 | 63 |
-| WER streamed | 2.33% | 2.69% |
+| First tentative word after speech starts, median | 0.78 s | 1.07 s |
+| First tentative word, 90th percentile | 1.11 s | 3.57 s |
+| Words settled after speech ends, median | 1.20 s | 1.77 s |
+| Words settled, 90th percentile | 1.75 s | 3.14 s |
+| Tentative words replaced per 100 settled | 68 | 107 |
+| WER streamed | 2.44% | 2.62% |
 | WER offline, on the same utterances | 2.12% | 2.44% |
-| CPU | 1.2 cores | 1.8 cores |
+| CPU | 1.0 cores | 1.1 cores |
 
 The offline row transcribes each utterance the stream found in one go. The words have settled
 when the utterance ends, and most of that wait is the 600 ms of quiet that ends it. A sentence
 end that closes the utterance settles later, with the next utterance's first words, or when the
-stream finishes. Passes run at least 0.5 s apart by default (`StreamConfig::min_interval`). At
-1 s apart, Granite's first word comes after 1.29 s instead, it replaces 26 tentative words per
-100 and uses 0.85 cores, at the same WER.
+stream finishes. Passes run at least 0.5 s apart by default (`StreamConfig::min_interval`). Passes
+further apart show the first word later, replace fewer tentative words and use less CPU. Before
+Parakeet's 4 s margin its words settled a median 1.53 s after speech ended (2.77 s at the 90th
+percentile), it replaced 100 tentative words per 100 and its streamed WER was 2.76%.
 
 FLEURS recordings of six or seven test utterances per language gave these word error rates, where
 a single word moves a figure by about a point. Offline here means transcribing the original

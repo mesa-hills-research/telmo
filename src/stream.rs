@@ -56,11 +56,25 @@ pub struct PassConfig {
     /// 30 s is the longest utterance, so each pass encodes the whole utterance. On a window that
     /// starts in the middle of a sentence, Parakeet sometimes emits nothing at all.
     pub context: Duration,
-    /// How long before the end of the audio a word must end to settle.
+    /// How long before the end of the audio a word must end to settle. Parakeet's words wait at
+    /// least 4 s, since its hypothesis of a word can change until it has heard that much after
+    /// it. A word said twice ("yeah, yeah") is heard once on less, and would settle so.
     pub settle_margin: Duration,
     /// A pass's first words are dropped when they repeat the last settled words and end within
     /// this long after them, since they're the settled words heard again.
     pub repeat_window: Duration,
+}
+
+impl PassConfig {
+    /// This config as a pass uses it, with the settle margin at least
+    /// [`PARAKEET_SETTLE_MARGIN`] for Parakeet.
+    fn for_parakeet(&self, parakeet: bool) -> PassConfig {
+        let mut config = self.clone();
+        if parakeet {
+            config.settle_margin = config.settle_margin.max(PARAKEET_SETTLE_MARGIN);
+        }
+        config
+    }
 }
 
 impl Default for PassConfig {
@@ -285,6 +299,7 @@ impl UtteranceStream {
     /// follow it.
     pub fn pass(&mut self, model: &Model, config: &PassConfig, mode: PassMode) -> Result<PassText> {
         self.passes += 1;
+        let config = &config.for_parakeet(matches!(model, Model::Parakeet(_)));
         let heard = match model {
             Model::Parakeet(m) => self.parakeet_hypothesis(m, config, mode == PassMode::Final)?,
             Model::Granite(m) => self.granite_hypothesis(m, mode == PassMode::Final)?,
@@ -1501,6 +1516,12 @@ fn split_words(tokenizer: &Tokenizer, before: Option<u32>, hyp: &[Hyp]) -> Vec<W
 /// word said twice as one ("No, it" where more audio hears "No no no it").
 const PARAKEET_FIRST_SETTLE: Duration = Duration::from_millis(3000);
 
+/// The least time before the end of the audio a Parakeet word must end to settle. Parakeet's
+/// hypothesis of a word can still change until it has heard about that much after it, and a word
+/// said twice ("yeah, yeah") is often heard once on less. The cost is that a word settles about
+/// 4 s after it's said, and its tentative text changes more often until then.
+const PARAKEET_SETTLE_MARGIN: Duration = Duration::from_secs(4);
+
 /// The most settled words a pass may repeat.
 const MAX_REPEAT: usize = 3;
 
@@ -2263,6 +2284,35 @@ mod tests {
         s.push(&vec![0.0; 13 * FRAME]);
         let third = s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
         assert_eq!(third.settled, " the cube control");
+    }
+
+    #[test]
+    fn parakeets_words_settle_at_least_four_seconds_after_they_end() {
+        let tok = word_tokenizer(&["one", "two", "three"]);
+        // 8 s of audio, "one" ending 4 s before its end, "two" 3.92 s before, and a last word.
+        let heard = [(1, 49), (2, 50), (3, 90)];
+        for (parakeet, want) in [(true, " one"), (false, " one two")] {
+            let mut s = stream_for(&SpecialWords::new(), &tok, 100);
+            if !parakeet {
+                s.resume = Resume::Ctc {
+                    frame: 0,
+                    prev: u32::MAX,
+                };
+            }
+            let config = PassConfig::default().for_parakeet(parakeet);
+            s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
+            let second = s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
+            assert_eq!(second.settled, want, "Parakeet: {parakeet}");
+        }
+        // A longer margin asked for stays.
+        let long = PassConfig {
+            settle_margin: Duration::from_secs(6),
+            ..PassConfig::default()
+        };
+        assert_eq!(
+            long.for_parakeet(true).settle_margin,
+            Duration::from_secs(6)
+        );
     }
 
     #[test]
