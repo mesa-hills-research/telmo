@@ -57,8 +57,9 @@ pub struct PassConfig {
     /// starts in the middle of a sentence, Parakeet sometimes emits nothing at all.
     pub context: Duration,
     /// How long before the end of the audio a word must end to settle. Parakeet's words wait at
-    /// least 4 s, since its hypothesis of a word can change until it has heard that much after
-    /// it. A word said twice ("yeah, yeah") is heard once on less, and would settle so.
+    /// least 4 s while the utterance fits in `context`, since its hypothesis of a word can change
+    /// until it has heard that much after it. A word said twice ("yeah, yeah") is heard once on
+    /// less, and would settle so.
     pub settle_margin: Duration,
     /// A pass's first words are dropped when they repeat the last settled words and end within
     /// this long after them, since they're the settled words heard again.
@@ -66,11 +67,13 @@ pub struct PassConfig {
 }
 
 impl PassConfig {
-    /// This config as a pass uses it, with the settle margin at least
-    /// [`PARAKEET_SETTLE_MARGIN`] for Parakeet.
-    fn for_parakeet(&self, parakeet: bool) -> PassConfig {
+    /// This config as a pass over `seconds` of audio uses it, with the settle margin at least
+    /// [`PARAKEET_SETTLE_MARGIN`] for Parakeet while the utterance fits in `context`. Past that, a
+    /// window starts inside the utterance, where Parakeet sometimes hears nothing at all, so the
+    /// words must settle as the passes go rather than wait for the last one.
+    fn for_pass(&self, parakeet: bool, seconds: f64) -> PassConfig {
         let mut config = self.clone();
-        if parakeet {
+        if parakeet && seconds <= self.context.as_secs_f64() {
             config.settle_margin = config.settle_margin.max(PARAKEET_SETTLE_MARGIN);
         }
         config
@@ -299,7 +302,7 @@ impl UtteranceStream {
     /// follow it.
     pub fn pass(&mut self, model: &Model, config: &PassConfig, mode: PassMode) -> Result<PassText> {
         self.passes += 1;
-        let config = &config.for_parakeet(matches!(model, Model::Parakeet(_)));
+        let config = &config.for_pass(matches!(model, Model::Parakeet(_)), self.seconds());
         let heard = match model {
             Model::Parakeet(m) => self.parakeet_hypothesis(m, config, mode == PassMode::Final)?,
             Model::Granite(m) => self.granite_hypothesis(m, mode == PassMode::Final)?,
@@ -2299,7 +2302,7 @@ mod tests {
                     prev: u32::MAX,
                 };
             }
-            let config = PassConfig::default().for_parakeet(parakeet);
+            let config = PassConfig::default().for_pass(parakeet, 8.0);
             s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
             let second = s.settle(&tok, window(&s, &heard), &config, PassMode::Tentative);
             assert_eq!(second.settled, want, "Parakeet: {parakeet}");
@@ -2310,9 +2313,13 @@ mod tests {
             ..PassConfig::default()
         };
         assert_eq!(
-            long.for_parakeet(true).settle_margin,
+            long.for_pass(true, 8.0).settle_margin,
             Duration::from_secs(6)
         );
+        // Past the context a window starts inside the utterance, where Parakeet sometimes hears
+        // nothing at all, so its words settle as soon as the margin asked for lets them.
+        let past = PassConfig::default().for_pass(true, 31.0);
+        assert_eq!(past.settle_margin, Duration::from_secs(1));
     }
 
     #[test]
