@@ -31,6 +31,7 @@
 //! [`Options::isa`] or the `TELMO_ISA` environment variable names others.
 
 pub mod biasing;
+pub mod disfluency;
 pub mod error;
 pub mod features;
 pub mod fft;

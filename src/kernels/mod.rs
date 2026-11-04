@@ -268,6 +268,23 @@ impl PackedWeights {
         )
     }
 
+    /// Writes the `k` values of output `o` to `out`, as for an embedding's row.
+    pub(crate) fn decode_row(&self, o: usize, out: &mut [f32]) {
+        assert!(
+            o < self.n && out.len() >= self.k,
+            "the row is outside the matrix"
+        );
+        let scales = self.scales.as_deref().unwrap_or(&[]);
+        quant::decode_row(
+            self.values.as_slice(),
+            scales,
+            self.k,
+            self.precision,
+            o,
+            out,
+        );
+    }
+
     pub fn view(&self) -> BView<'_> {
         BView {
             data: self.values.as_slice(),

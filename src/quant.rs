@@ -270,26 +270,36 @@ pub fn encode(
 
 /// The values a stored matrix stands for, row-major `[n, k]`, for tests and comparisons.
 pub fn decode(values: &[u8], scales: &[f32], n: usize, k: usize, precision: Precision) -> Vec<f32> {
-    let vb = precision.value_bytes();
-    let blocks = k.div_ceil(Q8_BLOCK);
     let mut out = vec![0f32; n * k];
-    for o in 0..n {
-        let (p, j) = (o / PANEL, o % PANEL);
-        for i in 0..k {
-            let at = ((p * k + i) * PANEL + j) * vb;
-            let b = &values[at..at + vb];
-            out[o * k + i] = match precision {
-                Precision::F32 => f32::from_le_bytes(b.try_into().unwrap()),
-                Precision::F16 => f16_to_f32(u16::from_le_bytes(b.try_into().unwrap())),
-                Precision::Bf16 => bf16_to_f32(u16::from_le_bytes(b.try_into().unwrap())),
-                Precision::Int8 => b[0] as i8 as f32 * scales[p * PANEL + j],
-                Precision::Q8_0 => {
-                    b[0] as i8 as f32 * scales[(p * blocks + i / Q8_BLOCK) * PANEL + j]
-                }
-            };
-        }
+    for (o, row) in out.chunks_exact_mut(k.max(1)).enumerate().take(n) {
+        decode_row(values, scales, k, precision, o, row);
     }
     out
+}
+
+/// The `k` values of output `o` of a stored matrix, into `out`.
+pub(crate) fn decode_row(
+    values: &[u8],
+    scales: &[f32],
+    k: usize,
+    precision: Precision,
+    o: usize,
+    out: &mut [f32],
+) {
+    let vb = precision.value_bytes();
+    let blocks = k.div_ceil(Q8_BLOCK);
+    let (p, j) = (o / PANEL, o % PANEL);
+    for (i, v) in out[..k].iter_mut().enumerate() {
+        let at = ((p * k + i) * PANEL + j) * vb;
+        let b = &values[at..at + vb];
+        *v = match precision {
+            Precision::F32 => f32::from_le_bytes(b.try_into().unwrap()),
+            Precision::F16 => f16_to_f32(u16::from_le_bytes(b.try_into().unwrap())),
+            Precision::Bf16 => bf16_to_f32(u16::from_le_bytes(b.try_into().unwrap())),
+            Precision::Int8 => b[0] as i8 as f32 * scales[p * PANEL + j],
+            Precision::Q8_0 => b[0] as i8 as f32 * scales[(p * blocks + i / Q8_BLOCK) * PANEL + j],
+        };
+    }
 }
 
 #[cfg(test)]

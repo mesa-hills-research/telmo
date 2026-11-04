@@ -210,8 +210,13 @@ impl Fillers {
     pub fn remove(&self, text: &str) -> String {
         let words: Vec<&str> = text.split_whitespace().collect();
         let edits = self.plan(&Context::default(), &words, &Protected::default());
+        Fillers::text(&words, &edits)
+    }
+
+    /// `words` with `edits` made, separated by single spaces.
+    pub(crate) fn text(words: &[&str], edits: &[Edit]) -> String {
         let mut out = String::new();
-        for (word, edit) in words.iter().zip(&edits) {
+        for (word, edit) in words.iter().zip(edits) {
             let word = match edit {
                 Edit::Keep => *word,
                 Edit::Change(changed) => changed,
@@ -290,6 +295,27 @@ impl Fillers {
         self.tidy(before, &parts, &deleted, &kept, protected)
     }
 
+    /// Which of `words`, a text of their own, these fillers delete.
+    pub(crate) fn deletions(&self, words: &[&str], protected: &Protected) -> Vec<bool> {
+        let edits = self.plan(&Context::default(), words, protected);
+        (edits.iter())
+            .map(|e| matches!(e, Edit::Delete | Edit::Leave(_)))
+            .collect()
+    }
+
+    /// The edits that delete `deleted` from `words`, a text of their own, with punctuation and
+    /// capitals tidied as for fillers.
+    pub(crate) fn tidy_deletions(
+        &self,
+        words: &[&str],
+        deleted: &[bool],
+        protected: &Protected,
+    ) -> Vec<Edit> {
+        let parts: Vec<(&str, &str, &str)> = words.iter().map(|w| split(w)).collect();
+        let kept = protected.words(&[], words);
+        self.tidy(None, &parts, deleted, &kept, protected)
+    }
+
     /// The edits that delete `deleted`, with punctuation and capitals as the module describes.
     fn tidy(
         &self,
@@ -361,41 +387,63 @@ impl Fillers {
     where
         T: Clone,
     {
-        let ids: Vec<u32> = tokens.iter().map(&id).collect();
-        let spans = words(tokenizer, &ids);
-        let texts: Vec<String> = spans
-            .iter()
-            .map(|s| {
-                tokenizer
-                    .decode_raw(&ids[s.clone()])
-                    .trim_start()
-                    .to_string()
-            })
-            .collect();
-        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let edits = self.plan(context, &texts, protected);
-        if edits.iter().all(|e| *e == Edit::Keep) {
-            return tokens;
-        }
-        let mut out = Vec::with_capacity(tokens.len());
-        for (span, edit) in spans.into_iter().zip(edits) {
-            let word = &tokens[span];
-            match edit {
-                Edit::Keep => out.extend_from_slice(word),
-                Edit::Delete => {}
-                Edit::Change(text) => match spelled(tokenizer, &text, true) {
-                    Some(ids) => out.extend(respell(word, ids)),
-                    None => out.extend_from_slice(word),
-                },
-                Edit::Leave(end) => {
-                    if let Some(ids) = spelled(tokenizer, &end.to_string(), false) {
-                        out.extend(respell(word, ids));
-                    }
+        rewrite(
+            tokenizer,
+            tokens,
+            id,
+            |texts| self.plan(context, texts, protected),
+            respell,
+        )
+    }
+}
+
+/// `tokens`, whose ids `id` gives, with the edits `plan` gives for their words made. Words that
+/// go are left out, and words that change are spelled anew by `respell` from the word's tokens
+/// and its new ids.
+pub(crate) fn rewrite<T>(
+    tokenizer: &Tokenizer,
+    tokens: Vec<T>,
+    id: impl Fn(&T) -> u32,
+    plan: impl FnOnce(&[&str]) -> Vec<Edit>,
+    respell: impl Fn(&[T], Vec<u32>) -> Vec<T>,
+) -> Vec<T>
+where
+    T: Clone,
+{
+    let ids: Vec<u32> = tokens.iter().map(&id).collect();
+    let spans = words(tokenizer, &ids);
+    let texts: Vec<String> = spans
+        .iter()
+        .map(|s| {
+            tokenizer
+                .decode_raw(&ids[s.clone()])
+                .trim_start()
+                .to_string()
+        })
+        .collect();
+    let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let edits = plan(&texts);
+    if edits.iter().all(|e| *e == Edit::Keep) {
+        return tokens;
+    }
+    let mut out = Vec::with_capacity(tokens.len());
+    for (span, edit) in spans.into_iter().zip(edits) {
+        let word = &tokens[span];
+        match edit {
+            Edit::Keep => out.extend_from_slice(word),
+            Edit::Delete => {}
+            Edit::Change(text) => match spelled(tokenizer, &text, true) {
+                Some(ids) => out.extend(respell(word, ids)),
+                None => out.extend_from_slice(word),
+            },
+            Edit::Leave(end) => {
+                if let Some(ids) = spelled(tokenizer, &end.to_string(), false) {
+                    out.extend(respell(word, ids));
                 }
             }
         }
-        out
     }
+    out
 }
 
 /// The token ranges of the words of `ids`, each starting at a token with the word-start
