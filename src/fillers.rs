@@ -51,7 +51,7 @@ enum Language {
 }
 
 /// Words that can't end a clause, so two copies side by side are always a stutter.
-const REPEATED: [&str; 35] = [
+pub(crate) const REPEATED: [&str; 35] = [
     "a", "an", "the", "and", "or", "but", "i", "my", "our", "your", "their", "we", "they", "he",
     "she", "it's", "that's", "there's", "what's", "let's", "i'm", "we're", "they're", "you're",
     "he's", "she's", "i've", "we've", "they've", "you've", "i'll", "we'll", "they'll", "you'll",
@@ -116,6 +116,23 @@ impl Context {
     /// The context of `text`.
     pub fn after(text: &str) -> Context {
         let mut context = Context::default();
+        context.extend(text);
+        context
+    }
+
+    /// The context of `text` after `carried`, the settled text of a stream's previous utterance,
+    /// whose last word and spelling tail go on but whose open quotes don't, so a mark that never
+    /// closed can't keep the rest of the stream's fillers.
+    pub fn after_carried(carried: &str, text: &str) -> Context {
+        let mut context = Context::after(carried);
+        context.open = [false; 2];
+        context.extend(text);
+        context
+    }
+
+    /// Goes on over the words of `text`.
+    fn extend(&mut self, text: &str) {
+        let context = self;
         for word in text.split_whitespace() {
             let (lead, core, trail) = split(word);
             let closes = quote_marks(&mut context.open, lead, core, trail);
@@ -130,7 +147,6 @@ impl Context {
             context.tail.drain(..keep);
             context.last = Some(word.to_string());
         }
-        context
     }
 }
 

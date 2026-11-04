@@ -198,6 +198,9 @@ pub struct UtteranceStream {
     log_mel: Option<LogMelStream>,
     /// The text settled so far, which filler removal goes on from.
     settled: String,
+    /// The last words the stream's previous utterance settled, which filler removal goes on from
+    /// too, so a stutter split by a pause loses its second copy.
+    carried: String,
     passes: usize,
     /// The special words passes favour.
     words: Option<Arc<Compiled>>,
@@ -242,6 +245,7 @@ impl UtteranceStream {
             granite,
             log_mel,
             settled: String::new(),
+            carried: String::new(),
             passes: 0,
             words,
             timings,
@@ -307,7 +311,7 @@ impl UtteranceStream {
         // Fillers go before anything settles, going on from the settled text, so a word whose
         // fate depends on the next one is the last of the pass until that one comes, and what
         // protects a word from going may have settled before it.
-        let settled_context = Context::after(&self.settled);
+        let settled_context = Context::after_carried(&self.carried, &self.settled);
         let hyp = match self.words.as_ref() {
             Some(words) => remove_fillers(words, tokenizer, &settled_context, hyp),
             None => hyp,
@@ -711,6 +715,9 @@ pub struct Streamer {
     held: Option<(u64, char)>,
     /// Utterances started so far.
     started: u64,
+    /// The settled text of the last utterance whose final pass ran, which the next one's filler
+    /// removal goes on from.
+    last_text: String,
     /// The special words new utterances favour.
     words: Option<Arc<Compiled>>,
 }
@@ -733,6 +740,7 @@ impl Streamer {
             held: None,
             started: 0,
             words: None,
+            last_text: String::new(),
         }
     }
 
@@ -902,6 +910,11 @@ impl Streamer {
 
     /// Runs a pass and reports what changed. Returns whether it was final.
     fn run(&mut self, a: &mut Active, mode: PassMode, events: &mut Vec<Event>) -> Result<bool> {
+        if a.stream.passes() == 0 {
+            // The previous utterance's final pass runs before this one's first, so its text is
+            // whole by now.
+            a.stream.carried = last_words(&self.last_text);
+        }
         a.seen = a.stream.audio().len();
         let out = a.stream.pass(&self.model, &self.config.passes, mode)?;
         let mut settled = out.settled;
@@ -911,7 +924,8 @@ impl Streamer {
         if !settled.is_empty()
             && let Some(held) = self.held.take()
         {
-            let (resolved, text) = resolve_held(held, &settled, a.stream.words.as_deref());
+            let (resolved, text) =
+                resolve_held(held, &self.last_text, &settled, a.stream.words.as_deref());
             events.extend(resolved);
             settled = text;
         }
@@ -953,6 +967,7 @@ impl Streamer {
         if !self.run(a, mode, events)? {
             return Ok(false);
         }
+        self.last_text = std::mem::take(&mut a.stream.settled);
         let now = a.start + a.stream.audio().len() as u64;
         let (speech_end, decided_at) = a.end.unwrap_or((a.reopened.unwrap_or(now), now));
         events.push(Event::UtteranceEnd {
@@ -1008,14 +1023,21 @@ const SENTENCE_END: [char; 3] = ['.', '?', '!'];
 /// The events that settle or drop the sentence end `held` (an utterance's number and its mark)
 /// once the next utterance's first words, `settled`, settle, and those words to settle. The mark
 /// goes when the sentence goes on, and the next words take a capital when they start a new one.
-/// Either way it leaves the held utterance's tentative text.
+/// Either way it leaves the held utterance's tentative text. When the sentence goes on with a
+/// copy of the held utterance's last word, `previous` ending in it, and that's a word that can't
+/// end a clause, the copy is a stutter and goes with the mark ("...and." then "and then").
 fn resolve_held(
     held: (u64, char),
+    previous: &str,
     settled: &str,
     words: Option<&Compiled>,
 ) -> (Vec<Event>, String) {
     let (utterance, mark) = held;
     let goes_on = sentence_goes_on(settled, words);
+    let settled = match goes_on {
+        Some(true) => without_a_copy_of(previous, settled),
+        _ => settled,
+    };
     let mut events = Vec::new();
     if goes_on != Some(true) {
         events.push(Event::Settled {
@@ -1032,6 +1054,35 @@ fn resolve_held(
         _ => settled.to_string(),
     };
     (events, text)
+}
+
+/// `settled` without its first word when that's a copy of the last word of `previous` that can't
+/// end a clause.
+fn without_a_copy_of<'a>(previous: &str, settled: &'a str) -> &'a str {
+    let core = |w: &str| fillers::split(w).1.to_lowercase();
+    let (Some(last), Some(first)) = (
+        previous.split_whitespace().next_back(),
+        settled.split_whitespace().next(),
+    ) else {
+        return settled;
+    };
+    let word = core(first);
+    if word != core(last) || !fillers::REPEATED.contains(&word.as_str()) {
+        return settled;
+    }
+    let rest = settled.trim_start();
+    // Keep the space before the copy, which separates what follows from the earlier text.
+    let space = &settled[..settled.len() - rest.len()];
+    match rest.find(char::is_whitespace) {
+        Some(end) => &settled[space.len() + end..],
+        None => "",
+    }
+}
+
+/// The last words of an utterance's settled `text`, as many as filler removal goes on from.
+fn last_words(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    words[words.len().saturating_sub(SpecialWords::MAX_PARTS)..].join(" ")
 }
 
 /// Whether `text`, the first settled words of an utterance after one that ended with a sentence
@@ -1623,6 +1674,7 @@ mod tests {
             granite: None,
             log_mel: None,
             settled: String::new(),
+            carried: String::new(),
             passes: 0,
             words: Some(Arc::new(compiled)),
             timings: Timings::default(),
@@ -2026,6 +2078,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_utterance_goes_on_from_the_last_ones_settled_words() {
+        let tok = word_tokenizer(&["the", "That's", "and", "then", "um", "product", "big"]);
+        for (carried, heard, want) in [
+            // A stutter split by a pause loses its second copy, whatever its case.
+            ("to design the", &[1, 6][..], " product"),
+            ("for something that's", &[2, 7], " big"),
+            // A sentence end between the copies keeps both, as in text.
+            ("and.", &[3, 4], " and then"),
+            // A quote the last utterance left open doesn't go on.
+            ("He said “the city", &[5, 7], " big"),
+        ] {
+            let mut s = stream_for(&fillers(), &tok, 50);
+            s.carried = carried.to_string();
+            let heard: Vec<(u32, usize)> = (heard.iter().enumerate())
+                .map(|(i, &id)| (id, 6 * i))
+                .collect();
+            let out = s.settle(
+                &tok,
+                window(&s, &heard),
+                &PassConfig::default(),
+                PassMode::Final,
+            );
+            assert_eq!(out.settled, want, "{carried}");
+        }
+    }
+
     /// The settled text of a stream over `frames` frames with `words`, after two passes that hear
     /// `first` and a final pass that hears `last`, and the text offline removal gives `last`.
     fn streamed_and_offline(
@@ -2228,6 +2307,9 @@ mod tests {
         for (next, mark, text) in [
             // "...speak your mind" then "rather than having to only type."
             (" rather than", None, " rather than"),
+            // A copy of the held utterance's last list word that goes on with the sentence is a
+            // stutter, and goes with the mark ("...and." then "and then").
+            (" and then", None, " then"),
             (", and also", None, ", and also"),
             // A new sentence keeps the mark, with a capital its first word may lack.
             (" detailed design.", Some("."), " Detailed design."),
@@ -2240,7 +2322,7 @@ mod tests {
             (" hello, world", Some("."), " Hello, world"),
             (" 'hello world", Some("."), " 'Hello world"),
         ] {
-            let (events, out) = resolve_held(held, next, Some(&words));
+            let (events, out) = resolve_held(held, " so we test it and.", next, Some(&words));
             let want: Vec<String> = mark.into_iter().map(String::from).collect();
             assert_eq!((settled(&events), out.as_str()), (want, text), "{next}");
             assert!(events.contains(&cleared), "{next}");

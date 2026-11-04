@@ -79,6 +79,12 @@ comma, and a comma already settled stays even where a hesitation after it would 
 ("no, no") keeps both copies. Each settled word stands for one word of the pass, heard on its audio
 or starting less than 240 ms after it, and any other copy was said again.
 
+An utterance goes on from the last words the one before it settled, so a stutter split by a pause
+loses its second copy ("to design the" then "the product"), unless a sentence end comes between
+them. A quote the earlier utterance left open doesn't go on. When the earlier utterance's sentence
+end turns out to go on with the next words, a copy of its last word that opens them goes with the
+mark ("and." then "and then" gives "and then").
+
 ## Accuracy
 
 On meeting speech, 781 utterances (69 minutes) of the AMI corpus's IS1009 meetings recorded with
