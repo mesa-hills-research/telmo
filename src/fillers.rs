@@ -16,8 +16,9 @@
 //!
 //! A quoted word stays, as a mention ("I often go “Um, so”", "'um'"). That's a word from an opening
 //! quote mark to the closing one of its kind, or to the end of the text when none comes. A closing
-//! mark alone ("uh'") quotes nothing, and neither does the apostrophe of an elision ("'cause") or
-//! of a contraction's ending written apart ("we 'll"). Both copies stay when a quote mark, bracket
+//! mark alone ("uh'") quotes nothing, and neither does a straight single mark or ’ standing alone
+//! (a recognizer writes one as noise), the apostrophe of an elision ("'cause") or that of a
+//! contraction's ending written apart ("we 'll"). Both copies stay when a quote mark, bracket
 //! or sentence end comes between them, also on a removed hesitation. Every word of a special word
 //! or a spoken form's word stays wherever the whole of it occurs. Every other word stays as
 //! written, so "uh-huh", "oh", "very very", "had had", "it it", repeats of several words, false
@@ -519,7 +520,8 @@ fn quoted(mut open: [bool; 2], parts: &[(&str, &str, &str)]) -> Vec<bool> {
 
 /// Opens the quotes that a word with punctuation `lead` and `trail` around its letters `core`
 /// opens, and gives the kinds it closes after it. An opening mark is one before the letters, or a
-/// mark standing alone with no quote of its kind open. An apostrophe right before an elision
+/// mark standing alone with no quote of its kind open, except a straight single mark or ’, which a
+/// recognizer writes alone as noise and typography never opens a quote with. An apostrophe right before an elision
 /// ("'cause") or a contraction's ending written apart ("we 'll") belongs to the word instead, and
 /// a straight or right single mark there is taken for one. Other marks, such as ‘ and ‹, are only
 /// ever quote marks. A closing mark is one after the letters, or standing alone, with a quote of
@@ -534,7 +536,10 @@ fn quote_marks(open: &mut [bool; 2], lead: &str, core: &str, trail: &str) -> [bo
         if core.is_empty() {
             if lead.contains(marks) {
                 closes[kind] = open[kind];
-                open[kind] = true;
+                // A straight single mark or ’ alone only closes a quote.
+                if kind == 0 || !lead.chars().all(|c| APOSTROPHES.contains(&c)) {
+                    open[kind] = true;
+                }
             }
             continue;
         }
@@ -753,7 +758,13 @@ mod tests {
             ("He said 'um", "He said 'um"),
             // A quote that never closes runs to the end of the text.
             ("He said “so um I think", "He said “so um I think"),
-            ("He said ' um, the the idea", "He said ' um, the the idea"),
+            ("He said \" um, the the idea", "He said \" um, the the idea"),
+            // A straight single mark or ’ standing alone opens none, since a recognizer writes
+            // one as noise ("So so ' okay i i might"), though it closes one that's open.
+            ("He said ' um, the the idea", "He said ' the idea"),
+            ("So so ' okay i i might", "So so ' okay i might"),
+            ("there ’ because in uh like", "there ’ because in like"),
+            ("He said ‘so um ’ and um left", "He said ‘so um ’ and left"),
             // An elision opens no quote, and a mark of the other kind closes none.
             ("'cause um I think", "'cause I think"),
             ("'Tis uh true", "'Tis true"),

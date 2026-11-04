@@ -48,7 +48,9 @@ case ("Um, so I think" becomes "So I think"). Other words keep their spelling.
   hesitation left in costs less than a meant word lost.
 - A quoted word, as a mention ("I often go “Um, so”", "'um'"). That's a word from an opening
   quote mark to the closing one of its kind, or to the end of the utterance when none comes. A
-  closing mark alone quotes nothing, so "uh'" goes. Neither does the apostrophe of an elision from
+  closing mark alone quotes nothing, so "uh'" goes. A straight ' or a ’ standing alone quotes
+  nothing either, though it closes a quote that's open, since a recognizer writes one now and then
+  as noise ("So so ' okay i i might" loses an "i"). Neither does the apostrophe of an elision from
   a short list ('bout, 'cause, 'cos, 'cuz, 'em, 'kay, 'n, 'neath, 'nother, 'round, 'til, 'tis and
   'twas) or of a contraction's ending written apart from its word ('s, 'll, 're, 've, 'd, 'm and
   't, as in "we 'll"), so the "um" in "'cause um" goes too. A straight ' or a ’ right before one
