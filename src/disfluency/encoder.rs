@@ -18,6 +18,7 @@ use crate::threads::{Pool, SharedMut};
 
 /// The architecture, read from `config.json`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Config {
     pub hidden: usize,
     pub heads: usize,
@@ -37,6 +38,8 @@ pub struct Config {
 }
 
 impl Config {
+    /// The architecture a Hugging Face `config.json` describes, which must be a ModernBERT
+    /// token classifier with no biases but the classifier's.
     pub fn from_json(bytes: &[u8]) -> Result<Config> {
         let root = json::parse(bytes)?;
         let bad = |m: String| Error::Model(format!("The tagger's config.json isn't usable. {m}"));
@@ -114,10 +117,12 @@ impl Config {
         Ok(config)
     }
 
+    /// The width of each attention head.
     pub fn head_dim(&self) -> usize {
         self.hidden / self.heads
     }
 
+    /// Whether `layer` attends to all tokens rather than a band around each.
     pub fn is_global(&self, layer: usize) -> bool {
         layer.is_multiple_of(self.global_every)
     }

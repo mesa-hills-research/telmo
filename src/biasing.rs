@@ -211,6 +211,12 @@ impl PartialEq for SharedTagger {
     }
 }
 
+// A list, with a tagger or without, can be used across `catch_unwind`.
+const _: () = {
+    const fn unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+    unwind_safe::<SpecialWords>();
+};
+
 impl SpecialWords {
     /// The most words and spoken forms a list holds.
     pub const MAX_WORDS: usize = 1000;
@@ -319,6 +325,7 @@ impl SpecialWords {
         self.fillers = fillers;
     }
 
+    /// The tagger that leaves out disfluencies, if one is set.
     pub fn disfluencies(&self) -> Option<&Arc<Tagger>> {
         self.disfluencies.as_ref().map(|t| &t.0)
     }
@@ -332,6 +339,7 @@ impl SpecialWords {
         self.disfluencies = tagger.map(SharedTagger);
     }
 
+    /// The guards that keep words from the cleanup, if they're set.
     pub fn guards(&self) -> Option<Guards> {
         self.guards
     }
@@ -342,6 +350,7 @@ impl SpecialWords {
         self.guards = guards;
     }
 
+    /// The rules that fix capitals and punctuation, if they're set.
     pub fn punctuation(&self) -> Option<Punctuation> {
         self.punctuation
     }

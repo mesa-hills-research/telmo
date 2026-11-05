@@ -290,6 +290,12 @@ fn transcribe(args: &Transcribe) -> Result<(), String> {
             }
         }
     };
+    // Before the speech model's load, so the question about the tagger comes at once.
+    let tagger = if args.remove_disfluencies {
+        Some(install::tagger(&cache::dir()?, args.yes)?)
+    } else {
+        None
+    };
     let model_type = ModelType::detect(&path).map_err(|e| e.to_string())?;
     let mut options = Options {
         isa: args.isa,
@@ -314,8 +320,7 @@ fn transcribe(args: &Transcribe) -> Result<(), String> {
     if args.remove_fillers {
         words.set_fillers(Fillers::for_language("en"));
     }
-    if args.remove_disfluencies {
-        let pack = install::tagger(&cache::dir()?, args.yes)?;
+    if let Some(pack) = tagger {
         let tagger = Tagger::load(&pack, &options).map_err(|e| e.to_string())?;
         words.set_disfluencies(Some(std::sync::Arc::new(tagger)));
         words.set_guards(Guards::for_language("en"));

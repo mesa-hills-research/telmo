@@ -22,9 +22,12 @@ pub struct ByteLevelTokenizer {
     /// The BPE merges, from the ids of a pair to the merge's rank and the merged token's id.
     merges: HashMap<(u32, u32), (u32, u32)>,
     size: usize,
+    /// The bytes of the longest piece.
+    longest: usize,
 }
 
 impl ByteLevelTokenizer {
+    /// The tokenizer a Hugging Face `tokenizer.json` describes, which must be a byte-level BPE.
     pub fn from_json(bytes: &[u8]) -> Result<ByteLevelTokenizer> {
         let bad = |m: &str| Error::Model(format!("The tokenizer file isn't usable. {m}"));
         let root = json::parse(bytes)?;
@@ -110,11 +113,19 @@ impl ByteLevelTokenizer {
                 merges.entry((l, r)).or_insert((rank as u32, m));
             }
         }
+        let longest = ids.keys().map(Vec::len).max().unwrap_or(1);
         Ok(ByteLevelTokenizer {
             byte_ids,
             merges,
             size,
+            longest,
         })
+    }
+
+    /// The bytes of the longest piece, so a text of `n` bytes takes at least `n` divided by it
+    /// tokens.
+    pub(crate) fn longest_piece(&self) -> usize {
+        self.longest
     }
 
     /// The vocabulary size, added tokens included.
