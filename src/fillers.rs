@@ -113,6 +113,11 @@ impl Context {
         self.last.as_deref()
     }
 
+    /// Its last words, without their punctuation, as many as a spelling can go on from.
+    pub(crate) fn tail(&self) -> &[String] {
+        &self.tail
+    }
+
     /// The context of `text`.
     pub fn after(text: &str) -> Context {
         let mut context = Context::default();

@@ -885,7 +885,8 @@ impl Compiled {
             (None, None) => vec![Edit::Keep; texts.len()],
         };
         if let Some(punctuation) = &self.punctuation {
-            punctuation.fix(texts, &mut edits, context.last());
+            let special = protected.words(context.tail(), texts);
+            punctuation.fix(texts, &mut edits, context.last(), &special);
         }
         edits
     }
@@ -1095,6 +1096,38 @@ pub(crate) mod tests {
         let mut words = SpecialWords::new();
         words.set_punctuation(Punctuation::for_language("en"));
         assert_eq!(text(&words, "we need, um, a way"), "we need, um, a way");
+    }
+
+    #[test]
+    fn punctuation_keeps_special_words_and_settled_text() {
+        let tok = tokenizer();
+        let mut words = SpecialWords::new();
+        words.add("Ada").unwrap();
+        words.add("GitHub").unwrap();
+        words.set_punctuation(Punctuation::for_language("en"));
+        let (c, _) = Compiled::new(&words, &tok);
+        let text = |context: &Context, text: &str| {
+            let list: Vec<&str> = text.split(' ').collect();
+            Fillers::text(&list, &c.edits(context, &list, true))
+        };
+        let start = Context::default();
+        assert_eq!(
+            text(&start, "I'll call the. Ada team."),
+            "I'll call the Ada team."
+        );
+        assert_eq!(
+            text(&start, "We push to the. GitHub repo."),
+            "We push to the GitHub repo."
+        );
+        // A period that settled stays, so the next word keeps its capital.
+        let settled = Context::after("we need a patch.");
+        assert_eq!(text(&settled, "Release. That is"), "Release. That is");
+        assert_eq!(
+            text(&start, "a patch. Release. That is"),
+            "a patch release. That is"
+        );
+        let settled = Context::after("I'll take the.");
+        assert_eq!(text(&settled, "Red one."), "Red one.");
     }
 
     #[test]

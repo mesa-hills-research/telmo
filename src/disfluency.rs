@@ -49,6 +49,7 @@ use crate::safetensors::SafeTensors;
 use crate::source::Source;
 use crate::threads::Pool;
 use encoder::{Member, Runner};
+use punctuation::Hold;
 
 /// The model name of a tagger's pack.
 pub const PACK_MODEL: &str = "disfluency-tagger";
@@ -313,12 +314,19 @@ impl Punctuation {
 
     /// `words` with their capitals and punctuation fixed, one word for each.
     pub fn apply(&self, words: &[&str]) -> Vec<String> {
-        punctuation::punctuate(words, self.wide)
+        punctuation::punctuate(words, self.wide, &[])
     }
 
     /// `edits` of `words`, after a text whose last word is `before`, with the words they keep
-    /// fixed.
-    pub(crate) fn fix(&self, words: &[&str], edits: &mut [Edit], before: Option<&str>) {
+    /// fixed. `before` stays as it is, and the words `special` marks, which belong to special
+    /// words, keep their case.
+    pub(crate) fn fix(
+        &self,
+        words: &[&str],
+        edits: &mut [Edit],
+        before: Option<&str>,
+        special: &[bool],
+    ) {
         let kept: Vec<(usize, String)> = (words.iter().zip(edits.iter()).enumerate())
             .filter_map(|(i, (word, edit))| match edit {
                 Edit::Keep => Some((i, word.to_string())),
@@ -329,7 +337,13 @@ impl Punctuation {
         let list: Vec<&str> = (before.into_iter())
             .chain(kept.iter().map(|(_, text)| text.as_str()))
             .collect();
-        let fixed = punctuation::punctuate(&list, self.wide);
+        let holds: Vec<Hold> = (before.map(|_| Hold::All).into_iter())
+            .chain(kept.iter().map(|&(i, _)| match special.get(i) {
+                Some(true) => Hold::Case,
+                _ => Hold::Free,
+            }))
+            .collect();
+        let fixed = punctuation::punctuate(&list, self.wide, &holds);
         for ((i, now), new) in kept
             .iter()
             .zip(fixed.into_iter().skip(usize::from(before.is_some())))
