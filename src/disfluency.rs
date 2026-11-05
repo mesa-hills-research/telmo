@@ -52,6 +52,31 @@ use encoder::{Member, Runner};
 /// The model name of a tagger's pack.
 pub const PACK_MODEL: &str = "disfluency-tagger";
 
+/// A file to download, pinned to its size and SHA-256.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteFile {
+    pub url: &'static str,
+    /// The file's name, which a downloaded copy keeps.
+    pub name: &'static str,
+    pub bytes: u64,
+    pub sha256: &'static str,
+}
+
+/// What the trained tagger's pack is made from and under which licences, to show with it.
+pub const PACK_NOTICE: &str = "The disfluency tagger is Ettin encoder 68M by Johns Hopkins \
+    University's CLSP, licensed under MIT (https://huggingface.co/jhu-clsp/ettin-encoder-68m), \
+    fine-tuned on the AMI Meeting Corpus's annotations, licensed under CC BY 4.0 \
+    (https://groups.inf.ed.ac.uk/ami/corpus/).";
+
+/// The trained tagger's pack in q8_0, a release file of Telmo's repository, whose
+/// [`PACK_NOTICE`] says what it's made from.
+pub const PACK_DOWNLOAD: RemoteFile = RemoteFile {
+    url: "https://github.com/mesa-hills-research/telmo/releases/download/disfluency-tagger-1/disfluency-tagger-1-q8_0.pack",
+    name: "disfluency-tagger-1-q8_0.pack",
+    bytes: 157_673_903,
+    sha256: "35e8552c95f2ff58e05122581945000d36c1002d8bce1e97745ae43bf0e05400",
+};
+
 /// The 8-bit precision a tagger's pack ships in. Its deletions equal f32's on 99.6% of the
 /// development utterances it was tuned on.
 pub const RECOMMENDED_PRECISION: Precision = Precision::Q8_0;

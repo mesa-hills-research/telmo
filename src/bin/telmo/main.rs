@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
+use telmo::disfluency::{Guards, Tagger};
 use telmo::kernels::Isa;
 use telmo::model::ModelType;
 use telmo::pack::{self, FileSink};
@@ -58,9 +59,13 @@ Options
                    --device list shows (default the system's input)
   --remove-fillers Leaves out English hesitations (um, uh) and stutters of words
                    such as \"the the\" or \"I, I\"
+  --remove-disfluencies
+                   Leaves out English fillers, false starts, repairs and repeats
+                   with the disfluency tagger, keeping spoken symbols, units and
+                   words talked about. It downloads on first use (158 MB)
 
-Granite and Parakeet download on first use, after asking, into the cache
-directory that telmo models shows. Downloads use the proxy environment
+Granite, Parakeet and the tagger download on first use, after asking, into the
+cache directory that telmo models shows. Downloads use the proxy environment
 variables (ALL_PROXY, HTTPS_PROXY and NO_PROXY) and resume where they stopped.
 A model directory holds model.safetensors, config.json and tokenizer.json, and
 Parakeet's GGUF file needs tokenizer.json beside it. WAV files may have any
@@ -94,6 +99,7 @@ struct Transcribe {
     yes: bool,
     device: Option<String>,
     remove_fillers: bool,
+    remove_disfluencies: bool,
     files: Vec<PathBuf>,
 }
 
@@ -159,6 +165,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
         yes: false,
         device: None,
         remove_fillers: false,
+        remove_disfluencies: false,
         files: Vec::new(),
     };
     let mut rest = rest.iter();
@@ -192,6 +199,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
                 transcribe.device = Some(value(ERROR)?.clone());
             }
             "--remove-fillers" => transcribe.remove_fillers = true,
+            "--remove-disfluencies" => transcribe.remove_disfluencies = true,
             option if option.starts_with('-') => {
                 return Err(format!("Unknown option {option}."));
             }
@@ -207,6 +215,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
             ("--yes", transcribe.yes),
             ("--device", transcribe.device.is_some()),
             ("--remove-fillers", transcribe.remove_fillers),
+            ("--remove-disfluencies", transcribe.remove_disfluencies),
         ];
         match given
             .iter()
@@ -228,6 +237,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
                 "--precision",
                 "--yes",
                 "--remove-fillers",
+                "--remove-disfluencies",
             ])?;
             Ok(Command::Transcribe(transcribe))
         }
@@ -303,6 +313,12 @@ fn transcribe(args: &Transcribe) -> Result<(), String> {
     let mut words = SpecialWords::new();
     if args.remove_fillers {
         words.set_fillers(Fillers::for_language("en"));
+    }
+    if args.remove_disfluencies {
+        let pack = install::tagger(&cache::dir()?, args.yes)?;
+        let tagger = Tagger::load(&pack, &options).map_err(|e| e.to_string())?;
+        words.set_disfluencies(Some(std::sync::Arc::new(tagger)));
+        words.set_guards(Guards::for_language("en"));
     }
     let several = args.files.len() > 1;
     let mut failures = 0;
@@ -424,6 +440,7 @@ mod tests {
                 yes: false,
                 device: None,
                 remove_fillers: false,
+                remove_disfluencies: false,
                 files: vec!["a.wav".into(), "b.wav".into()],
             }))
         );
@@ -440,6 +457,7 @@ mod tests {
                 yes: true,
                 device: None,
                 remove_fillers: true,
+                remove_disfluencies: false,
                 files: vec!["a.wav".into()],
             }))
         );
@@ -578,5 +596,6 @@ mod tests {
         ] {
             assert!(HELP.contains(&format!("\n  {option} ")), "{option}");
         }
+        assert!(HELP.contains("\n  --remove-disfluencies\n"));
     }
 }
