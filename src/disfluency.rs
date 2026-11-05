@@ -64,10 +64,11 @@ pub struct RemoteFile {
 }
 
 /// What the trained tagger's pack is made from and under which licences, to show with it.
-pub const PACK_NOTICE: &str = "The disfluency tagger is Ettin encoder 68M by Johns Hopkins \
-    University's CLSP, licensed under MIT (https://huggingface.co/jhu-clsp/ettin-encoder-68m), \
-    fine-tuned on the AMI Meeting Corpus's annotations, licensed under CC BY 4.0 \
-    (https://groups.inf.ed.ac.uk/ami/corpus/).";
+pub const PACK_NOTICE: &str = "The disfluency tagger's weights are licensed under MIT or Apache \
+    2.0. They are Ettin encoder 68M by Johns Hopkins University's CLSP, licensed under MIT \
+    (https://huggingface.co/jhu-clsp/ettin-encoder-68m), fine-tuned on the AMI Meeting Corpus's \
+    annotations, licensed under CC BY 4.0 (Carletta et al., 2005, \
+    https://groups.inf.ed.ac.uk/ami/corpus/).";
 
 /// The trained tagger's pack in q8_0, a release file of Telmo's repository, whose
 /// [`PACK_NOTICE`] says what it's made from.
