@@ -63,6 +63,8 @@ planned learn learned run runs ran play played live lives lived stay stays staye
 arrive arrives arrived begin begins began end ends ended leave leaves win won lose lost i'm it's
 that's we're you're they're i'll we'll i've we've i'd there's he's she's isn't aren't don't doesn't
 didn't can't won't wouldn't couldn't shouldn't haven't hasn't";
+/// Abbreviations whose period ends no sentence.
+const ABBREVIATIONS: &str = "mr mrs ms dr st jr sr prof vs";
 /// Words ending in "ing" that aren't progressives.
 const NOT_PROGRESSIVE: &str = "thing something anything nothing everything morning evening during";
 
@@ -156,8 +158,23 @@ fn first_person(word: &str) -> Option<String> {
     Some(format!("{}I{rest}", &word[..start]))
 }
 
-/// The flags of each word.
-fn flags(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
+/// How much of a word may change.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Hold {
+    #[default]
+    Free,
+    /// Its letters' case stays, as a special word's does.
+    Case,
+    /// Nothing about it changes, and no decision about it reaches the next word, as with text
+    /// that already settled.
+    All,
+}
+
+/// Flags that say what may change, beside the flags of the words.
+const HOLDS: [&str; 2] = ["frozen", "keeps_case"];
+
+/// The flags of each word, whose `holds` say what may change.
+fn flags(network: &Network, words: &[&str], holds: &[Hold]) -> Vec<Vec<f32>> {
     let n = words.len();
     let width = network.layers.iter().map(Vec::len).sum::<usize>();
     let mut z = vec![vec![0f32; network.look.len() - width]; n];
@@ -181,8 +198,9 @@ fn flags(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
             || has(MORE_CLAUSE_WORDS, &a)
             || units::has_class("clause_verb", &a)
             || progressive;
+        let abbreviation = has(ABBREVIATIONS, &a);
         let on = [
-            tail.ends_with(['.', '?', '!']),
+            tail.ends_with(['.', '?', '!']) && !abbreviation,
             tail.ends_with([',', ';', ':']),
             core.chars().next().is_some_and(char::is_uppercase) && !allcaps,
             dangling,
@@ -202,7 +220,7 @@ fn flags(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
             i == 0,
             i + 1 == n,
             allcaps,
-            w.ends_with('.') && !w.ends_with("..") && w != "A.",
+            w.ends_with('.') && !w.ends_with("..") && w != "A." && !abbreviation,
             a == "so",
             has(PREPOSITIONS, &a),
             a == "than",
@@ -213,7 +231,9 @@ fn flags(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
             clause_word,
             length > 1 && !clause_word && !answer,
         ];
-        for (name, on) in FLAGS.iter().zip(on) {
+        let hold = holds.get(i).copied().unwrap_or_default();
+        let held = [hold == Hold::All, hold != Hold::Free];
+        for (name, on) in FLAGS.iter().zip(on).chain(HOLDS.iter().zip(held)) {
             if on {
                 z[i][network.feature(name)] = 1.0;
             }
@@ -224,7 +244,7 @@ fn flags(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
 
 /// The network with the drops `enabled` on, and the features of its four decisions.
 fn build(enabled: &[&str]) -> (Network, [usize; 4]) {
-    let base: Vec<(&str, i32)> = FLAGS.iter().map(|&f| (f, 0)).collect();
+    let base: Vec<(&str, i32)> = FLAGS.iter().chain(&HOLDS).map(|&f| (f, 0)).collect();
     let mut s = Network::with_base(&base);
     let on: Vec<&str> = DROPS.into_iter().filter(|u| enabled.contains(u)).collect();
     let unit = |u: &str| format!("u_{u}");
@@ -261,16 +281,17 @@ fn build(enabled: &[&str]) -> (Network, [usize; 4]) {
     s.unit(&mut a, "frag3", "", &need, &[], &block3, None);
     s.close(a);
 
-    // The drops, each at the word that carries the period.
+    // The drops, each at the word that carries the period, which a frozen word keeps.
     let mut b = Vec::new();
     let period: Input = (0, "lone_period");
+    let frozen: Input = (0, "frozen");
     s.unit(
         &mut b,
         "u_dangle",
         "",
         &[period, (0, "dangling")],
         &[],
-        &[(0, "dangle_so")],
+        &[(0, "dangle_so"), frozen],
         None,
     );
     s.unit(
@@ -279,7 +300,7 @@ fn build(enabled: &[&str]) -> (Network, [usize; 4]) {
         "",
         &[period, (1, "lone_word")],
         &[],
-        &[],
+        &[frozen],
         None,
     );
     s.unit(
@@ -288,7 +309,7 @@ fn build(enabled: &[&str]) -> (Network, [usize; 4]) {
         "",
         &[(0, "lone_word"), period],
         &[],
-        &[],
+        &[frozen],
         None,
     );
     s.unit(
@@ -297,7 +318,7 @@ fn build(enabled: &[&str]) -> (Network, [usize; 4]) {
         "",
         &[period, (1, "w_than")],
         &[],
-        &[(0, "answer"), (0, "last"), (0, "dangling")],
+        &[(0, "answer"), (0, "last"), (0, "dangling"), frozen],
         None,
     );
     s.unit(
@@ -311,6 +332,7 @@ fn build(enabled: &[&str]) -> (Network, [usize; 4]) {
             (0, "last"),
             (0, "start"),
             (0, "dangling"),
+            frozen,
         ],
         None,
     );
@@ -320,7 +342,7 @@ fn build(enabled: &[&str]) -> (Network, [usize; 4]) {
         "",
         &[period, (0, "verb_obj")],
         &[],
-        &[(0, "last"), (0, "start")],
+        &[(0, "last"), (0, "start"), frozen],
         None,
     );
     s.unit(
@@ -329,7 +351,7 @@ fn build(enabled: &[&str]) -> (Network, [usize; 4]) {
         "",
         &[period, (0, "ing"), (-1, "aux")],
         &[],
-        &[(0, "last")],
+        &[(0, "last"), frozen],
         None,
     );
     s.unit(
@@ -338,7 +360,7 @@ fn build(enabled: &[&str]) -> (Network, [usize; 4]) {
         "",
         &[period],
         &[(1, "frag1"), (2, "frag2"), (3, "frag3")],
-        &[(0, "answer"), (0, "last"), (0, "dangling")],
+        &[(0, "answer"), (0, "last"), (0, "dangling"), frozen],
         Some(-1.0),
     );
     s.unit(
@@ -347,7 +369,7 @@ fn build(enabled: &[&str]) -> (Network, [usize; 4]) {
         "",
         &[period],
         &[(0, "frag1"), (0, "frag2"), (0, "frag3")],
-        &[(0, "last")],
+        &[(0, "last"), frozen],
         Some(-1.0),
     );
     s.close(b);
@@ -362,7 +384,8 @@ fn build(enabled: &[&str]) -> (Network, [usize; 4]) {
     s.unit(&mut b2, "kept_end", "", &[(0, "end")], &[], &block, None);
     s.close(b2);
     let mut b3 = Vec::new();
-    let block: [Input; 10] = [
+    let block: [Input; 11] = [
+        (0, "frozen"),
         (-1, "kept_end"),
         (-2, "kept_end"),
         (-3, "kept_end"),
@@ -397,22 +420,36 @@ fn build(enabled: &[&str]) -> (Network, [usize; 4]) {
     let after: [Input; 2] = [(0, "u_dangle"), (0, "lower_after")];
     s.unit(&mut c, "lower_after_drop", "", &after, &[], &[], None);
     let comma: [Input; 2] = [(0, "comma"), (0, "never_end")];
-    s.unit(&mut c, "drop_comma", "", &comma, &[], &[], None);
+    s.unit(
+        &mut c,
+        "drop_comma",
+        "",
+        &comma,
+        &[],
+        &[(0, "frozen")],
+        None,
+    );
     s.unit(
         &mut c,
         "upper_i",
         "",
         &[(0, "first_person")],
         &[],
-        &[],
+        &[(0, "keeps_case")],
         None,
     );
     s.close(c);
 
-    // The word after a join, and a one-word sentence's own word, take lower case.
+    // The word after a join, and a one-word sentence's own word, take lower case, except after
+    // a frozen word, whose period stays.
     let mut d = Vec::new();
     let any: [Input; 3] = [(-1, "joined"), (-1, "lower_after_drop"), (0, "u_lone_own")];
-    let block: [Input; 2] = [(0, "first_person"), (0, "allcaps")];
+    let block: [Input; 4] = [
+        (0, "first_person"),
+        (0, "allcaps"),
+        (0, "keeps_case"),
+        (-1, "frozen"),
+    ];
     s.unit(&mut d, "lower", "", &[(0, "cap")], &any, &block, Some(-1.0));
     s.close(d);
     let outputs = ["drop_end", "lower", "drop_comma", "upper_i"].map(|n| s.feature(n));
@@ -460,10 +497,10 @@ fn apply(word: &str, [drop_end, lower, drop_comma, upper_i]: [bool; 4]) -> Strin
 }
 
 /// `words` with their capitals and punctuation fixed, one word for each, in the wider setting
-/// if `wide`.
-pub(crate) fn punctuate(words: &[&str], wide: bool) -> Vec<String> {
+/// if `wide`. `holds` says how much of each word may change, and words past its end are free.
+pub(crate) fn punctuate(words: &[&str], wide: bool, holds: &[Hold]) -> Vec<String> {
     let (network, outputs) = network(wide);
-    let z = network.run(flags(network, words));
+    let z = network.run(flags(network, words, holds));
     (words.iter().zip(&z))
         .map(|(word, row)| apply(word, outputs.map(|f| row[f] > 0.5)))
         .collect()
@@ -509,6 +546,7 @@ mod tests {
                 "It works. On Friday we meet.",
             ),
             ("(i), 'i' \"i'm\" i’ll i’ve.", "(I), 'I' \"I'm\" I’ll I’ve."),
+            ("I met Mr. Smith. Today.", "I met Mr. Smith. Today."),
             ("", ""),
         ];
         let wide = [
@@ -533,12 +571,44 @@ mod tests {
                 "My brother is learning how to fix bikes.",
             ),
             ("Yes. The red one. I think.", "Yes. The red one. I think."),
+            ("I met Mr. Smith. Today.", "I met Mr. Smith. Today."),
+            ("Ask Dr. Jones. Thanks.", "Ask Dr. Jones. Thanks."),
         ];
         for (cases, is_wide) in [(&default[..], false), (&wide[..], true)] {
             for (text, want) in cases {
                 let words: Vec<&str> = text.split_whitespace().collect();
-                assert_eq!(punctuate(&words, is_wide).join(" "), *want, "{text:?}");
+                assert_eq!(punctuate(&words, is_wide, &[]).join(" "), *want, "{text:?}");
             }
+        }
+    }
+
+    #[test]
+    fn held_words_keep_what_they_hold() {
+        use Hold::{All, Case, Free};
+        for wide in [false, true] {
+            let fix = |text: &str, holds: &[Hold]| {
+                let words: Vec<&str> = text.split(' ').collect();
+                punctuate(&words, wide, holds).join(" ")
+            };
+            // A special word keeps its case, and the period before it still goes.
+            assert_eq!(
+                fix("I'll call the. Ada team.", &[Free, Free, Free, Case]),
+                "I'll call the Ada team."
+            );
+            assert_eq!(fix("the. i said", &[Free, Case]), "the i said");
+            // Nothing about a frozen word changes or reaches the next word.
+            let own = if wide {
+                "Release that is"
+            } else {
+                "Release. That is"
+            };
+            assert_eq!(
+                fix("patch. Release. That is", &[All]),
+                format!("patch. {own}")
+            );
+            assert_eq!(fix("the. Red one.", &[All]), "the. Red one.");
+            assert_eq!(fix("the, little", &[All]), "the, little");
+            assert_eq!(fix("the. Red one.", &[]), "the red one.");
         }
     }
 

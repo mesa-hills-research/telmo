@@ -45,39 +45,50 @@ use crate::kernels::{Isa, Kernels};
 use crate::pack::{MemorySink, Pack, Sink};
 use crate::parakeet::Options;
 use crate::quant::Precision;
+use crate::remote_file::RemoteFile;
 use crate::safetensors::SafeTensors;
 use crate::source::Source;
 use crate::threads::Pool;
 use encoder::{Member, Runner};
+use punctuation::Hold;
 
 /// The model name of a tagger's pack.
 pub const PACK_MODEL: &str = "disfluency-tagger";
 
-/// A file to download, pinned to its size and SHA-256.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RemoteFile {
-    pub url: &'static str,
-    /// The file's name, which a downloaded copy keeps.
-    pub name: &'static str,
-    pub bytes: u64,
-    pub sha256: &'static str,
-}
+/// What the trained tagger's pack is made from and under which licences, with Ettin's licence,
+/// to show with it.
+pub const PACK_NOTICE: &str = r#"The disfluency tagger's weights are licensed under MIT or Apache 2.0. They are Ettin encoder 68M by Johns Hopkins University's CLSP (https://huggingface.co/jhu-clsp/ettin-encoder-68m), licensed under the MIT License below, fine-tuned on the AMI Meeting Corpus's annotations, licensed under CC BY 4.0 (Carletta et al., 2005, https://groups.inf.ed.ac.uk/ami/corpus/, https://creativecommons.org/licenses/by/4.0/).
 
-/// What the trained tagger's pack is made from and under which licences, to show with it.
-pub const PACK_NOTICE: &str = "The disfluency tagger's weights are licensed under MIT or Apache \
-    2.0. They are Ettin encoder 68M by Johns Hopkins University's CLSP, licensed under MIT \
-    (https://huggingface.co/jhu-clsp/ettin-encoder-68m), fine-tuned on the AMI Meeting Corpus's \
-    annotations, licensed under CC BY 4.0 (Carletta et al., 2005, \
-    https://groups.inf.ed.ac.uk/ami/corpus/).";
+MIT License
+
+Copyright (c) 2025 Johns Hopkins University Center for Language and Speech Processing
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE."#;
 
 /// The trained tagger's pack in q8_0, a release file of Telmo's repository, whose
 /// [`PACK_NOTICE`] says what it's made from.
-pub const PACK_DOWNLOAD: RemoteFile = RemoteFile {
-    url: "https://github.com/mesa-hills-research/telmo/releases/download/disfluency-tagger-1/disfluency-tagger-1-q8_0.pack",
-    name: "disfluency-tagger-1-q8_0.pack",
-    bytes: 157_673_903,
-    sha256: "35e8552c95f2ff58e05122581945000d36c1002d8bce1e97745ae43bf0e05400",
-};
+pub const PACK_DOWNLOAD: RemoteFile = RemoteFile::new(
+    "https://github.com/mesa-hills-research/telmo/releases/download/disfluency-tagger-1/disfluency-tagger-1-q8_0.pack",
+    "disfluency-tagger-1-q8_0.pack",
+    157_673_903,
+    "35e8552c95f2ff58e05122581945000d36c1002d8bce1e97745ae43bf0e05400",
+);
 
 /// The 8-bit precision a tagger's pack ships in. Its deletions equal f32's on 99.6% of the
 /// development utterances it was tuned on.
@@ -127,6 +138,9 @@ impl Settings {
             .map(|d| tags.iter().position(|t| t == d))
             .collect::<Option<_>>()
             .ok_or_else(|| bad("A deleting tag isn't one of the tags."))?;
+        if delete.is_empty() {
+            return Err(bad("It lists no deleting tags."));
+        }
         let keep = tags
             .iter()
             .position(|t| t == "O")
@@ -157,7 +171,7 @@ impl Settings {
         covered.sort_unstable();
         let mut want: Vec<char> = letters.chars().collect();
         want.sort_unstable();
-        if covered != want || letters.len() != delete.len() {
+        if covered != want || letters.chars().count() != delete.len() {
             return Err(bad("Its groups don't cover each deleting tag once."));
         }
         let number = |v: &json::Value| v.as_f64();
@@ -209,6 +223,7 @@ impl Settings {
 
 /// What the cleanup decides for one word.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct Decision {
     /// Whether the word goes.
     pub deleted: bool,
@@ -269,7 +284,12 @@ impl Guards {
     }
 
     /// Which of the `deleted` words of `words`, a whole utterance, these guards keep.
+    ///
+    /// # Panics
+    ///
+    /// If `deleted` and `words` differ in length.
     pub fn veto(&self, words: &[&str], deleted: &[bool]) -> Vec<bool> {
+        assert_eq!(words.len(), deleted.len(), "a deletion for each word");
         (units::vetoes(words, deleted).iter())
             .map(|kinds| !kinds.is_empty())
             .collect()
@@ -313,12 +333,19 @@ impl Punctuation {
 
     /// `words` with their capitals and punctuation fixed, one word for each.
     pub fn apply(&self, words: &[&str]) -> Vec<String> {
-        punctuation::punctuate(words, self.wide)
+        punctuation::punctuate(words, self.wide, &[])
     }
 
     /// `edits` of `words`, after a text whose last word is `before`, with the words they keep
-    /// fixed.
-    pub(crate) fn fix(&self, words: &[&str], edits: &mut [Edit], before: Option<&str>) {
+    /// fixed. `before` stays as it is, and the words `special` marks, which belong to special
+    /// words, keep their case.
+    pub(crate) fn fix(
+        &self,
+        words: &[&str],
+        edits: &mut [Edit],
+        before: Option<&str>,
+        special: &[bool],
+    ) {
         let kept: Vec<(usize, String)> = (words.iter().zip(edits.iter()).enumerate())
             .filter_map(|(i, (word, edit))| match edit {
                 Edit::Keep => Some((i, word.to_string())),
@@ -329,7 +356,13 @@ impl Punctuation {
         let list: Vec<&str> = (before.into_iter())
             .chain(kept.iter().map(|(_, text)| text.as_str()))
             .collect();
-        let fixed = punctuation::punctuate(&list, self.wide);
+        let holds: Vec<Hold> = (before.map(|_| Hold::All).into_iter())
+            .chain(kept.iter().map(|&(i, _)| match special.get(i) {
+                Some(true) => Hold::Case,
+                _ => Hold::Free,
+            }))
+            .collect();
+        let fixed = punctuation::punctuate(&list, self.wide, &holds);
         for ((i, now), new) in kept
             .iter()
             .zip(fixed.into_iter().skip(usize::from(before.is_some())))
@@ -548,7 +581,8 @@ impl Tagger {
     }
 
     /// Member `member`'s logits for every token of `ids`, `[ids.len(), tags]`, or none for the
-    /// hand-written tagger. `tap` sees the embeddings' output (`"embeddings"`), each layer's
+    /// hand-written tagger, a member past [`members`](Tagger::members) or an id past the
+    /// vocabulary. `tap` sees the embeddings' output (`"embeddings"`), each layer's
     /// (`"layer.0"`, ...), the final norm's (`"final_norm"`) and the head's before the
     /// classifier (`"head"`), each `[tokens, hidden]`.
     pub fn logits(
@@ -557,7 +591,15 @@ impl Tagger {
         ids: &[u32],
         tap: &mut dyn FnMut(&str, &[f32]),
     ) -> Option<Vec<f32>> {
-        Some(self.model.as_ref()?.logits(member, ids, tap))
+        let model = self.model.as_ref()?;
+        let vocab = model.config.vocab;
+        if member >= model.members.len() || ids.iter().any(|&id| id as usize >= vocab) {
+            return None;
+        }
+        if ids.is_empty() {
+            return Some(Vec::new());
+        }
+        Some(model.logits(member, ids, tap))
     }
 
     /// The model's architecture, or none for the hand-written tagger.
@@ -575,10 +617,12 @@ impl Tagger {
         self.model.as_ref().and_then(|m| m.precision)
     }
 
+    /// The kernels' instruction set, or none for the hand-written tagger.
     pub fn isa(&self) -> Option<Isa> {
         self.model.as_ref().map(|m| m.kernels.isa())
     }
 
+    /// The threads the model runs on, 1 for the hand-written tagger.
     pub fn threads(&self) -> usize {
         self.model.as_ref().map_or(1, |m| m.pool.threads())
     }
@@ -655,6 +699,12 @@ impl Model {
         let mut ids = vec![self.config.cls];
         let mut positions = Vec::new();
         for (i, word) in words.iter().enumerate() {
+            // A word with more bytes than the room left holds in its longest pieces can't fit,
+            // so it isn't encoded, which takes time that grows with the square of its length.
+            let room = self.settings.max_tokens.saturating_sub(ids.len() + 1);
+            if word.len() + usize::from(i > 0) > room * self.tokenizer.longest_piece() {
+                break;
+            }
             let piece = if i == 0 {
                 self.tokenizer.encode(word)
             } else {
@@ -836,7 +886,7 @@ pub(crate) mod tests {
         };
         assert_eq!(plan(None), "Dash force dash push");
         assert_eq!(plan(Some(&guards)), "Dash dash force dash push");
-        // Tier 1 alone: a hesitation beside a spoken symbol stays too.
+        // The filler rules alone keep a hesitation beside a spoken symbol too.
         let fillers = Fillers::for_language("en").unwrap();
         let words: Vec<&str> = "type dash um v".split(' ').collect();
         let edits = fillers.plan_guarded(
@@ -848,6 +898,34 @@ pub(crate) mod tests {
         );
         assert_eq!(Fillers::text(&words, &edits), "type dash um v");
         assert!(Guards::for_language("de").is_none());
+    }
+
+    #[test]
+    fn the_notice_keeps_ettins_licence() {
+        let copyright =
+            "Copyright (c) 2025 Johns Hopkins University Center for Language and Speech Processing";
+        assert!(PACK_NOTICE.contains(copyright));
+        assert!(PACK_NOTICE.contains("The above copyright notice and this permission notice"));
+    }
+
+    #[test]
+    fn odd_arguments_and_settings_give_none_or_an_error() {
+        let tagger = tiny(0.5, 12, Precision::F32);
+        let mut tap = |_: &str, _: &[f32]| {};
+        assert_eq!(tagger.logits(0, &[], &mut tap), Some(Vec::new()));
+        assert_eq!(tagger.logits(2, &[256, 257], &mut tap), None);
+        assert_eq!(tagger.logits(0, &[256, 258], &mut tap), None);
+        assert_eq!(
+            tagger.logits(1, &[256, 257], &mut tap).map(|l| l.len()),
+            Some(12)
+        );
+        let config = tagger.config().unwrap();
+        let settings = r#"{"tags":["O","H"],"delete":[],"thresholds":[0.5]}"#;
+        assert!(Settings::from_json(settings.as_bytes(), config).is_err());
+        // A word longer than any window is left to the rules without being encoded.
+        let long = "a".repeat(1 << 20);
+        let words = ["so", long.as_str(), "the", "the", "plan"];
+        assert_eq!(tagger.decide(&words).len(), 5);
     }
 
     #[test]

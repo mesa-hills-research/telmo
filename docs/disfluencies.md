@@ -11,12 +11,14 @@ We need to fix the login page first.
 
 ```rust
 use std::sync::Arc;
-use telmo::disfluency::Tagger;
+use telmo::disfluency::{Guards, Tagger};
 use telmo::{Options, SpecialWords};
 
-let tagger = Arc::new(Tagger::load("disfluency-q8_0.pack".as_ref(), &Options::default())?);
+let pack = "disfluency-tagger-1-q8_0.pack";
+let tagger = Arc::new(Tagger::load(pack.as_ref(), &Options::default())?);
 let mut words = SpecialWords::new();
 words.set_disfluencies(Some(tagger.clone()));
+words.set_guards(Guards::for_language("en"));
 let text = model.transcribe_biased(&samples, &words)?.text;
 
 // Or on text alone.
@@ -46,7 +48,8 @@ dictation needs them, whichever stage made it, the filler rules included.
 | Straddles | a cut that would leave a broken repeat, as in "we just need to uh we need to" |
 | Parallels | a phrase said again in parallel or in contrast, as in "what they prefer what they not prefer" |
 
-On 112,000 words of meeting speech they undo 65 of the tagger's 12,521 deletions.
+On 112,000 words of seven AMI meeting series they undo 65 of the tagger's 12,521 deletions.
+`examples/disfluency.rs` with `--guards` writes each word's decision with and without them, and
 `Guards::veto` applies them to any deletions.
 
 ## What goes
@@ -91,8 +94,10 @@ We're shipping a patch release that is due on Friday.
 ```
 
 It also joins a fragment's own period, one after an auxiliary with no subject ("My brother is.
-Learning how") and one before a preposition after four words or more ("the library stays open. Until
-nine."). In conversation a few real sentence ends go with them.
+Learning how") and one before a preposition after four words or more ("the library stays open.
+Until nine."). In conversation a few real sentence ends go with them.
+
+Special words keep their spelling, capitals included.
 
 ## In a stream
 
@@ -101,16 +106,25 @@ set, an utterance's words stay tentative until it ends. The tentative text shows
 far with its fillers left out, and the last pass settles the cleaned text. That is one tagger
 pass per utterance, after its last pass.
 
+With a tagger, each utterance is cleaned on its own, without the words before it, so a repeat
+split across two utterances ("fix the", then "the login page") stays. The filler rules alone read
+across them.
+
+Without a tagger, words settle as the stream goes. The guards and the punctuation rules look up to
+three words ahead, so a word can settle before the words that would change their decision come.
+Punctuation never changes a settled word, and a period that settled keeps the next word's capital.
+
 ## The pack
 
 The tagger is Ettin's 68M encoder (a ModernBERT) fine-tuned in two members whose probabilities
 are averaged. `telmo transcribe --remove-disfluencies` downloads its pack on first use, from a
 release of this repository that `disfluency::PACK_DOWNLOAD` pins by size and SHA-256, and
-`disfluency::PACK_NOTICE` says what it's made from and under which licences. A checkpoint
+`disfluency::PACK_NOTICE` says what it's made from and under which licences. A pack put in the
+cache by hand is checked against the same pins before its first use. A checkpoint
 (`model.safetensors`, `config.json`, `tokenizer.json` and `tagger.json`) converts into a pack.
 
 ```text
-cargo run --release --example pack -- disfluency-tagger disfluency-q8_0.pack
+cargo run --release --example pack -- disfluency-tagger disfluency-tagger-1-q8_0.pack
 ```
 
 The pack's weights are q8_0, as for Parakeet, and it takes 158 MB. Its deletions equal those of
@@ -121,7 +135,10 @@ the f32 weights on 99.6% of the development utterances.
 
 On 4 threads of an Intel Core i9-13980HX, a 40-word text (about 49 tokens) takes 55 ms at the
 median and 65 ms at the 95th percentile, both members, the rules and the tokenizer included.
-`cargo bench --bench disfluency -- PACK ROWS.jsonl --threads 4 --words 40` measures it.
+`cargo bench --bench disfluency -- PACK ROWS.jsonl --threads 4 --words 40` measures it. A text
+longer than one window of 128 tokens is read in windows that each take up to 60 words before
+them as context, so it costs more for each word. 500 words took 1.5 s on 4 threads of a busy
+machine.
 
 Streamed with Granite on the same 4 threads, 143 utterances of dictation settled a median 0.2 s
 later from the end of speech than with the filler rules alone. `examples/stream` gives both

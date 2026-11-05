@@ -6,8 +6,9 @@ Telmo is licensed under the MIT License or the Apache License, Version 2.0, at y
 
 Model weights
 
-Telmo's code and packages contain no model weights. The `telmo` command downloads them from
-Hugging Face when asked, under their own licences.
+Telmo's code and packages contain no model weights. The `telmo` command downloads them when
+asked, under their own licences. The speech models come from Hugging Face, and the disfluency
+tagger comes from this repository's releases.
 
 - Granite Speech 5.0 470M TurboCTC by IBM,
   https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc,
@@ -15,6 +16,37 @@ Hugging Face when asked, under their own licences.
 - Parakeet TDT 0.6B v3 by NVIDIA, https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3,
   Creative Commons Attribution 4.0 International (https://creativecommons.org/licenses/by/4.0/).
   Packs converted from it are adaptations of NVIDIA's work under the same licence.
+- The disfluency tagger, disfluency-tagger-1-q8_0.pack, under the MIT License or the Apache
+  License, Version 2.0, at your option. It is fine-tuned from Ettin encoder 68M by Johns Hopkins
+  University's Center for Language and Speech Processing,
+  https://huggingface.co/jhu-clsp/ettin-encoder-68m, MIT License, whose notice follows. It was
+  trained on the disfluency annotations of the AMI Meeting Corpus (Carletta et al., 2005),
+  https://groups.inf.ed.ac.uk/ami/corpus/, Creative Commons Attribution 4.0 International
+  (https://creativecommons.org/licenses/by/4.0/).
+
+Ettin encoder 68M's licence, from https://github.com/jhu-clsp/ettin-encoder-vs-decoder
+
+MIT License
+
+Copyright (c) 2025 Johns Hopkins University Center for Language and Speech Processing
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 Test data in the repository
 
@@ -26,6 +58,8 @@ model outputs used to check Telmo against the reference implementations.
 - Audio from FLEURS by Google, https://huggingface.co/datasets/google/fleurs, CC BY 4.0.
 - Tensors that Parakeet TDT 0.6B v3 computed on those clips, CC BY 4.0, and tensors that
   Granite Speech 5.0 470M TurboCTC computed on them, under the Apache License, Version 2.0.
+- Token ids that Ettin encoder 68M's tokenizer gives made-up strings, MIT License, whose notice
+  is above.
 
 The README in each directory under tests/goldens gives the details.
 
