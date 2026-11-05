@@ -44,13 +44,15 @@ stream.finish()?;
    second before the audio does, and the model has heard a word after it. Parakeet's hypothesis
    of a word can still change until it has heard several seconds after it, and often hears a word
    said twice ("yeah, yeah") as one before then. So with Parakeet a word must end 4 s before the
-   audio does, and nothing settles before the utterance has 3 s of audio. An UtteranceStream fed
-   more than 30 s, which voice activity never makes, keeps the 1 s margin past 30 s, since its
-   windows then start inside the utterance, where Parakeet sometimes hears nothing. On 1,695
-   streamed AMI meeting clips holding a word said twice, Parakeet wrote both copies of 96.4% of
-   those doubles with the 4 s margin against 94.4% with 1 s, and a word settled a median 4.0 s
-   after it ended instead of 1.3 s. Tentative text shows as early as before. When the utterance
-   ends, a last pass settles everything.
+   audio does, and nothing settles before the utterance has 3 s of audio. Past 30 s of audio the
+   margin is 1 s again, since a window can then start inside the utterance, where Parakeet
+   sometimes hears nothing. That happens with an UtteranceStream fed more than 30 s, and with an
+   utterance that goes on after voice activity ended it because the model still heard a word
+   there, since voice activity counts its 30 s from the new start. On 1,695 streamed AMI meeting
+   clips holding a word said twice, Parakeet wrote both copies of 96.4% of those doubles with the
+   4 s margin against 94.4% with 1 s, and a word settled a median 4.0 s after it ended instead of
+   1.3 s. Tentative text shows as early as before. When the utterance ends, a last pass settles
+   everything.
 5. A sentence end that closes an utterance stays tentative until the next utterance's first
    words settle, or the stream finishes, since a pause can split a sentence. It goes when they
    start with a comma or a lower-case word that joins words, such as "and", "rather", "of" or

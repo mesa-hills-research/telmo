@@ -68,9 +68,12 @@ pub struct PassConfig {
 
 impl PassConfig {
     /// This config as a pass over `seconds` of audio uses it, with the settle margin at least
-    /// [`PARAKEET_SETTLE_MARGIN`] for Parakeet while the utterance fits in `context`. Past that, a
-    /// window starts inside the utterance, where Parakeet sometimes hears nothing at all, so the
-    /// words must settle as the passes go rather than wait for the last one.
+    /// [`PARAKEET_SETTLE_MARGIN`] for Parakeet while the utterance fits in `context`, so every
+    /// window starts at its first sample. Past that, a window can start inside the utterance,
+    /// where Parakeet sometimes hears nothing at all, so the words must settle as the passes go
+    /// rather than wait for the last one. Voice activity cuts speech at 30 s, so a Streamer's
+    /// utterance runs longer only when the model still hears a word where voice activity ended it
+    /// and the utterance goes on.
     fn for_pass(&self, parakeet: bool, seconds: f64) -> PassConfig {
         let mut config = self.clone();
         if parakeet && seconds <= self.context.as_secs_f64() {
