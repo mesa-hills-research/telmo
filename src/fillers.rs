@@ -550,7 +550,7 @@ pub(crate) fn split(word: &str) -> (&str, &str, &str) {
 
 /// Whether `word`, a word's letters, is a hesitation sound in lower case or with one capital,
 /// after the word `previous`.
-fn is_hesitation(word: &str, previous: Option<&str>) -> bool {
+pub(crate) fn is_hesitation(word: &str, previous: Option<&str>) -> bool {
     let lower = word.to_lowercase();
     if word != lower && word != capitalized(&lower) {
         return false;

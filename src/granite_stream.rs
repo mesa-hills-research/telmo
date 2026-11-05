@@ -62,6 +62,9 @@ pub struct GraniteStream {
     spotting: Option<Vec<u32>>,
     /// Each frame's row for word spotting (see [`crate::biasing::score_row`]).
     scores: Vec<f32>,
+    /// The tokens whose probability each frame keeps in `probabilities`.
+    watched: Option<Vec<u32>>,
+    probabilities: Vec<f32>,
     first_changed: usize,
     scratch: Option<(usize, Scratch)>,
 }
@@ -95,6 +98,8 @@ impl GraniteStream {
             ids: Vec::new(),
             spotting: None,
             scores: Vec::new(),
+            watched: None,
+            probabilities: Vec::new(),
             first_changed: 0,
             scratch: None,
         }
@@ -108,6 +113,20 @@ impl GraniteStream {
     /// The rows word spotting reads, one for each frame so far.
     pub(crate) fn spotting_scores(&self) -> &[f32] {
         &self.scores
+    }
+
+    /// Keeps, for every frame, the probability of any of these tokens.
+    pub(crate) fn keep_probability_of(&mut self, tokens: Vec<u32>) {
+        self.watched = Some(tokens);
+    }
+
+    /// The highest probability of the kept tokens on the frames of `frames` computed so far.
+    pub(crate) fn highest_probability(&self, frames: std::ops::Range<usize>) -> f32 {
+        let end = frames.end.min(self.probabilities.len());
+        let start = frames.start.min(end);
+        self.probabilities[start..end]
+            .iter()
+            .fold(0.0, |m, &p| m.max(p))
     }
 
     /// Sets how many encoder frames (80 ms each) the next 10.24 s block must have before the one
@@ -316,18 +335,23 @@ impl GraniteStream {
         }
 
         let first = changed;
-        let (ids, scores) = timed(timings, "ctc_head", || {
+        let out = timed(timings, "ctc_head", || {
             model.frame_scores(
                 &self.layers.last().expect("the model has layers").out[first * d..],
                 frames_in - first,
                 self.spotting.as_deref(),
+                self.watched.as_deref(),
             )
         });
         self.ids.truncate(first);
-        self.ids.extend(ids);
+        self.ids.extend(out.ids);
         if let Some(tokens) = &self.spotting {
             self.scores.truncate(first * (2 + tokens.len()));
-            self.scores.extend(scores);
+            self.scores.extend(out.scores);
+        }
+        if self.watched.is_some() {
+            self.probabilities.truncate(first);
+            self.probabilities.extend(out.probabilities);
         }
         self.first_changed = first;
         if frames_in > self.lag {

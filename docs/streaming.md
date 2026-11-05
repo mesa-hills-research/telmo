@@ -31,7 +31,9 @@ stream.finish()?;
    Audio that opens in the middle of a word keeps that word when speech is found in its first
    2 s, since its first utterance then starts at the first sample. An utterance ends after
    600 ms below the floor once the model has heard no word in the last 400 ms, and one longer
-   than 30 s is cut at its quietest point.
+   than 30 s is cut at its quietest point. When the next onset comes at most 2 s after the
+   last utterance's speech ended, the stream also keeps the 2 s of audio before the next
+   utterance, the end of the last one and the pause (step 5).
 2. Passes over the current utterance run at least `min_interval` (0.5 s) apart, and at least
    1.5 times the last pass's duration apart, so a slow computer shows tentative text less often
    instead of falling behind.
@@ -54,13 +56,27 @@ stream.finish()?;
    1.3 s. Tentative text shows as early as before. When the utterance ends, a last pass settles
    everything. With a list that leaves out [disfluencies](disfluencies.md), nothing settles
    before then, and the last pass settles the whole utterance cleaned.
-5. A sentence end that closes an utterance stays tentative until the next utterance's first
-   words settle, or the stream finishes, since a pause can split a sentence. It goes when they
-   start with a comma or a lower-case word that joins words, such as "and", "rather", "of" or
-   "which", and stays otherwise. A new sentence's first word gets a capital where Granite wrote
-   it in lower case. On 261 such boundaries in streamed meeting speech (AMI) and 148 in
-   LibriSpeech, the boundaries the rule was chosen on, the text was then right at 78.9% and
-   93.2%, against 73.6% and 91.2% left as it was.
+5. A sentence end that closes an utterance stays tentative until the next utterance's first words
+   settle, or the stream finishes, since a pause can split a sentence. After a pause of at most 2 s,
+   the pass that first settles the next utterance's words also decodes, once, the 2 s of audio
+   before it with up to its first 3 s, so the model hears both sides of the pause, and the mark
+   follows what it hears there. With Parakeet the mark stays if Parakeet writes a sentence end in
+   the pause. Granite seldom writes one at a pause whose both sides it hears, even between
+   sentences, so the mark stays if Granite's probability of a sentence end on the pause's frames
+   reaches 0.003. That threshold was chosen on dictation and on the AMI windows below, where it gets
+   as many pauses right as 0.0003, the best value on the same meetings' pauses decoded offline.
+   Where the sentence goes on, the next utterance's first word takes the case the model gave it
+   there when the model wrote the same word, passing over hesitations before it, so "Sometimes"
+   after "because" becomes "sometimes". Only the mark and the case change, and the words are the
+   ones the passes settled. After a longer pause the mark goes when the next words start with a
+   comma or a lower-case word that joins words, such as "and", "rather", "of" or "which", and stays
+   otherwise. Either way, a new sentence's first word gets a capital where the model wrote it in
+   lower case. Streamed, the text at short pauses then had the mark and the case right this often.
+
+   | | Granite, before | Granite, after | Parakeet, before | Parakeet, after |
+   |---|---:|---:|---:|---:|
+   | 47 AMI windows, pauses AMI's punctuation places (140, 128) | 50.0% | 63.6% | 68.8% | 77.3% |
+   | IS1009's turns joined with pauses (246, 59) | 78.9% | 81.3% | 83.1% | 84.7% |
 
 `Streamer` is the same machinery without the thread, for callers that decide themselves when
 passes run.
@@ -85,6 +101,14 @@ Granite's figures were the same then.
 | WER streamed | 2.59% | 2.51% | 2.91% |
 | WER offline, on the same utterances | 2.15% | 2.44% | 2.44% |
 | CPU | 1.6 cores | 2.0 cores | 2.0 cores |
+
+The table was measured before the stream decided sentence ends at short pauses (step 5), which costs
+one extra decode of up to 5 s of audio per utterance after such a pause. Replayed beside the stream
+without it, with the simulated clock on [the shared machine](measurements.md#machine) while other
+work loaded it, words settled 0.22 s later at the median with Parakeet. Granite's difference was
+smaller than the 0.2 s by which two runs of the same stream differed under that load, so these
+figures are approximate. The words stayed the same, apart from the few that differ between any two
+runs.
 
 The offline row transcribes each utterance the stream found in one go. The words have settled
 when the utterance ends, and most of that wait is the 600 ms of quiet that ends it. A sentence

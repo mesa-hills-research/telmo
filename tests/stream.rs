@@ -299,3 +299,105 @@ fn parakeet_streams_a_session_with_special_words() {
 fn granite_streams_a_session_with_special_words() {
     check_session("GRANITE_SPEECH_DIR", &special_words());
 }
+
+/// Streams a golden clip's sentence with a pause of 1 s put in after the words `before`, at the
+/// quietest 10 ms between them and the next word as offline transcription places them, and
+/// returns the settled text.
+fn split_by_a_pause(var: &str, clip: &str, before: &str) -> String {
+    let model = Arc::new(model(var));
+    let (_, samples) = clips().into_iter().find(|(id, _)| id == clip).unwrap();
+    let tokens = model.transcribe(&samples).unwrap().tokens;
+    let tok = model.tokenizer();
+    let ids: Vec<u32> = tokens.iter().map(|t| t.id).collect();
+    let at = (1..tokens.len())
+        .find(|&i| {
+            (tok.decode(&ids[..i]).trim_end().to_lowercase()).ends_with(&before.to_lowercase())
+        })
+        .expect("the words are heard");
+    let frame = 1280;
+    let from = (tokens[at - 1].frame + tokens[at - 1].duration.max(1)) as usize * frame;
+    let to = (tokens[at].frame as usize + 1) * frame;
+    let quietest = (from..to.max(from + 160).min(samples.len() - 160))
+        .step_by(160)
+        .min_by(|&a, &b| {
+            let energy = |s: usize| samples[s..s + 160].iter().map(|x| x * x).sum::<f32>();
+            energy(a).total_cmp(&energy(b))
+        })
+        .unwrap();
+    let mut audio = vec![0f32; SAMPLE_RATE / 2];
+    audio.extend_from_slice(&samples[..quietest]);
+    audio.extend(std::iter::repeat_n(0.0, SAMPLE_RATE));
+    audio.extend_from_slice(&samples[quietest..]);
+    audio.extend(std::iter::repeat_n(0.0, SAMPLE_RATE));
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    for s in &mut audio {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        *s += ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.002;
+    }
+    let mut streamer = Streamer::new(model, StreamConfig::default());
+    let mut events = Vec::new();
+    for piece in audio.chunks(SAMPLE_RATE / 2) {
+        events.extend(streamer.push(piece));
+        while streamer.wants_final() || streamer.has_new_audio() {
+            events.extend(streamer.pass().unwrap());
+            if !streamer.wants_final() {
+                break;
+            }
+        }
+    }
+    events.extend(streamer.finish().unwrap());
+    let (text, ends) = settled(&events);
+    eprintln!("{ends} utterances: {text}");
+    assert!(ends >= 2, "the pause ends an utterance");
+    text
+}
+
+#[test]
+#[ignore = "needs the model files"]
+fn granite_keeps_a_sentence_end_across_a_short_pause() {
+    // "... Good night, husband. The music came nearer, ..."
+    let text = split_by_a_pause("GRANITE_SPEECH_DIR", "clean-joined-40s", "husband");
+    assert!(text.contains("husband. The music"), "{text}");
+}
+
+/// Whether `text` goes on from `before` to `after`, with no sentence end between them and
+/// `after` in lower case.
+fn goes_on(text: &str, before: &str, after: &str) -> bool {
+    let lower = text.to_lowercase();
+    let Some(from) = lower.find(before).map(|i| i + before.len()) else {
+        return false;
+    };
+    let Some(to) = lower[from..].find(after).map(|i| from + i) else {
+        return false;
+    };
+    !text[from..to].contains(['.', '?', '!']) && text[to..].starts_with(after)
+}
+
+#[test]
+#[ignore = "needs the model files"]
+fn granite_keeps_a_sentence_going_across_a_short_pause() {
+    // "... and he recalled the words, the words of Shelley's fragment ..."
+    let text = split_by_a_pause("GRANITE_SPEECH_DIR", "clean-joined-40s", "recalled");
+    assert!(goes_on(&text, "recalled", "the words"), "{text}");
+}
+
+#[test]
+#[ignore = "needs the model files"]
+fn parakeet_keeps_a_sentence_going_across_a_short_pause() {
+    // "Find some Cresswells there. Big plantations, rated at two hundred and fifty thousand ..."
+    let text = split_by_a_pause("PARAKEET_TDT_DIR", "clean-1995-1826-0007", "plantations,");
+    assert!(goes_on(&text, "plantations", "rated"), "{text}");
+}
+
+/// Granite's probability of a sentence end at this pause spliced into read speech is 0.06 to
+/// 0.19, far above the 0.003 it takes to keep the mark, so the period stays where the sentence
+/// goes on. A threshold that joined it would also join real sentences.
+#[test]
+#[ignore = "needs the model files, and shows the sentence-end threshold's trade-off"]
+fn granite_keeps_a_period_at_a_pause_spliced_after_a_phrase() {
+    // "I saw at the Hamburg Museum the skeleton of one of these creatures, thirty feet in length."
+    let text = split_by_a_pause("GRANITE_SPEECH_DIR", "clean-260-123286-0018", "Museum");
+    assert!(text.contains("Museum. The skeleton"), "{text}");
+}
