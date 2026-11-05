@@ -25,9 +25,11 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use crate::error::{Error, Result};
+use crate::fillers::{Context, Fillers, Protected};
+use crate::parakeet::Token;
 use crate::tokenizer::Tokenizer;
 
-pub(crate) use spoken::{Entries, Spoken, Unit, normalized_words};
+pub(crate) use spoken::{Entries, Spoken, Unit, normalized_words, place};
 pub(crate) use spotting::{score_row, spot};
 
 /// How strongly the decoders favour special words. The defaults were tuned on LibriSpeech.
@@ -183,14 +185,15 @@ impl fmt::Display for Rejection {
 
 impl std::error::Error for Rejection {}
 
-/// Words to favour while decoding, each in its usual spelling, and spoken forms to write as
-/// words.
+/// Words to favour while decoding, each in its usual spelling, spoken forms to write as words,
+/// and fillers to leave out.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SpecialWords {
     words: Vec<String>,
     /// Pairs of a word and a spoken form written as it.
     spoken: Vec<(String, String)>,
     boost: Boost,
+    fillers: Option<Fillers>,
 }
 
 impl SpecialWords {
@@ -289,6 +292,16 @@ impl SpecialWords {
 
     pub fn set_boost(&mut self, boost: Boost) {
         self.boost = boost;
+    }
+
+    pub fn fillers(&self) -> Option<Fillers> {
+        self.fillers
+    }
+
+    /// Leaves these fillers out of transcripts, after spoken forms are written, or keeps every
+    /// word with `None`, the default. A special word is never taken for a filler.
+    pub fn set_fillers(&mut self, fillers: Option<Fillers>) {
+        self.fillers = fillers;
     }
 }
 
@@ -635,6 +648,10 @@ pub(crate) struct Compiled {
     pub boost: Boost,
     /// The spoken forms to write as their words after decoding.
     pub spoken: Spoken,
+    /// The fillers to leave out after that.
+    pub fillers: Option<Fillers>,
+    /// The special words and spoken forms' words, which keep their spelling.
+    pub protected: Protected,
 }
 
 impl Compiled {
@@ -745,14 +762,74 @@ impl Compiled {
                 tokens,
                 boost,
                 spoken,
+                fillers: words.fillers,
+                protected: Protected::new(
+                    words
+                        .words()
+                        .chain(words.spoken().map(|(written, _)| written)),
+                ),
             },
             unusable,
         )
     }
 
-    /// Whether there's nothing to favour and nothing to rewrite.
+    /// Whether there's nothing to favour, rewrite or leave out.
     pub fn is_empty(&self) -> bool {
-        self.forms.is_empty() && self.spoken.is_empty()
+        self.forms.is_empty() && self.spoken.is_empty() && self.fillers.is_none()
+    }
+
+    /// The first token of `ids` before token `frontier` from which a spoken form, an entry's word
+    /// or a special word could still be under way, given that the tokens from `frontier` on may
+    /// still change, or none. A special word may have begun in the settled text whose `context`
+    /// this is, and then it's the first token.
+    pub fn open_before(
+        &self,
+        tokenizer: &Tokenizer,
+        ids: &[u32],
+        frontier: usize,
+        context: &Context,
+    ) -> Option<usize> {
+        let spoken = self.spoken.open_before(tokenizer, ids, frontier);
+        let spans = crate::fillers::words(tokenizer, &ids[..frontier]);
+        let texts: Vec<String> = (spans.iter())
+            .map(|s| {
+                tokenizer
+                    .decode_raw(&ids[s.clone()])
+                    .trim_start()
+                    .to_string()
+            })
+            .collect();
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let special = (self.protected.open_before(context, &texts)).map(|k| spans[k].start);
+        spoken.into_iter().chain(special).min()
+    }
+
+    /// `tokens` with the fillers left out, if any are to go. A word's new tokens share its
+    /// frames.
+    pub fn remove_fillers(&self, tokenizer: &Tokenizer, tokens: Vec<Token>) -> Vec<Token> {
+        let Some(fillers) = &self.fillers else {
+            return tokens;
+        };
+        fillers.rewrite(
+            tokenizer,
+            tokens,
+            |t| t.id,
+            &Context::default(),
+            &self.protected,
+            |word, ids| {
+                let (first, last) = (word[0], word[word.len() - 1]);
+                let frame =
+                    |k| place(first.frame as usize, last.frame as usize, ids.len(), k) as u32;
+                let end = last.frame + last.duration;
+                (ids.iter().enumerate())
+                    .map(|(k, &id)| Token {
+                        id,
+                        frame: frame(k),
+                        duration: if k + 1 < ids.len() { frame(k + 1) } else { end } - frame(k),
+                    })
+                    .collect()
+            },
+        )
     }
 }
 
@@ -815,7 +892,7 @@ pub(crate) mod tests {
             "model":{"type":"BPE","vocab":{"<blank>":0,"▁ku":1,"be":2,"ctl":3,"▁cube":4,"▁control":5,"▁the":6,",":7,"▁Ku":8,"▁ng":9,"inx":10,"▁":11,
               "k":12,"u":13,"b":14,"e":15,"c":16,"t":17,"l":18,"K":19,"n":20,"g":21,"i":22,"x":23,"o":24,"r":25,"h":26,"▁k":27,"▁K":28,"▁n":29,"▁c":30,"▁t":31,"ct":32,"▁co":33,"▁con":34,"ro":35,"▁cu":36,"nt":37,"ntro":38,"ntrol":39,"in":40,"▁th":41,
               "▁New":42,"▁York":43,"▁city":44,"▁Ne":45,"w":46,"s":47,"N":48,"Y":49,"▁N":50,"▁Y":51,"▁Yo":52,"▁Yor":53,"▁ci":54,"▁cit":55,"y":56,"C":57,"▁C":58,"be.":59,".":60,"—":61,"'s":62,"-":63,
-              "p":64,"a":65,"+":66,"#":67,"▁p":68,"▁pl":69,"▁plu":70,"▁plus":71,"▁s":72,"▁sh":73,"▁sha":74,"▁shar":75,"▁sharp":76,"’s":77},
+              "p":64,"a":65,"+":66,"#":67,"▁p":68,"▁pl":69,"▁plu":70,"▁plus":71,"▁s":72,"▁sh":73,"▁sha":74,"▁shar":75,"▁sharp":76,"’s":77,"U":78,"m":79},
               "merges":[["▁","k"],["▁k","u"],["b","e"],["c","t"],["ct","l"],["▁","K"],["▁K","u"],["▁","n"],["▁n","g"],["i","n"],["in","x"],
                 ["▁","c"],["▁c","u"],["▁cu","be"],["▁c","o"],["▁co","n"],["n","t"],["r","o"],["nt","ro"],["ntro","l"],["▁con","trol"],["▁","t"],["▁t","h"],["▁th","e"],
                 ["▁","N"],["▁N","e"],["▁Ne","w"],["▁","Y"],["▁Y","o"],["▁Yo","r"],["▁Yor","k"],["▁c","i"],["▁ci","t"],["▁cit","y"],["▁","C"],
@@ -829,6 +906,67 @@ pub(crate) mod tests {
             list.add_code_word(w).unwrap();
         }
         list
+    }
+
+    #[test]
+    fn fillers_go_from_a_transcript_and_the_words_left_keep_their_frames() {
+        let tok = tokenizer();
+        let mut words = SpecialWords::new();
+        words.set_fillers(Fillers::for_language("en"));
+        let (c, _) = Compiled::new(&words, &tok);
+        let token = |id, frame| Token {
+            id,
+            frame,
+            duration: 1,
+        };
+        // "Uh, new the the city." becomes "New the city.", "uh" on frame 0 and "new" on 2.
+        let heard = vec![
+            token(11, 0),
+            token(78, 0),
+            token(26, 0),
+            token(7, 1),
+            token(29, 2),
+            token(15, 2),
+            token(46, 3),
+            token(6, 4),
+            token(6, 5),
+            token(44, 6),
+            token(60, 6),
+        ];
+        assert_eq!(
+            tok.decode(&heard.iter().map(|t| t.id).collect::<Vec<_>>()),
+            "Uh, new the the city."
+        );
+        let out = c.remove_fillers(&tok, heard.clone());
+        let new = Token {
+            id: 42,
+            frame: 2,
+            duration: 2,
+        };
+        assert_eq!(out, vec![new, token(6, 5), token(44, 6), token(60, 6)]);
+        // Without fillers to remove, the transcript stays as decoded.
+        let (c, _) = Compiled::new(&SpecialWords::new(), &tok);
+        assert_eq!(c.remove_fillers(&tok, heard.clone()), heard);
+    }
+
+    #[test]
+    fn a_spoken_forms_word_stays_whole_when_fillers_go() {
+        let tok = tokenizer();
+        let mut words = SpecialWords::new();
+        words.set_fillers(Fillers::for_language("en"));
+        words.add_spoken("New um", "cube control").unwrap();
+        let (c, _) = Compiled::new(&words, &tok);
+        let tokens: Vec<Token> = (tok.encode("cube control").into_iter().enumerate())
+            .map(|(i, id)| Token {
+                id,
+                frame: i as u32,
+                duration: 1,
+            })
+            .collect();
+        let written = c.spoken.rewrite(&tok, tokens);
+        let out = c.remove_fillers(&tok, written);
+        let ids: Vec<u32> = out.iter().map(|t| t.id).collect();
+        assert_eq!(tok.decode(&ids), "New um");
     }
 
     #[test]

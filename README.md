@@ -98,6 +98,11 @@ little change to ordinary words. A spoken form, such as "engine x" for Nginx, ma
 the word wherever it hears the form. [docs/biasing.md](docs/biasing.md) describes both, with
 their accuracy and limits.
 
+For dictation, the list can also leave out English hesitations (um, uh) and stutters ("the the",
+"I, I"), offline and streamed, with `words.set_fillers(Fillers::for_language("en"))`, and
+`telmo transcribe --remove-fillers` does the same. [docs/fillers.md](docs/fillers.md) says what
+goes and what stays.
+
 ## Accuracy and speed
 
 | Model | Weights | Pack | LibriSpeech clean | LibriSpeech other |

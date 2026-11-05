@@ -843,9 +843,9 @@ impl Parakeet {
         self.transcribe_biased(samples, &SpecialWords::new())
     }
 
-    /// Transcribes 16 kHz mono samples, favouring special words with a beam search and writing
-    /// spoken forms as their words. With no words, it decodes greedily as
-    /// [`Parakeet::transcribe`] does.
+    /// Transcribes 16 kHz mono samples, favouring special words with a beam search, writing
+    /// spoken forms as their words and leaving out the list's fillers. With no words to favour,
+    /// it decodes greedily as [`Parakeet::transcribe`] does.
     pub fn transcribe_biased(&self, samples: &[f32], words: &SpecialWords) -> Result<Transcript> {
         let mut timings = Timings::default();
         let features = timings.time("features", || self.front_end.compute(samples))?;
@@ -1297,7 +1297,8 @@ impl Parakeet {
     }
 
     /// Decodes with a beam search that favours special words, then writes spoken forms as their
-    /// words, as [`Parakeet::transcribe_biased`] does. With no words, it's [`Parakeet::decode`].
+    /// words and leaves out fillers, as [`Parakeet::transcribe_biased`] does. With
+    /// [`SpecialWords::new`], it's [`Parakeet::decode`].
     pub fn decode_biased(
         &self,
         encoded: &Encoded,
@@ -1311,7 +1312,8 @@ impl Parakeet {
             let start = self.initial_decoder_state(timings);
             self.beam_search(encoded, 0, &start, &words, timings)
         };
-        words.spoken.rewrite(&self.tokenizer, tokens)
+        let tokens = words.spoken.rewrite(&self.tokenizer, tokens);
+        words.remove_fillers(&self.tokenizer, tokens)
     }
 
     /// The decoder's state before any token, as NeMo starts it (the blank token's input).

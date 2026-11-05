@@ -34,6 +34,7 @@ pub mod biasing;
 pub mod error;
 pub mod features;
 pub mod fft;
+pub mod fillers;
 pub mod gguf;
 pub mod granite;
 pub mod granite_features;
@@ -56,6 +57,7 @@ pub mod wav;
 
 pub use biasing::{Boost, Rejection, SpecialWords};
 pub use error::{Error, Result};
+pub use fillers::Fillers;
 pub use granite::Granite;
 pub use granite_stream::GraniteStream;
 pub use model::Model;

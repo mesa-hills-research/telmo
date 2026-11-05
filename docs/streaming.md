@@ -26,9 +26,12 @@ stream.finish()?;
 ## How it works
 
 1. The audio is resampled to 16 kHz and split into utterances by voice activity. An utterance
-   starts after 150 ms above an adaptive noise floor and keeps the 300 ms before that. It ends
-   after 600 ms below the floor once the model has heard no word in the last 400 ms, and an
-   utterance longer than 30 s is cut at its quietest point.
+   starts after 150 ms above an adaptive noise floor and keeps the 300 ms before that. The
+   floor starts at the quietest of the first 300 ms, or of all the audio when it ends sooner.
+   Audio that opens in the middle of a word keeps that word when speech is found in its first
+   2 s, since its first utterance then starts at the first sample. An utterance ends after
+   600 ms below the floor once the model has heard no word in the last 400 ms, and one longer
+   than 30 s is cut at its quietest point.
 2. Passes over the current utterance run at least `min_interval` (0.5 s) apart, and at least
    1.5 times the last pass's duration apart, so a slow computer shows tentative text less often
    instead of falling behind.
@@ -38,8 +41,25 @@ stream.finish()?;
    recomputes only the attention blocks new audio reaches, keeping the previous 10.24 s block
    live until the next one has 1.28 s.
 4. A word settles once two passes in a row agree on it and on every word before it, it ends a
-   second before the audio does, and the model has heard a word after it. When the utterance
-   ends, a last pass settles everything.
+   second before the audio does, and the model has heard a word after it. Parakeet's hypothesis
+   of a word can still change until it has heard several seconds after it, and often hears a word
+   said twice ("yeah, yeah") as one before then. So with Parakeet a word must end 4 s before the
+   audio does, and nothing settles before the utterance has 3 s of audio. Past 30 s of audio the
+   margin is 1 s again, since a window can then start inside the utterance, where Parakeet
+   sometimes hears nothing. That happens with an UtteranceStream fed more than 30 s, and with an
+   utterance that goes on after voice activity ended it because the model still heard a word
+   there, since voice activity counts its 30 s from the new start. On 1,695 streamed AMI meeting
+   clips holding a word said twice, Parakeet wrote both copies of 96.4% of those doubles with the
+   4 s margin against 94.4% with 1 s, and a word settled a median 4.0 s after it ended instead of
+   1.3 s. Tentative text shows as early as before. When the utterance ends, a last pass settles
+   everything.
+5. A sentence end that closes an utterance stays tentative until the next utterance's first
+   words settle, or the stream finishes, since a pause can split a sentence. It goes when they
+   start with a comma or a lower-case word that joins words, such as "and", "rather", "of" or
+   "which", and stays otherwise. A new sentence's first word gets a capital where Granite wrote
+   it in lower case. On 261 such boundaries in streamed meeting speech (AMI) and 148 in
+   LibriSpeech, the boundaries the rule was chosen on, the text was then right at 78.9% and
+   93.2%, against 73.6% and 91.2% left as it was.
 
 `Streamer` is the same machinery without the thread, for callers that decide themselves when
 passes run.
@@ -48,25 +68,30 @@ passes run.
 
 Ten recordings of about two minutes each, made of consecutive LibriSpeech test-clean or
 test-other utterances with pauses of 0.8 to 2 s and quiet noise (163 utterances in all), were
-replayed in real time at 48 kHz in 20 ms pieces, on 5 threads of the machine described in
-[measurements.md](measurements.md#machine). `examples/stream` builds and replays such
-recordings.
+replayed in real time at 48 kHz in 20 ms pieces, on 5 threads of an otherwise idle AMD EPYC 7642,
+with `TELMO_ISA=avx2`. `examples/stream` builds and replays such recordings
+(`stream run MODEL sessions.tsv --threads 5 --realtime`). The last column is Parakeet with the
+1 s settle margin it had before the 4 s floor, measured on the same machine at the same time.
+Granite's figures were the same then.
 
-| | Granite, int8 | Parakeet, q8_0 |
-|---|---:|---:|
-| First tentative word after speech starts, median | 0.77 s | 0.75 s |
-| First tentative word, 90th percentile | 0.97 s | 1.81 s |
-| Final text after speech ends, median | 1.13 s | 1.09 s |
-| Final text, 90th percentile | 1.73 s | 1.69 s |
-| Tentative words replaced per 100 settled | 46 | 63 |
-| WER streamed | 2.33% | 2.69% |
-| WER offline, on the same utterances | 2.12% | 2.44% |
-| CPU | 1.2 cores | 1.8 cores |
+| | Granite, int8 | Parakeet, q8_0 | Parakeet, 1 s margin |
+|---|---:|---:|---:|
+| First tentative word after speech starts, median | 0.73 s | 0.75 s | 0.75 s |
+| First tentative word, 90th percentile | 0.74 s | 1.82 s | 1.82 s |
+| Words settled after speech ends, median | 0.90 s | 1.05 s | 1.05 s |
+| Words settled, 90th percentile | 1.14 s | 1.70 s | 1.63 s |
+| Tentative words replaced per 100 settled | 74 | 145 | 116 |
+| WER streamed | 2.59% | 2.51% | 2.91% |
+| WER offline, on the same utterances | 2.15% | 2.44% | 2.44% |
+| CPU | 1.6 cores | 2.0 cores | 2.0 cores |
 
-The offline row transcribes each utterance the stream found in one go. Most of the wait for the
-final text is the 600 ms of quiet that ends an utterance. Passes run at least 0.5 s apart by
-default (`StreamConfig::min_interval`). At 1 s apart, Granite's first word comes after 1.29 s
-instead, it replaces 26 tentative words per 100 and uses 0.85 cores, at the same WER.
+The offline row transcribes each utterance the stream found in one go. The words have settled
+when the utterance ends, and most of that wait is the 600 ms of quiet that ends it. A sentence
+end that closes the utterance settles later, with the next utterance's first words, or when the
+stream finishes. Passes run at least 0.5 s apart by default (`StreamConfig::min_interval`). Passes
+further apart show the first word later, replace fewer tentative words and use less CPU. The 4 s
+margin leaves the first tentative word and the end of an utterance where they were, since the
+last pass settles everything, and words stay tentative longer, so more of them are replaced.
 
 FLEURS recordings of six or seven test utterances per language gave these word error rates, where
 a single word moves a figure by about a point. Offline here means transcribing the original

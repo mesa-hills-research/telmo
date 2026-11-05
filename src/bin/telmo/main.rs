@@ -19,7 +19,7 @@ use std::time::Instant;
 use telmo::kernels::Isa;
 use telmo::model::ModelType;
 use telmo::pack::{self, FileSink};
-use telmo::{Model, Options, Precision};
+use telmo::{Fillers, Model, Options, Precision, SpecialWords};
 
 use install::KnownModel;
 
@@ -56,6 +56,8 @@ Options
   --yes            Downloads a missing model without asking
   --device D       The input to record from, as a number or part of a name that
                    --device list shows (default the system's input)
+  --remove-fillers Leaves out English hesitations (um, uh) and stutters of words
+                   such as \"the the\" or \"I, I\"
 
 Granite and Parakeet download on first use, after asking, into the cache
 directory that telmo models shows. Downloads use the proxy environment
@@ -91,6 +93,7 @@ struct Transcribe {
     precision: Option<Precision>,
     yes: bool,
     device: Option<String>,
+    remove_fillers: bool,
     files: Vec<PathBuf>,
 }
 
@@ -155,6 +158,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
         precision: None,
         yes: false,
         device: None,
+        remove_fillers: false,
         files: Vec::new(),
     };
     let mut rest = rest.iter();
@@ -187,6 +191,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
                 const ERROR: &str = "--device takes list, a number or part of a device name.";
                 transcribe.device = Some(value(ERROR)?.clone());
             }
+            "--remove-fillers" => transcribe.remove_fillers = true,
             option if option.starts_with('-') => {
                 return Err(format!("Unknown option {option}."));
             }
@@ -201,6 +206,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
             ("--precision", transcribe.precision.is_some()),
             ("--yes", transcribe.yes),
             ("--device", transcribe.device.is_some()),
+            ("--remove-fillers", transcribe.remove_fillers),
         ];
         match given
             .iter()
@@ -215,7 +221,14 @@ fn parse(args: &[String]) -> Result<Command, String> {
             Err("transcribe takes one or more WAV files.".into())
         }
         "transcribe" => {
-            only(&["--model", "--threads", "--isa", "--precision", "--yes"])?;
+            only(&[
+                "--model",
+                "--threads",
+                "--isa",
+                "--precision",
+                "--yes",
+                "--remove-fillers",
+            ])?;
             Ok(Command::Transcribe(transcribe))
         }
         "pack" => {
@@ -287,10 +300,14 @@ fn transcribe(args: &Transcribe) -> Result<(), String> {
         model.precision().map_or("mixed", |p| p.name())
     );
 
+    let mut words = SpecialWords::new();
+    if args.remove_fillers {
+        words.set_fillers(Fillers::for_language("en"));
+    }
     let several = args.files.len() > 1;
     let mut failures = 0;
     for file in &args.files {
-        if let Err(e) = transcribe_file(&model, file, several) {
+        if let Err(e) = transcribe_file(&model, &words, file, several) {
             if !several {
                 return Err(e);
             }
@@ -308,11 +325,18 @@ fn transcribe(args: &Transcribe) -> Result<(), String> {
 }
 
 /// Prints a file's text, after its name if `named`, and the time it took on stderr.
-fn transcribe_file(model: &Model, file: &Path, named: bool) -> Result<(), String> {
+fn transcribe_file(
+    model: &Model,
+    words: &SpecialWords,
+    file: &Path,
+    named: bool,
+) -> Result<(), String> {
     let audio = telmo::wav::read(file).map_err(|e| e.to_string())?;
     let samples = telmo::resample::resample(&audio.samples, audio.sample_rate, 16000);
     let start = Instant::now();
-    let transcript = model.transcribe(&samples).map_err(|e| e.to_string())?;
+    let transcript = model
+        .transcribe_biased(&samples, words)
+        .map_err(|e| e.to_string())?;
     let elapsed = start.elapsed().as_secs_f64();
     if named {
         println!("{}: {}", file.display(), transcript.text);
@@ -399,12 +423,14 @@ mod tests {
                 precision: None,
                 yes: false,
                 device: None,
+                remove_fillers: false,
                 files: vec!["a.wav".into(), "b.wav".into()],
             }))
         );
         assert_eq!(
             parse(
-                "transcribe --model parakeet a.wav --threads 4 --isa scalar --precision f16 --yes"
+                "transcribe --model parakeet a.wav --threads 4 --isa scalar --precision f16 --yes \
+                 --remove-fillers"
             ),
             Ok(Command::Transcribe(Transcribe {
                 model: ModelArg::Known(&install::PARAKEET),
@@ -413,6 +439,7 @@ mod tests {
                 precision: Some(Precision::F16),
                 yes: true,
                 device: None,
+                remove_fillers: true,
                 files: vec!["a.wav".into()],
             }))
         );
@@ -495,6 +522,10 @@ mod tests {
             parse("models --yes"),
             Err("models doesn't take --yes.".into())
         );
+        assert_eq!(
+            parse("models --remove-fillers"),
+            Err("models doesn't take --remove-fillers.".into())
+        );
     }
 
     #[test]
@@ -543,6 +574,7 @@ mod tests {
             "--precision",
             "--yes",
             "--device",
+            "--remove-fillers",
         ] {
             assert!(HELP.contains(&format!("\n  {option} ")), "{option}");
         }

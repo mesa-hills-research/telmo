@@ -158,7 +158,8 @@ impl Model {
         }
     }
 
-    /// Transcribes 16 kHz mono samples, favouring special words. With no words, it's
+    /// Transcribes 16 kHz mono samples, favouring special words, writing spoken forms as their
+    /// words and leaving out the list's fillers. With [`SpecialWords::new`], it's
     /// [`Model::transcribe`].
     pub fn transcribe_biased(&self, samples: &[f32], words: &SpecialWords) -> Result<Transcript> {
         match self {

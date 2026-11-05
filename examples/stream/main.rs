@@ -207,7 +207,9 @@ type Replay = (Vec<Timed>, (usize, f64, f64));
 struct Utterance {
     onset: f64,
     first_text: Option<f64>,
-    final_text: Option<f64>,
+    /// Seconds from the end of speech to the utterance's end, when all its words have settled. A
+    /// sentence end that closes it settles later, with the next utterance's first words.
+    words_settled: Option<f64>,
 }
 
 #[derive(Default)]
@@ -569,7 +571,7 @@ fn summarize(events: &[Timed]) -> (String, Vec<Utterance>, usize, usize) {
             } => {
                 compare(&mut shown, &mut settled_since, Vec::new());
                 if let Some(u) = utterances.get_mut(*utterance as usize) {
-                    u.final_text = Some(t - speech_end);
+                    u.words_settled = Some(t - speech_end);
                 }
             }
         }
@@ -625,7 +627,11 @@ fn report(t: &Totals) {
         .iter()
         .filter_map(|u| u.first_text.map(|x| x - u.onset))
         .collect();
-    let last: Vec<f64> = t.utterances.iter().filter_map(|u| u.final_text).collect();
+    let last: Vec<f64> = t
+        .utterances
+        .iter()
+        .filter_map(|u| u.words_settled)
+        .collect();
     println!(
         "{} utterances over {:.1} min of audio",
         t.utterances.len(),
@@ -637,7 +643,7 @@ fn report(t: &Totals) {
         quantile(&first, 0.9)
     );
     println!(
-        "final text after the end of speech: median {:.2} s, 90th percentile {:.2} s",
+        "words settled after the end of speech: median {:.2} s, 90th percentile {:.2} s",
         median(&last),
         quantile(&last, 0.9)
     );

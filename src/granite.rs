@@ -555,8 +555,8 @@ impl Granite {
     }
 
     /// Transcribes 16 kHz mono samples, favouring special words by spotting them in the CTC
-    /// output and writing spoken forms as their words. With no words, it's
-    /// [`Granite::transcribe`].
+    /// output, writing spoken forms as their words and leaving out the list's fillers. With
+    /// [`SpecialWords::new`], it's [`Granite::transcribe`].
     pub fn transcribe_biased(&self, samples: &[f32], words: &SpecialWords) -> Result<Transcript> {
         let mut timings = Timings::default();
         let features = timed(&mut timings, "features", || self.features(samples))?;
@@ -579,8 +579,8 @@ impl Granite {
     }
 
     /// Greedy CTC decoding, word spotting of special words, then spoken forms written as their
-    /// words, as [`Granite::transcribe_biased`] does it. A spotted word's last token lasts to the
-    /// end of the frames it took over.
+    /// words and fillers left out, as [`Granite::transcribe_biased`] does it. A spotted word's
+    /// last token lasts to the end of the frames it took over.
     pub fn decode_biased(
         &self,
         encoded: &Encoded,
@@ -598,7 +598,8 @@ impl Granite {
                 biasing::spot(&words, &self.tokenizer, &tokens, &scores, 0).0
             });
         }
-        words.spoken.rewrite(&self.tokenizer, tokens)
+        let tokens = words.spoken.rewrite(&self.tokenizer, tokens);
+        words.remove_fillers(&self.tokenizer, tokens)
     }
 
     /// Runs the encoder over `rows` rows of features. `tap` sees the input projection
