@@ -1402,7 +1402,7 @@ fn remove_fillers(
         tokenizer,
         hyp,
         |h| h.id,
-        |texts| words.edits(context, texts, true),
+        |texts| words.edits(context, texts, false),
         |word, ids| {
             let (first, last) = (&word[0], &word[word.len() - 1]);
             (ids.iter().enumerate())
