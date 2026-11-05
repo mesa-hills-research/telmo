@@ -5,6 +5,7 @@ use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
+use telmo::disfluency::{self, PACK_DOWNLOAD, PACK_NOTICE};
 use telmo::model::ModelType;
 
 use crate::download::{self, megabytes};
@@ -144,6 +145,78 @@ pub fn should_download(yes: bool, interactive: bool, ask: impl FnOnce() -> Optio
         })
 }
 
+/// The disfluency tagger's pack in the cache, downloaded first once the user agrees. The
+/// download goes to the cache's downloads folder, is checked against its SHA-256, and is renamed
+/// into place whole.
+pub fn tagger(cache: &Path, yes: bool) -> Result<PathBuf, String> {
+    let file = PACK_DOWNLOAD;
+    let pack = cache.join(file.name);
+    if pack.is_file() {
+        return Ok(pack);
+    }
+    eprintln!("{PACK_NOTICE}");
+    let size = megabytes(file.bytes);
+    let manual = format!(
+        "To install it by hand, download it into the cache.\n\n  {CURL} -fL -o \"{}\" {}",
+        pack.display(),
+        file.url
+    );
+    let interactive = io::stdin().is_terminal();
+    let ask = || {
+        eprint!(
+            "Download the disfluency tagger ({size} MB) to {}? [Y/n] ",
+            cache.display()
+        );
+        let mut answer = String::new();
+        match io::stdin().read_line(&mut answer) {
+            Ok(n) if n > 0 => Some(answer),
+            _ => None,
+        }
+    };
+    if !should_download(yes, interactive, ask) {
+        return Err(if interactive {
+            manual
+        } else {
+            format!(
+                "The disfluency tagger isn't installed. Run telmo again with --yes to download it, or install it by hand.\n\n{manual}"
+            )
+        });
+    }
+    let downloads = cache.join("downloads");
+    fs::create_dir_all(&downloads)
+        .map_err(|e| format!("Couldn't create {} ({e}).", downloads.display()))?;
+    let partial = downloads.join(file.name);
+    fetch_one(&file, &partial, &manual)?;
+    fs::rename(&partial, &pack)
+        .map_err(|e| format!("Couldn't move the tagger to {} ({e}).", pack.display()))?;
+    // Only removes the directory once no other download is in it.
+    let _ = fs::remove_dir(&downloads);
+    Ok(pack)
+}
+
+/// Downloads `file` to `path`, resuming what's there and checking it, with a message for each
+/// way it can fail.
+fn fetch_one(file: &disfluency::RemoteFile, path: &Path, manual: &str) -> Result<(), String> {
+    let agent = download::agent(download::STALL);
+    let name = file.name;
+    match download::fetch(&agent, file.url, path, file.bytes, file.sha256) {
+        Ok(()) => Ok(()),
+        Err(download::Error::Failed {
+            reason,
+            retry: true,
+        }) => Err(format!(
+            "Couldn't download {name} ({reason}). Run the command again to resume."
+        )),
+        Err(download::Error::Failed { reason, .. }) => {
+            Err(format!("Couldn't download {name} ({reason}).\n\n{manual}"))
+        }
+        Err(download::Error::File(message)) => Err(message),
+        Err(download::Error::Checksum) => Err(format!(
+            "{name} didn't match its SHA-256 checksum, so Telmo deleted it. Run the command again to download it."
+        )),
+    }
+}
+
 /// How to download and pack a model by hand, into the pack `transcribe` looks for.
 pub fn manual_steps(model: &KnownModel, cache: &Path) -> String {
     let dir = model.download_dir_name();
@@ -266,6 +339,13 @@ pub fn list(cache: &Path) -> String {
         };
         let _ = writeln!(out, "{:<10}{status}", model.name);
     }
+    let status = match fs::metadata(cache.join(PACK_DOWNLOAD.name)) {
+        Ok(meta) if meta.is_file() => {
+            format!("{:>4} MB  {}", megabytes(meta.len()), PACK_DOWNLOAD.name)
+        }
+        _ => "Not installed".to_string(),
+    };
+    let _ = writeln!(out, "{:<10}{status}", "tagger");
     out
 }
 
@@ -356,13 +436,24 @@ mod tests {
     }
 
     #[test]
+    fn the_tagger_found_in_the_cache_needs_no_download() {
+        let cache = crate::tests::temp_dir("tagger");
+        let pack = cache.join(PACK_DOWNLOAD.name);
+        fs::write(&pack, b"pack").unwrap();
+        assert_eq!(tagger(&cache, false), Ok(pack));
+        assert!(PACK_DOWNLOAD.url.ends_with(PACK_DOWNLOAD.name));
+        assert_eq!(PACK_DOWNLOAD.sha256.len(), 64);
+        fs::remove_dir_all(&cache).unwrap();
+    }
+
+    #[test]
     fn models_lists_what_the_cache_holds() {
         let cache = crate::tests::temp_dir("models");
         let empty = list(&cache);
         assert_eq!(
             empty,
             format!(
-                "Cache  {}\ngranite   Not installed\nparakeet  Not installed\n",
+                "Cache  {}\ngranite   Not installed\nparakeet  Not installed\ntagger    Not installed\n",
                 cache.display()
             )
         );
@@ -375,7 +466,7 @@ mod tests {
         assert_eq!(
             list(&cache),
             format!(
-                "Cache  {}\ngranite      2 MB  granite-speech-5.0-int8.pack\nparakeet  Not installed\n",
+                "Cache  {}\ngranite      2 MB  granite-speech-5.0-int8.pack\nparakeet  Not installed\ntagger    Not installed\n",
                 cache.display()
             )
         );

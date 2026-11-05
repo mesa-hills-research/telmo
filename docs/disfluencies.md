@@ -83,8 +83,10 @@ pass per utterance, after its last pass.
 ## The pack
 
 The tagger is Ettin's 68M encoder (a ModernBERT) fine-tuned in two members whose probabilities
-are averaged. Its checkpoint (`model.safetensors`, `config.json`, `tokenizer.json` and
-`tagger.json`) converts into a pack once.
+are averaged. `telmo transcribe --remove-disfluencies` downloads its pack on first use, from a
+release of this repository that `disfluency::PACK_DOWNLOAD` pins by size and SHA-256, and
+`disfluency::PACK_NOTICE` says what it's made from and under which licences. A checkpoint
+(`model.safetensors`, `config.json`, `tokenizer.json` and `tagger.json`) converts into a pack.
 
 ```text
 cargo run --release --example pack -- disfluency-tagger disfluency-q8_0.pack

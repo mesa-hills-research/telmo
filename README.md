@@ -104,8 +104,8 @@ For dictation, the list can also leave out English hesitations (um, uh) and stut
 goes and what stays. A disfluency tagger goes further, taking out false starts, repairs and
 repeated phrases once over each utterance, with `words.set_disfluencies(Some(tagger))`, and
 `Tagger::hand_written()` does a lighter cleanup with no model. Guards keep the words code dictation
-needs, such as spoken flags and units. [docs/disfluencies.md](docs/disfluencies.md) describes
-them.
+needs, such as spoken flags and units. `telmo transcribe --remove-disfluencies` downloads the
+tagger and runs both. [docs/disfluencies.md](docs/disfluencies.md) describes them.
 
 ## Accuracy and speed
 
