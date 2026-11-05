@@ -2400,6 +2400,13 @@ mod tests {
             assert_eq!((settled(&events), out.as_str()), (want, text), "{next}");
             assert!(events.contains(&cleared), "{next}");
         }
+        // A copy that starts a special word keeps its case, so it's no stutter and stays.
+        let mut place = SpecialWords::new();
+        place.add("The Hague").unwrap();
+        let place = Compiled::new(&place, &tok).0;
+        let next = " the Hague office";
+        let (events, out) = resolve_held(held, " we flew to the.", next, Some(&place));
+        assert_eq!((settled(&events), out.as_str()), (vec![".".into()], next));
     }
 
     #[test]
