@@ -108,6 +108,11 @@ pub(crate) struct Context {
 }
 
 impl Context {
+    /// The text's last word, with its punctuation.
+    pub(crate) fn last(&self) -> Option<&str> {
+        self.last.as_deref()
+    }
+
     /// The context of `text`.
     pub fn after(text: &str) -> Context {
         let mut context = Context::default();
@@ -272,16 +277,18 @@ impl Fillers {
         words: &[&str],
         protected: &Protected,
     ) -> Vec<Edit> {
-        self.plan_guarded(context, words, protected, None)
+        self.plan_guarded(context, words, protected, None, true)
     }
 
-    /// The same, with the deletions `guards` veto undone.
+    /// The same, with the deletions `guards` veto undone, and the comma before a removed
+    /// hesitation left to a later stage unless `pause_commas`.
     pub(crate) fn plan_guarded(
         &self,
         context: &Context,
         words: &[&str],
         protected: &Protected,
         guards: Option<&Guards>,
+        pause_commas: bool,
     ) -> Vec<Edit> {
         let Language::English = self.language;
         let parts: Vec<(&str, &str, &str)> = words.iter().map(|w| split(w)).collect();
@@ -297,7 +304,11 @@ impl Fillers {
             deleted[i] =
                 !kept[i] && !quoted[i] && !core.is_empty() && is_hesitation(core, previous);
         }
-        let hesitations = deleted.clone();
+        let hesitations = if pause_commas {
+            deleted.clone()
+        } else {
+            vec![false; words.len()]
+        };
         // The first of two copies goes, or the second when the first can't change. The copy
         // before is held with whether it may go, and `between` gathers the punctuation since it,
         // that of removed hesitations included.
@@ -349,12 +360,14 @@ impl Fillers {
     }
 
     /// The edits that delete `deleted` from `words`, a text of their own, with punctuation and
-    /// capitals tidied as for fillers.
+    /// capitals tidied as for fillers, the comma before a removed hesitation left to a later
+    /// stage unless `pause_commas`.
     pub(crate) fn tidy_deletions(
         &self,
         words: &[&str],
         deleted: &[bool],
         protected: &Protected,
+        pause_commas: bool,
     ) -> Vec<Edit> {
         let parts: Vec<(&str, &str, &str)> = words.iter().map(|w| split(w)).collect();
         let kept = protected.words(&[], words);
@@ -362,7 +375,7 @@ impl Fillers {
             .map(|i| {
                 let previous = i.checked_sub(1).map(|j| parts[j].1);
                 let core = parts[i].1;
-                deleted[i] && !core.is_empty() && is_hesitation(core, previous)
+                pause_commas && deleted[i] && !core.is_empty() && is_hesitation(core, previous)
             })
             .collect();
         self.tidy(None, &parts, deleted, &hesitations, &kept, protected)

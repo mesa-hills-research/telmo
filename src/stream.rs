@@ -1395,19 +1395,14 @@ fn remove_fillers(
 ) -> Vec<Hyp> {
     // With a disfluency tagger, the fillers stay until the utterance ends, as the tagger reads
     // them.
-    let Some(fillers) = words
-        .fillers
-        .as_ref()
-        .filter(|_| words.disfluencies.is_none())
-    else {
+    if words.disfluencies.is_some() || !words.cleans() {
         return hyp;
-    };
-    let guards = words.guards.as_ref();
+    }
     crate::fillers::rewrite(
         tokenizer,
         hyp,
         |h| h.id,
-        |texts| fillers.plan_guarded(context, texts, &words.protected, guards),
+        |texts| words.edits(context, texts, true),
         |word, ids| {
             let (first, last) = (&word[0], &word[word.len() - 1]);
             (ids.iter().enumerate())
@@ -1437,17 +1432,7 @@ fn hold_until_last(
 ) -> (String, String) {
     let text = format!("{utterance}{tentative}");
     let list: Vec<&str> = text.split_whitespace().collect();
-    let edits = match &words.disfluencies {
-        Some(tagger) if last => tagger.plan(&list, &words.protected, words.guards.as_ref()),
-        _ => fillers::Fillers::for_language("en")
-            .expect("English has filler rules")
-            .plan_guarded(
-                &Context::default(),
-                &list,
-                &words.protected,
-                words.guards.as_ref(),
-            ),
-    };
+    let edits = words.edits(&Context::default(), &list, last);
     let mut text = fillers::Fillers::text(&list, &edits);
     if !text.is_empty() {
         text.insert(0, ' ');

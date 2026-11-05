@@ -73,6 +73,27 @@ likely tag. The pack carries the thresholds the tagger was tuned with.
 Punctuation and capitals are tidied as for fillers. A sentence end on a deleted word moves to the
 word before, and a capital at a sentence's start moves to the next word.
 
+## Capitals and punctuation
+
+`words.set_punctuation(Punctuation::for_language("en"))` fixes capitals and punctuation after the
+cleanup. The pronoun "i" takes a capital, and a period goes where a speaker only paused, after a
+word that leaves its sentence unfinished ("I'll take the. Red one."), before a one-word sentence
+or a short fragment with no verb, and before "than". The next word then goes on in lower case
+where it should. A comma goes from a word that can't end a clause, where a hesitation that went
+left it ("the, uh, little" gives "the little"), and with the rules on they decide every such
+comma. Only a letter's case and the marks at a word's end change.
+
+`Punctuation::joining_more()` joins more of what a pause split, as dictation has it.
+
+```text
+We're shipping a patch. Release. That is due on Friday.
+We're shipping a patch release that is due on Friday.
+```
+
+It also joins a fragment's own period, one after an auxiliary with no subject ("My brother is.
+Learning how") and one before a preposition after four words or more ("the library stays open. Until
+nine."). In conversation a few real sentence ends go with them.
+
 ## In a stream
 
 A stream can't change settled text, and the tagger reads a whole utterance. So with a tagger

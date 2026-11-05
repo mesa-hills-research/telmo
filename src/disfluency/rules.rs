@@ -783,7 +783,7 @@ mod tests {
         }
         Fillers::text(
             &words,
-            &fillers.tidy_deletions(&words, &deleted, &protected),
+            &fillers.tidy_deletions(&words, &deleted, &protected, true),
         )
     }
 

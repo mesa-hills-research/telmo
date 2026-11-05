@@ -12,14 +12,15 @@
 //! tagger's probability `p` (1 where the filler rules delete the word), its most likely deleting
 //! tag's first letter in `letters`, and whether the filler rules (`filler`), the other rules or
 //! the hand-written network (`rule`), or either (`rules`) delete it. With `--guards`, `guarded`
-//! is `deleted` with the guards' vetoes undone.
+//! is `deleted` with the guards' vetoes undone, and with `--punctuation`, `default` and `wide` are
+//! the words as the capitals and punctuation rules fix them, by default and joining more.
 
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use telmo::disfluency::{Guards, Tagger};
+use telmo::disfluency::{Guards, Punctuation, Tagger};
 use telmo::json::{self, Value};
 use telmo::{Options, Precision};
 
@@ -45,11 +46,12 @@ fn run() -> Result<(), String> {
         ..Options::default()
     };
     let mut paths: Vec<PathBuf> = Vec::new();
-    let (mut hand_written, mut guards) = (false, None);
+    let (mut hand_written, mut guards, mut punctuation) = (false, None, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--hand-written" => hand_written = true,
             "--guards" => guards = Guards::for_language("en"),
+            "--punctuation" => punctuation = Punctuation::for_language("en"),
             "--threads" => {
                 options.threads =
                     (args.next().and_then(|t| t.parse().ok())).ok_or("--threads takes a number")?
@@ -93,9 +95,23 @@ fn run() -> Result<(), String> {
             }
             None => String::new(),
         };
+        let strings = |words: Vec<String>| -> String {
+            let list: Vec<String> = (words.into_iter())
+                .map(|w| Value::String(w).to_json())
+                .collect();
+            format!("[{}]", list.join(","))
+        };
+        let fixed = match &punctuation {
+            Some(p) => format!(
+                r#","default":{},"wide":{}"#,
+                strings(p.apply(&words)),
+                strings(p.joining_more().apply(&words))
+            ),
+            None => String::new(),
+        };
         writeln!(
             out,
-            r#"{{"id":{},"deleted":{},"p":[{}],"letters":"{}","filler":{},"rule":{},"rules":{}{guarded}}}"#,
+            r#"{{"id":{},"deleted":{},"p":[{}],"letters":"{}","filler":{},"rule":{},"rules":{}{guarded}{fixed}}}"#,
             id.to_json(),
             flags(deleted.iter().copied()),
             p.join(","),

@@ -29,6 +29,7 @@
 
 mod bpe;
 mod encoder;
+mod punctuation;
 mod rules;
 mod units;
 
@@ -282,6 +283,63 @@ impl Guards {
     }
 }
 
+/// Capitals and punctuation, fixed after the cleanup. The pronoun "i" takes a capital, a period
+/// goes where a speaker only paused, after a word that leaves its sentence unfinished ("I'll take
+/// the. Red one.") or around a one-word sentence ("a patch. Release. That is"), the next word then
+/// going on in lower case where it should, and a comma goes from a word that can't end a clause.
+/// Each word stays one word, and only a letter's case and the marks at its end change. With it
+/// on, it decides every comma a removed hesitation leaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Punctuation {
+    wide: bool,
+}
+
+impl Punctuation {
+    /// The rules of a language given as an ISO 639-1 code, with or without a region, or none
+    /// if Telmo has none for it. English is the only one so far.
+    pub fn for_language(code: &str) -> Option<Punctuation> {
+        Fillers::for_language(code).map(|_| Punctuation { wide: false })
+    }
+
+    /// The same rules joining more of the sentences a pause split, as dictation has them: a
+    /// one-word sentence's own period ("a patch. Release. That is" gives "a patch release that
+    /// is"), a fragment's, a period after an auxiliary with no subject before it ("My brother is.
+    /// Learning how") and one before a preposition after four words or more ("the library stays
+    /// open. Until nine."). In conversation a few real sentence ends go with them.
+    pub fn joining_more(self) -> Punctuation {
+        Punctuation { wide: true }
+    }
+
+    /// `words` with their capitals and punctuation fixed, one word for each.
+    pub fn apply(&self, words: &[&str]) -> Vec<String> {
+        punctuation::punctuate(words, self.wide)
+    }
+
+    /// `edits` of `words`, after a text whose last word is `before`, with the words they keep
+    /// fixed.
+    pub(crate) fn fix(&self, words: &[&str], edits: &mut [Edit], before: Option<&str>) {
+        let kept: Vec<(usize, String)> = (words.iter().zip(edits.iter()).enumerate())
+            .filter_map(|(i, (word, edit))| match edit {
+                Edit::Keep => Some((i, word.to_string())),
+                Edit::Change(text) => Some((i, text.clone())),
+                Edit::Delete | Edit::Leave(_) => None,
+            })
+            .collect();
+        let list: Vec<&str> = (before.into_iter())
+            .chain(kept.iter().map(|(_, text)| text.as_str()))
+            .collect();
+        let fixed = punctuation::punctuate(&list, self.wide);
+        for ((i, now), new) in kept
+            .iter()
+            .zip(fixed.into_iter().skip(usize::from(before.is_some())))
+        {
+            if new != *now {
+                edits[*i] = Edit::Change(new);
+            }
+        }
+    }
+}
+
 /// Converts a tagger's checkpoint into pack entries in `precision`. `src` holds the weights
 /// under Hugging Face's names, each member's after `members.N.` when there are several, and
 /// `tagger_json` the settings. The matrices and the token embedding take `precision`, which
@@ -413,7 +471,10 @@ impl Tagger {
     /// spaces.
     pub fn remove(&self, text: &str) -> String {
         let words: Vec<&str> = text.split_whitespace().collect();
-        Fillers::text(&words, &self.plan(&words, &Protected::default(), None))
+        Fillers::text(
+            &words,
+            &self.plan(&words, &Protected::default(), None, true),
+        )
     }
 
     /// What happens to each of `words`, a whole utterance as the speech model wrote it.
@@ -421,13 +482,15 @@ impl Tagger {
         self.decide_protected(words, &Protected::default())
     }
 
-    /// The edits of `words`, a whole utterance, with the words of a `protected` spelling kept
-    /// and the deletions `guards` veto undone.
+    /// The edits of `words`, a whole utterance, with the words of a `protected` spelling kept,
+    /// the deletions `guards` veto undone, and the comma before a removed hesitation left to a
+    /// later stage unless `pause_commas`.
     pub(crate) fn plan(
         &self,
         words: &[&str],
         protected: &Protected,
         guards: Option<&Guards>,
+        pause_commas: bool,
     ) -> Vec<Edit> {
         let mut deleted: Vec<bool> = (self.decide_protected(words, protected).iter())
             .map(|d| d.deleted)
@@ -435,7 +498,8 @@ impl Tagger {
         if let Some(guards) = guards {
             guards.apply(words, &mut deleted);
         }
-        self.fillers.tidy_deletions(words, &deleted, protected)
+        self.fillers
+            .tidy_deletions(words, &deleted, protected, pause_commas)
     }
 
     fn decide_protected(&self, words: &[&str], protected: &Protected) -> Vec<Decision> {
@@ -763,7 +827,12 @@ pub(crate) mod tests {
         // The hand-written network takes the first "Dash" for a repeat, and the guards keep it.
         let guards = Guards::for_language("en-US").unwrap();
         let flag: Vec<&str> = "Dash dash force dash push".split(' ').collect();
-        let plan = |g| Fillers::text(&flag, &hand_written.plan(&flag, &Protected::default(), g));
+        let plan = |g| {
+            Fillers::text(
+                &flag,
+                &hand_written.plan(&flag, &Protected::default(), g, true),
+            )
+        };
         assert_eq!(plan(None), "Dash force dash push");
         assert_eq!(plan(Some(&guards)), "Dash dash force dash push");
         // Tier 1 alone: a hesitation beside a spoken symbol stays too.
@@ -774,6 +843,7 @@ pub(crate) mod tests {
             &words,
             &Protected::default(),
             Some(&guards),
+            true,
         );
         assert_eq!(Fillers::text(&words, &edits), "type dash um v");
         assert!(Guards::for_language("de").is_none());

@@ -62,7 +62,8 @@ const MORE_KNOWN: &str = "wee mac mic sec veg alt ooh ada ami ass eh ta hi";
 /// Spoken names of symbols, as in a dictated flag or path ("dash dash force dash push").
 const SYMBOLS: &str =
     "dash hyphen slash backslash underscore tilde caret ampersand asterisk pipe hashtag";
-const NUMBER_WORDS: &str = "zero one two three four five six seven eight nine ten eleven twelve
+pub(super) const NUMBER_WORDS: &str =
+    "zero one two three four five six seven eight nine ten eleven twelve
 thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty
 seventy eighty ninety hundred thousand million billion";
 const NEGATION: &str = "not no never none nothing don't doesn't didn't isn't aren't wasn't weren't
@@ -172,33 +173,43 @@ fn classes() -> &'static Vec<(String, HashSet<String>)> {
 
 /// One unit: its name, the kind of tag or guard it gives (empty for one other units read), its
 /// inputs as (offset, feature, weight), and its bias.
-struct Unit {
+pub(super) struct Unit {
     name: String,
     kind: &'static str,
     inputs: Vec<(i32, usize, f32)>,
     bias: f32,
     /// How far ahead it looks, blockers included.
-    look: i32,
+    pub(super) look: i32,
 }
 
 /// The features the units read, by name, with how far ahead each looks, and the layers of units
 /// that add to them.
-struct Network {
+pub(super) struct Network {
     index: HashMap<String, usize>,
-    look: Vec<i32>,
-    layers: Vec<Vec<Unit>>,
+    pub(super) look: Vec<i32>,
+    pub(super) layers: Vec<Vec<Unit>>,
 }
 
 /// An input of a unit, the word `offset` places on and the feature's name.
-type Input<'a> = (i32, &'a str);
+pub(super) type Input<'a> = (i32, &'a str);
 
 impl Network {
-    fn new(extra: &[(&str, i32)]) -> Network {
+    /// A network whose base features are `base`, each with how far ahead it looks.
+    pub(super) fn with_base(base: &[(&str, i32)]) -> Network {
         let mut network = Network {
             index: HashMap::new(),
             look: Vec::new(),
             layers: Vec::new(),
         };
+        for &(name, look) in base {
+            network.push(name, look);
+        }
+        network
+    }
+
+    /// A network over each word's spelling, classes and matches, and `extra`.
+    fn new(extra: &[(&str, i32)]) -> Network {
+        let mut network = Network::with_base(&[]);
         let lengths: Vec<String> = (1..=MAXP + 1).map(|l| format!("len{l}")).collect();
         let classes = classes().iter().map(|(name, _)| name.as_str());
         for name in SPELLING
@@ -220,7 +231,7 @@ impl Network {
         self.look.push(look);
     }
 
-    fn feature(&self, name: &str) -> usize {
+    pub(super) fn feature(&self, name: &str) -> usize {
         *self
             .index
             .get(name)
@@ -230,7 +241,7 @@ impl Network {
     /// Adds to `layer` a unit that is 1 when every `need` input is and no `block` input is, or,
     /// with `any`, when any of those is too.
     #[allow(clippy::too_many_arguments)]
-    fn unit(
+    pub(super) fn unit(
         &self,
         layer: &mut Vec<Unit>,
         name: &str,
@@ -258,7 +269,7 @@ impl Network {
     }
 
     /// Makes `layer`'s units features the next layers read.
-    fn close(&mut self, layer: Vec<Unit>) {
+    pub(super) fn close(&mut self, layer: Vec<Unit>) {
         for unit in &layer {
             self.push(&unit.name, unit.look);
         }
@@ -266,7 +277,7 @@ impl Network {
     }
 
     /// Every feature of every word, the base features `z` first.
-    fn run(&self, mut z: Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+    pub(super) fn run(&self, mut z: Vec<Vec<f32>>) -> Vec<Vec<f32>> {
         let n = z.len();
         for layer in &self.layers {
             let out: Vec<Vec<f32>> = (0..n)
@@ -410,7 +421,7 @@ fn base(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
     z
 }
 
-fn has_class(name: &str, word: &str) -> bool {
+pub(super) fn has_class(name: &str, word: &str) -> bool {
     (classes().iter())
         .find(|(n, _)| n == name)
         .is_some_and(|(_, list)| list.contains(word))
