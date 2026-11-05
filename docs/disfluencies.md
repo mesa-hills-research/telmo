@@ -44,11 +44,16 @@ dictation needs them, whichever stage made it, the filler rules included.
 | Symbols | a spoken symbol and the words beside it, as in "dash dash force dash push" |
 | Units | a short unit after a number, as in "5 mm" |
 | Mentions | a filler talked about as a word ("delete ums") and a quoted word |
-| Lists | items that share their first word, as in "cleaner build, cleaner layout" |
+| Lists | items that share their first word when a third item or an "and" shows a list, as in "cleaner build, cleaner layout, cleaner tests" |
 | Straddles | a cut that would leave a broken repeat, as in "we just need to uh we need to" |
 | Parallels | a phrase said again in parallel or in contrast, as in "what they prefer what they not prefer" |
+| Senses | "so" and "well" in their own sense, as in "I think so", "so strong" and "as well" |
 
-On 112,000 words of seven AMI meeting series they undo 65 of the tagger's 12,521 deletions.
+Over a finished utterance or a whole transcript the guards read up to ten words ahead, so a list
+keeps its items when the third comes later ("set up like a cleaner build, cleaner layout for that
+one screen, cleaner tests"). In a stream's text so far they read three.
+
+On 112,000 words of seven AMI meeting series they undo 58 of the tagger's 12,521 deletions.
 `examples/disfluency.rs` with `--guards` writes each word's decision with and without them, and
 `Guards::veto` applies them to any deletions.
 
@@ -111,7 +116,8 @@ split across two utterances ("fix the", then "the login page") stays. The filler
 across them.
 
 Without a tagger, words settle as the stream goes. The guards and the punctuation rules look up to
-three words ahead, so a word can settle before the words that would change their decision come.
+three words ahead, so a word can settle before the words that would change their decision come,
+and a list whose third item comes later than that loses its first item.
 Punctuation never changes a settled word, and a period that settled keeps the next word's capital.
 
 ## The pack

@@ -73,9 +73,36 @@ const UNIT_NAMES: &str = "mm cm km kg mg ml ms sec secs min mins hr hrs gb mb kb
 px pt db dpi fps ft lb lbs oz mph kph";
 /// The second words of filler phrases ("I mean,", "you know,", "let's see,").
 const PHRASE_TAILS: &str = "mean know think guess see dunno";
+/// Words before "so" at a clause's end that make it a pro-form or a degree word ("I think so",
+/// "says so", "it was so", "delayed us so").
+const SO_PREV: &str = "think thought hope hoped guess guessed suppose supposed believe believed say
+says said saying assume imagine expect reckon afraid or not if even do did done doing more less heard
+hear hears tell told fancy doubt know knew find found feel felt seem seems seemed is are was were be
+been being am it's that's us it them him her me that dat quite just ever";
+/// Words after "so" that make it a degree word or start a phrase ("so strong", "so much", "so
+/// that", "so long as").
+const SO_NEXT: &str = "much many far long little few often well good bad big small great strong
+weak hard easy fast slow late early high low nice happy sad sure glad sorry tired busy hot cold warm
+old young new quick large tiny huge cheap expensive simple complex difficult important close near
+different similar that as on forth saying be lonely solemn slow awed wise persuasive";
+/// Words before "so" that make a phrase of it ("or so", "if so", "even so").
+const SO_PHRASE_PREV: &str = "or if even quite just ever more less not";
+/// Sentence adverbs, which make a filler pair after "so" ("so basically") rather than a degree.
+const SENTENCE_ADVERBS: &str = "basically actually really probably obviously definitely usually
+literally honestly generally normally hopefully technically essentially apparently presumably
+certainly clearly";
+/// Words before "well" in its own sense ("as well", "very well", "did well").
+const WELL_PREV: &str = "as very quite pretty so how too really fairly not sleep slept went did do
+does doing goes going work works worked play played know knows jolly damn";
+/// Words after "well" in its own sense ("well versed", "well enough").
+const WELL_NEXT: &str =
+    "versed known done made aware suited placed informed enough worth over within
+below above past behind ahead off read bred educated dressed behaved might may";
+/// Words ending in "ly" that aren't adverbs of manner or degree.
+const NOT_LY: [&str; 5] = ["only", "early", "really", "family", "likely"];
 
 /// The spelling and punctuation features of a word.
-const SPELLING: [&str; 18] = [
+const SPELLING: [&str; 20] = [
     "hes",
     "comma",
     "end",
@@ -94,10 +121,15 @@ const SPELLING: [&str; 18] = [
     "hes_um",
     "plural_hes",
     "quoted",
+    "ly",
+    "edge",
 ];
-/// Whether a word equals the word k places on (`same_k`), or is a proper prefix of it
-/// (`pre_k`), with how far ahead each looks.
-const MATCHES: [(&str, i32); 8] = [
+/// How far the guards of a finished utterance read.
+const FAR: i32 = 10;
+/// Whether a word equals the word k places on (`same_k`, up to [`FAR`]), or is a proper prefix
+/// of it (`pre_k`, up to 3), with how far ahead each looks. In a stream the guards read `same4`
+/// and up only at words before them.
+const MATCHES: [(&str, i32); 13] = [
     ("same1", 1),
     ("same2", 2),
     ("same3", 3),
@@ -106,6 +138,11 @@ const MATCHES: [(&str, i32); 8] = [
     ("pre3", 3),
     ("same4", 4),
     ("same5", 5),
+    ("same6", 6),
+    ("same7", 7),
+    ("same8", 8),
+    ("same9", 9),
+    ("same10", 10),
 ];
 
 /// The word classes, by feature name.
@@ -163,6 +200,13 @@ fn classes() -> &'static Vec<(String, HashSet<String>)> {
             ("neg".into(), set(&[NEGATION])),
             ("unitname".into(), set(&[UNIT_NAMES])),
             ("phrase_tail".into(), set(&[PHRASE_TAILS])),
+            ("and_or".into(), set(&["and or"])),
+            ("so_prev".into(), set(&[SO_PREV])),
+            ("so_next".into(), set(&[SO_NEXT])),
+            ("so_pphrase".into(), set(&[SO_PHRASE_PREV])),
+            ("sent_adverb".into(), set(&[SENTENCE_ADVERBS])),
+            ("well_prev".into(), set(&[WELL_PREV])),
+            ("well_next".into(), set(&[WELL_NEXT])),
         ];
         for w in WORD_FLAGS.split_whitespace() {
             out.push((format!("w_{w}"), set(&[w])));
@@ -188,6 +232,8 @@ pub(super) struct Network {
     index: HashMap<String, usize>,
     pub(super) look: Vec<i32>,
     pub(super) layers: Vec<Vec<Unit>>,
+    /// How far ahead a unit may look.
+    look_limit: i32,
 }
 
 /// An input of a unit, the word `offset` places on and the feature's name.
@@ -200,6 +246,7 @@ impl Network {
             index: HashMap::new(),
             look: Vec::new(),
             layers: Vec::new(),
+            look_limit: LOOK,
         };
         for &(name, look) in base {
             network.push(name, look);
@@ -254,7 +301,7 @@ impl Network {
         let look = (need.iter().chain(any).chain(block))
             .map(|&(o, f)| o + self.look[self.feature(f)])
             .fold(0, i32::max);
-        assert!(look <= LOOK, "{name} looks {look} words ahead");
+        assert!(look <= self.look_limit, "{name} looks {look} words ahead");
         let mut inputs = Vec::new();
         for (list, weight) in [(need, 1.0), (any, 1.0), (block, -3.0)] {
             inputs.extend(list.iter().map(|&(o, f)| (o, self.feature(f), weight)));
@@ -388,6 +435,13 @@ fn base(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
                 ["um", "uh", "er", "erm", "ah", "hm"].contains(&squeezed.as_str())
                     || (squeezed == "m" && rest.len() >= 2),
             ),
+            // An adverb of manner or degree ("extraordinarily").
+            (
+                "ly",
+                a.ends_with("ly") && length > 4 && !NOT_LY.contains(&a.as_str()),
+            ),
+            // A clause's end, as one flag, since the two can hold together.
+            ("edge", end || i + 1 == n),
         ];
         for (name, on) in pairs {
             if on {
@@ -402,9 +456,9 @@ fn base(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
                 set(name);
             }
         }
-        // Matches with the words 1 to 5 places on.
+        // Matches with the words 1 to FAR places on.
         let chars: Vec<char> = a.chars().collect();
-        for k in 1..=5 {
+        for k in 1..=FAR as usize {
             let Some(b) = norms.get(i + k) else { break };
             if !a.is_empty() && a == b {
                 set(&format!("same{k}"));
@@ -976,239 +1030,393 @@ fn hand_written_network() -> &'static (Network, Vec<(usize, &'static str)>) {
     })
 }
 
-/// The guards' network and their features and kinds.
-fn guard_network() -> &'static (Network, Vec<(usize, &'static str)>) {
-    static NETWORK: OnceLock<(Network, Vec<(usize, &'static str)>)> = OnceLock::new();
-    NETWORK.get_or_init(|| {
-        let mut s = Network::new(&[("del", 0)]);
-        let mut g = Vec::new();
-        // A spoken symbol, or a word next to one ("dash dash force dash push").
-        s.unit(
-            &mut g,
-            "g_symbol",
-            "symbol",
-            &[],
-            &[(0, "symbol"), (-1, "symbol"), (1, "symbol")],
-            &[],
-            Some(0.0),
-        );
-        // A short token after digits ("5 mm", "3 d"), or a unit name after a spelled-out number.
-        s.unit(
-            &mut g,
-            "g_unit",
-            "unit",
-            &[(-1, "digits"), (0, "short3")],
-            &[],
-            &[(0, "hes_um"), (0, "known"), (0, "same1"), (-1, "del")],
-            None,
-        );
-        s.unit(
-            &mut g,
-            "g_unit_name",
-            "unit",
-            &[(-1, "numeric"), (0, "unitname")],
-            &[],
-            &[(0, "same1"), (-1, "del")],
-            None,
-        );
-        // A filler talked about as a word ("delete ums"), or a quoted word.
-        s.unit(
-            &mut g,
-            "g_mention",
-            "mention",
-            &[],
-            &[(0, "plural_hes"), (0, "quoted")],
-            &[],
-            Some(0.0),
-        );
-        // List items of two or three words whose first word starts the next item too ("cleaner
-        // build, cleaner layout"), with no marker, "like" or hesitation in them.
-        let lead = |o| [(o, "marker"), (o, "backch"), (o, "w_like"), (o, "hes")];
-        let block: Vec<Input> = lead(0)
-            .into_iter()
-            .chain([(1, "hes"), (1, "same2"), (1, "phrase_tail")])
-            .collect();
-        s.unit(
-            &mut g,
-            "g_list_2a",
-            "list",
-            &[(0, "bare"), (0, "same2"), (1, "comma")],
-            &[],
-            &block,
-            None,
-        );
-        let block: Vec<Input> = lead(-1)
-            .into_iter()
-            .chain([(0, "hes"), (0, "same2"), (0, "phrase_tail")])
-            .collect();
-        s.unit(
-            &mut g,
-            "g_list_2b",
-            "list",
-            &[(0, "comma"), (-1, "same2")],
-            &[],
-            &block,
-            None,
-        );
-        let block: Vec<Input> = lead(0)
-            .into_iter()
-            .chain([(1, "punct"), (1, "hes"), (2, "hes")])
-            .collect();
-        s.unit(
-            &mut g,
-            "g_list_3a",
-            "list",
-            &[(0, "bare"), (0, "same3"), (2, "comma")],
-            &[],
-            &block,
-            None,
-        );
-        let block: Vec<Input> = lead(-1)
-            .into_iter()
-            .chain([(0, "punct"), (0, "hes"), (1, "hes")])
-            .collect();
-        s.unit(
-            &mut g,
-            "g_list_3b",
-            "list",
-            &[(-1, "same3"), (1, "comma")],
-            &[],
-            &block,
-            None,
-        );
-        let block: Vec<Input> = lead(-2)
-            .into_iter()
-            .chain([(-1, "punct"), (-1, "hes"), (0, "hes")])
-            .collect();
-        s.unit(
-            &mut g,
-            "g_list_3c",
-            "list",
-            &[(0, "comma"), (-2, "same3")],
-            &[],
-            &block,
-            None,
-        );
-        // A cut of one to three words with a subject pronoun two before it, one kept word
-        // between, and the same pronoun right after it ("we just [need to] we need to").
-        for l in 1..=3i32 {
-            let around = format!("same{}", l + 2);
-            let first_copy = format!("same{l}");
-            let mut need: Vec<Input> = (0..l).map(|o| (o, "del")).collect();
-            need.extend([(-2, "subj"), (-2, around.as_str())]);
-            let mut block: Vec<Input> = vec![
+/// How far the guards read, three words ahead in a stream, or ten over a finished utterance,
+/// where a list guard also sees a third item further on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reach {
+    Stream,
+    Utterance,
+}
+
+type GuardNetwork = (Network, Vec<(usize, &'static str)>);
+
+/// The guards' network for `reach`, and their features and kinds.
+fn guard_network(reach: Reach) -> &'static GuardNetwork {
+    static STREAM: OnceLock<GuardNetwork> = OnceLock::new();
+    static UTTERANCE: OnceLock<GuardNetwork> = OnceLock::new();
+    match reach {
+        Reach::Stream => STREAM.get_or_init(|| build_guards(reach)),
+        Reach::Utterance => UTTERANCE.get_or_init(|| build_guards(reach)),
+    }
+}
+
+fn build_guards(reach: Reach) -> GuardNetwork {
+    let mut s = Network::new(&[("del", 0)]);
+    if reach == Reach::Utterance {
+        s.look_limit = FAR;
+    }
+    let mut g = Vec::new();
+    // A spoken symbol, or a word next to one ("dash dash force dash push").
+    s.unit(
+        &mut g,
+        "g_symbol",
+        "symbol",
+        &[],
+        &[(0, "symbol"), (-1, "symbol"), (1, "symbol")],
+        &[],
+        Some(0.0),
+    );
+    // A short token after digits ("5 mm", "3 d"), or a unit name after a spelled-out number.
+    s.unit(
+        &mut g,
+        "g_unit",
+        "unit",
+        &[(-1, "digits"), (0, "short3")],
+        &[],
+        &[(0, "hes_um"), (0, "known"), (0, "same1"), (-1, "del")],
+        None,
+    );
+    s.unit(
+        &mut g,
+        "g_unit_name",
+        "unit",
+        &[(-1, "numeric"), (0, "unitname")],
+        &[],
+        &[(0, "same1"), (-1, "del")],
+        None,
+    );
+    // A filler talked about as a word ("delete ums"), or a quoted word.
+    s.unit(
+        &mut g,
+        "g_mention",
+        "mention",
+        &[],
+        &[(0, "plural_hes"), (0, "quoted")],
+        &[],
+        Some(0.0),
+    );
+    // A list's items of two words whose first word starts the next item too, when a third item
+    // follows ("cleaner build, cleaner layout, cleaner tests") or an "and" or "or" comes before
+    // the second ("the red, or the blue"), with no marker, "like" or hesitation in them. Two items
+    // alone are a restart's shape ("X Y, X W").
+    let lead = |o| [(o, "marker"), (o, "backch"), (o, "w_like"), (o, "hes")];
+    let with = |first: [Input<'static>; 4], more: &[Input<'static>]| -> Vec<Input<'static>> {
+        first.into_iter().chain(more.iter().copied()).collect()
+    };
+    s.unit(
+        &mut g,
+        "g_list_2a",
+        "list",
+        &[(0, "bare"), (0, "same2"), (1, "comma"), (3, "comma")],
+        &[],
+        &with(
+            lead(0),
+            &[(1, "hes"), (1, "same2"), (1, "phrase_tail"), (3, "end")],
+        ),
+        None,
+    );
+    s.unit(
+        &mut g,
+        "g_list_2b",
+        "list",
+        &[(0, "comma"), (-1, "same2"), (2, "comma")],
+        &[],
+        &with(
+            lead(-1),
+            &[(0, "hes"), (0, "same2"), (0, "phrase_tail"), (2, "end")],
+        ),
+        None,
+    );
+    s.unit(
+        &mut g,
+        "g_list_and_a",
+        "list",
+        &[(0, "bare"), (0, "same3"), (1, "comma"), (2, "and_or")],
+        &[],
+        &with(lead(0), &[(1, "hes"), (1, "phrase_tail")]),
+        None,
+    );
+    s.unit(
+        &mut g,
+        "g_list_and_b",
+        "list",
+        &[(0, "comma"), (-1, "same3"), (1, "and_or")],
+        &[],
+        &with(lead(-1), &[(0, "hes"), (0, "phrase_tail")]),
+        None,
+    );
+    // "so" in its own sense, as a degree word or a phrase's start ("so strong", "so that"), as
+    // a pro-form at a clause's end ("I think so", "it was so", "extraordinarily so"), after
+    // "or", "if" or "even", and in "so it is". "well" in its own sense, after "as", "very" or
+    // "did", and before "versed", "enough" or "done". A trailing "so" after a comma or a noun,
+    // and a sentence-opening one before a clause, stay fillers.
+    let sense: [(&str, &[Input], &[Input]); 8] = [
+        (
+            "g_so_degree",
+            &[(0, "w_so"), (1, "so_next")],
+            &[(0, "punct")],
+        ),
+        (
+            "g_so_degree_ly",
+            &[(0, "w_so"), (1, "ly")],
+            &[(0, "punct"), (1, "sent_adverb")],
+        ),
+        (
+            "g_so_proform",
+            &[(0, "w_so"), (-1, "so_prev"), (0, "edge")],
+            &[(-1, "punct"), (-1, "del"), (0, "comma")],
+        ),
+        (
+            "g_so_proform_ly",
+            &[(0, "w_so"), (-1, "ly"), (0, "edge")],
+            &[
+                (-1, "punct"),
                 (-1, "del"),
-                (l, "del"),
-                (-2, "del"),
-                (0, "hes"),
-                (0, "short3"),
-                (0, first_copy.as_str()),
-            ];
-            if l <= 2 {
-                block.push((-1, around.as_str()));
-            }
+                (0, "comma"),
+                (-1, "sent_adverb"),
+            ],
+        ),
+        (
+            "g_so_phrase_prev",
+            &[(0, "w_so"), (-1, "so_pphrase")],
+            &[(-1, "punct"), (-1, "del")],
+        ),
+        (
+            "g_so_it_is",
+            &[(0, "w_so"), (1, "w_it"), (2, "aux"), (2, "punct")],
+            &[],
+        ),
+        (
+            "g_well_prev",
+            &[(0, "w_well"), (-1, "well_prev")],
+            &[(-1, "punct"), (-1, "del")],
+        ),
+        (
+            "g_well_next",
+            &[(0, "w_well"), (1, "well_next")],
+            &[(0, "punct")],
+        ),
+    ];
+    for (name, need, block) in sense {
+        s.unit(&mut g, name, "sense", need, &[], block, None);
+    }
+    // A cut of one to three words with a subject pronoun two before it, one kept word
+    // between, and the same pronoun right after it ("we just [need to] we need to").
+    for l in 1..=3i32 {
+        let around = format!("same{}", l + 2);
+        let first_copy = format!("same{l}");
+        let mut need: Vec<Input> = (0..l).map(|o| (o, "del")).collect();
+        need.extend([(-2, "subj"), (-2, around.as_str())]);
+        let mut block: Vec<Input> = vec![
+            (-1, "del"),
+            (l, "del"),
+            (-2, "del"),
+            (0, "hes"),
+            (0, "short3"),
+            (0, first_copy.as_str()),
+        ];
+        if l <= 2 {
+            block.push((-1, around.as_str()));
+        }
+        s.unit(
+            &mut g,
+            &format!("g_str_subj_{l}"),
+            "straddle",
+            &need,
+            &[],
+            &block,
+            None,
+        );
+    }
+    // Parallel and contrasting phrases: a one-word content cut whose frame comes back right
+    // after it, with or without a negation, or a lone cut word that returns three on.
+    let content = [
+        (0, "hes"),
+        (0, "short3"),
+        (0, "func"),
+        (0, "w_like"),
+        (0, "marker"),
+        (0, "backch"),
+        (0, "neg"),
+    ];
+    let with = |more: &[Input<'static>]| -> Vec<Input<'static>> {
+        content
+            .iter()
+            .copied()
+            .chain(more.iter().copied())
+            .collect()
+    };
+    s.unit(
+        &mut g,
+        "g_par_frame2",
+        "parallel",
+        &[(0, "del"), (-2, "same3"), (-1, "same3")],
+        &[],
+        &with(&[
+            (-2, "del"),
+            (-1, "del"),
+            (1, "del"),
+            (-1, "hes"),
+            (-2, "hes"),
+        ]),
+        None,
+    );
+    s.unit(
+        &mut g,
+        "g_par_lead",
+        "parallel",
+        &[(0, "del"), (0, "same3")],
+        &[],
+        &with(&[(1, "del"), (2, "del"), (3, "del"), (1, "hes"), (2, "hes")]),
+        None,
+    );
+    s.unit(
+        &mut g,
+        "g_con_frame2",
+        "contrast",
+        &[(0, "del"), (-2, "same3"), (-1, "same3"), (3, "neg")],
+        &[],
+        &with(&[(-2, "del"), (-1, "del"), (1, "del")]),
+        None,
+    );
+    s.unit(
+        &mut g,
+        "g_con_frame1",
+        "contrast",
+        &[(0, "del"), (-1, "same2"), (2, "neg")],
+        &[],
+        &with(&[(-1, "del"), (1, "del"), (-1, "hes")]),
+        None,
+    );
+    s.close(g);
+    // The straddle veto reaches the later words of the cut.
+    let mut h = Vec::new();
+    let any: Vec<Input> = [("g_str_subj_1"), ("g_str_subj_2"), ("g_str_subj_3")]
+        .iter()
+        .map(|&u| (0, u))
+        .collect();
+    s.unit(&mut h, "g_str_any", "", &[], &any, &[], Some(0.0));
+    s.close(h);
+    let mut r = Vec::new();
+    s.unit(
+        &mut r,
+        "g_str_run1",
+        "straddle",
+        &[(0, "del"), (-1, "del"), (-1, "g_str_any")],
+        &[],
+        &[(0, "hes")],
+        None,
+    );
+    s.unit(
+        &mut r,
+        "g_str_run2",
+        "straddle",
+        &[(0, "del"), (-1, "del"), (-2, "del"), (-2, "g_str_any")],
+        &[],
+        &[(0, "hes")],
+        None,
+    );
+    s.close(r);
+    if reach == Reach::Utterance {
+        far_lists(&mut s);
+    }
+    let outputs = s.outputs();
+    (s, outputs)
+}
+
+/// The guard of a finished utterance for a list read as a restart. A comma-ended item of two or
+/// three words whose lead word starts the next item too is kept when a third item with the same
+/// lead word follows within [`FAR`] words, right after a comma or an "and" or "or", or when an
+/// "and" or "or" comes before the second item.
+fn far_lists(s: &mut Network) {
+    let mut f1 = Vec::new();
+    let any: [Input; 2] = [(-1, "comma"), (-1, "and_or")];
+    s.unit(&mut f1, "item_start", "", &[], &any, &[], Some(0.0));
+    s.close(f1);
+    let first: [Input; 4] = [(0, "marker"), (0, "backch"), (0, "w_like"), (0, "hes")];
+    let same = |k: i32| format!("same{k}");
+    let names: Vec<String> = (1..=FAR).map(same).collect();
+    let same = |k: i32| names[k as usize - 1].as_str();
+    let mut f2 = Vec::new();
+    for l in [2i32, 3] {
+        let mut item: Vec<Input> = (0..l - 1).map(|m| (m, "bare")).collect();
+        item.push((l - 1, "comma"));
+        let mut block: Vec<Input> = first.to_vec();
+        block.extend((1..l).map(|m| (m, "hes")));
+        if l == 2 {
+            block.extend([(1, "same2"), (1, "phrase_tail")]);
+        }
+        for k in l + 1..=FAR {
+            let mut need = item.clone();
+            need.extend([(0, same(l)), (0, same(k)), (k, "item_start")]);
             s.unit(
-                &mut g,
-                &format!("g_str_subj_{l}"),
-                "straddle",
+                &mut f2,
+                &format!("f_third_{l}_{k}"),
+                "",
                 &need,
                 &[],
                 &block,
                 None,
             );
         }
-        // Parallel and contrasting phrases: a one-word content cut whose frame comes back right
-        // after it, with or without a negation, or a lone cut word that returns three on.
-        let content = [
-            (0, "hes"),
-            (0, "short3"),
-            (0, "func"),
-            (0, "w_like"),
-            (0, "marker"),
-            (0, "backch"),
-            (0, "neg"),
-        ];
-        let with = |more: &[Input<'static>]| -> Vec<Input<'static>> {
-            content
-                .iter()
-                .copied()
-                .chain(more.iter().copied())
-                .collect()
-        };
+        let mut need = item.clone();
+        need.extend([(0, same(l + 1)), (l, "and_or")]);
         s.unit(
-            &mut g,
-            "g_par_frame2",
-            "parallel",
-            &[(0, "del"), (-2, "same3"), (-1, "same3")],
+            &mut f2,
+            &format!("f_andor_{l}"),
+            "",
+            &need,
             &[],
-            &with(&[
-                (-2, "del"),
-                (-1, "del"),
-                (1, "del"),
-                (-1, "hes"),
-                (-2, "hes"),
-            ]),
+            &block,
             None,
         );
-        s.unit(
-            &mut g,
-            "g_par_lead",
-            "parallel",
-            &[(0, "del"), (0, "same3")],
-            &[],
-            &with(&[(1, "del"), (2, "del"), (3, "del"), (1, "hes"), (2, "hes")]),
-            None,
-        );
-        s.unit(
-            &mut g,
-            "g_con_frame2",
-            "contrast",
-            &[(0, "del"), (-2, "same3"), (-1, "same3"), (3, "neg")],
-            &[],
-            &with(&[(-2, "del"), (-1, "del"), (1, "del")]),
-            None,
-        );
-        s.unit(
-            &mut g,
-            "g_con_frame1",
-            "contrast",
-            &[(0, "del"), (-1, "same2"), (2, "neg")],
-            &[],
-            &with(&[(-1, "del"), (1, "del"), (-1, "hes")]),
-            None,
-        );
-        s.close(g);
-        // The straddle veto reaches the later words of the cut.
-        let mut h = Vec::new();
-        let any: Vec<Input> = [("g_str_subj_1"), ("g_str_subj_2"), ("g_str_subj_3")]
-            .iter()
-            .map(|&u| (0, u))
+    }
+    s.close(f2);
+    let mut f3 = Vec::new();
+    for l in [2i32, 3] {
+        let ors: Vec<String> = (l + 1..=FAR)
+            .map(|k| format!("f_third_{l}_{k}"))
+            .chain([format!("f_andor_{l}")])
             .collect();
-        s.unit(&mut h, "g_str_any", "", &[], &any, &[], Some(0.0));
-        s.close(h);
-        let mut r = Vec::new();
+        let any: Vec<Input> = ors.iter().map(|n| (0, n.as_str())).collect();
         s.unit(
-            &mut r,
-            "g_str_run1",
-            "straddle",
-            &[(0, "del"), (-1, "del"), (-1, "g_str_any")],
+            &mut f3,
+            &format!("f_far_{l}"),
+            "",
             &[],
-            &[(0, "hes")],
+            &any,
+            &[],
+            Some(0.0),
+        );
+    }
+    s.close(f3);
+    let mut f4 = Vec::new();
+    for l in [2i32, 3] {
+        let far = format!("f_far_{l}");
+        let lead = format!("g_far_lead_{l}");
+        s.unit(
+            &mut f4,
+            &lead,
+            "list_far",
+            &[(0, far.as_str())],
+            &[],
+            &[],
             None,
         );
-        s.unit(
-            &mut r,
-            "g_str_run2",
-            "straddle",
-            &[(0, "del"), (-1, "del"), (-2, "del"), (-2, "g_str_any")],
-            &[],
-            &[(0, "hes")],
-            None,
-        );
-        s.close(r);
-        let outputs = s.outputs();
-        (s, outputs)
-    })
+        for m in 1..l {
+            let name = format!("g_far_word_{l}_{m}");
+            s.unit(
+                &mut f4,
+                &name,
+                "list_far",
+                &[(-m, far.as_str())],
+                &[],
+                &[],
+                None,
+            );
+        }
+    }
+    s.close(f4);
 }
 
 /// For each of `words`, the kind of the hand-written cleanup's first detector that deletes it ("H",
@@ -1226,9 +1434,9 @@ pub(crate) fn hand_written(words: &[&str]) -> Vec<Option<&'static str>> {
 }
 
 /// For each of `words`, the kinds of guard that veto its deletion, `deleted` being any stage's
-/// deletions. A word that isn't deleted has none.
-pub(crate) fn vetoes(words: &[&str], deleted: &[bool]) -> Vec<Vec<&'static str>> {
-    let (network, guards) = guard_network();
+/// deletions, with the guards of `reach`. A word that isn't deleted has none.
+pub(crate) fn vetoes(words: &[&str], deleted: &[bool], reach: Reach) -> Vec<Vec<&'static str>> {
+    let (network, guards) = guard_network(reach);
     let mut z = base(network, words);
     let del = network.feature("del");
     for (row, &d) in z.iter_mut().zip(deleted) {
@@ -1277,19 +1485,34 @@ mod tests {
     }
 
     #[test]
-    fn the_networks_look_three_words_ahead_at_most() {
-        for (network, _) in [hand_written_network(), guard_network()] {
+    fn the_networks_look_as_far_ahead_as_their_reach() {
+        let stream = guard_network(Reach::Stream);
+        for (network, _) in [hand_written_network(), stream] {
             assert!(network.layers.iter().flatten().all(|u| u.look <= LOOK));
         }
+        let (utterance, guards) = guard_network(Reach::Utterance);
+        assert!(utterance.layers.iter().flatten().all(|u| u.look <= FAR));
+        // The utterance's guards are the stream's and the list guard that reads further.
+        let kinds = |guards: &[(usize, &'static str)]| {
+            let mut kinds: Vec<&str> = guards.iter().map(|&(_, k)| k).collect();
+            kinds.sort_unstable();
+            kinds.dedup();
+            kinds
+        };
+        let mut far = kinds(&stream.1);
+        far.push("list_far");
+        far.sort_unstable();
+        assert_eq!(kinds(guards), far);
+    }
+
+    fn veto(text: &str, deleted: &[usize], reach: Reach) -> Vec<Vec<&'static str>> {
+        let words: Vec<&str> = text.split(' ').collect();
+        let mask: Vec<bool> = (0..words.len()).map(|i| deleted.contains(&i)).collect();
+        vetoes(&words, &mask, reach)
     }
 
     #[test]
     fn guards_veto_deletions_that_change_the_meaning() {
-        let veto = |text: &str, deleted: &[usize]| {
-            let words: Vec<&str> = text.split(' ').collect();
-            let mask: Vec<bool> = (0..words.len()).map(|i| deleted.contains(&i)).collect();
-            vetoes(&words, &mask)
-        };
         for (text, deleted, kept, kind) in [
             ("Dash dash force dash push", &[2][..], &[2][..], "symbol"),
             ("Dash dash force dash push", &[1], &[1], "symbol"),
@@ -1302,7 +1525,7 @@ mod tests {
                 "mention",
             ),
             (
-                "set up like a cleaner build, cleaner layout for that one screen, cleaner tests around it",
+                "set up like a cleaner build, cleaner layout, cleaner tests around it",
                 &[4, 5],
                 &[4, 5],
                 "list",
@@ -1332,10 +1555,29 @@ mod tests {
                 &[0],
                 "parallel",
             ),
+            ("the coffee is so strong today", &[3], &[3], "sense"),
+            ("I think so.", &[2], &[2], "sense"),
+            ("is that so?", &[2], &[2], "sense"),
+            ("it was extraordinarily so", &[3], &[3], "sense"),
+            ("so long as the coffin is in the house", &[0], &[0], "sense"),
+            ("So saying, he mounted his horse", &[0], &[0], "sense"),
+            ("So it is, said Anders.", &[0], &[0], "sense"),
+            ("He is well versed in the theory", &[2], &[2], "sense"),
+            ("that works well enough for me", &[2], &[2], "sense"),
+            ("we could do that as well", &[5], &[5], "sense"),
+            (
+                "a cleaner build, cleaner layout, cleaner tests",
+                &[1, 2],
+                &[1, 2],
+                "list",
+            ),
+            ("the red, or the blue is fine", &[0, 1], &[0, 1], "list"),
         ] {
-            let got = veto(text, deleted);
-            for &i in kept {
-                assert!(got[i].contains(&kind), "{text:?} word {i}: {:?}", got[i]);
+            for reach in [Reach::Stream, Reach::Utterance] {
+                let got = veto(text, deleted, reach);
+                for &i in kept {
+                    assert!(got[i].contains(&kind), "{text:?} word {i}: {:?}", got[i]);
+                }
             }
         }
         for (text, deleted) in [
@@ -1349,8 +1591,121 @@ mod tests {
             ("I mean, I suppose it would", &[0, 1]),
             ("do you wan do you wanna finish", &[2]),
             ("twenty s functions of a remote", &[1]),
+            ("So, I think we should stop.", &[0]),
+            ("we have forty minutes, so.", &[4]),
+            ("Well, we need a smaller button.", &[0]),
+            (
+                "if he used its power so need, power so recklessly",
+                &[3, 4, 5],
+            ),
+            ("the red thing, the blue thing is better", &[0, 1]),
+            ("euro I mean that's um.", &[4]),
+            ("Uh so basically it was fine", &[1]),
         ] {
-            assert!(veto(text, deleted).iter().all(Vec::is_empty), "{text:?}");
+            for reach in [Reach::Stream, Reach::Utterance] {
+                let got = veto(text, deleted, reach);
+                assert!(got.iter().all(Vec::is_empty), "{text:?} {reach:?}");
+            }
         }
+    }
+
+    #[test]
+    fn a_finished_utterance_keeps_a_list_whose_third_item_comes_later() {
+        // The words kept at the end of an utterance and in a stream.
+        for (text, deleted, far, near) in [
+            (
+                "set up like a cleaner build, cleaner layout for that one screen, cleaner tests around it",
+                &[4, 5][..],
+                &[4, 5][..],
+                &[][..],
+            ),
+            (
+                "a cleaner build, cleaner layout, cleaner tests",
+                &[1, 2],
+                &[1, 2],
+                &[1, 2],
+            ),
+            (
+                "a cleaner build, and cleaner tests",
+                &[1, 2],
+                &[1, 2],
+                &[1, 2],
+            ),
+            (
+                "we want a cleaner build, cleaner layout for that screen",
+                &[3, 4],
+                &[],
+                &[],
+            ),
+            (
+                "if he used its power so need, power so recklessly",
+                &[3, 4, 5],
+                &[],
+                &[],
+            ),
+            (
+                "the red thing, the blue thing is better",
+                &[0, 1, 2],
+                &[],
+                &[],
+            ),
+            (
+                "the red thing, the blue thing, the green thing",
+                &[0, 1, 2],
+                &[0, 1, 2],
+                &[],
+            ),
+        ] {
+            let kept = |reach, kind| -> Vec<usize> {
+                let got = veto(text, deleted, reach);
+                (deleted.iter().copied())
+                    .filter(|&i| got[i].contains(&kind))
+                    .collect()
+            };
+            assert_eq!(kept(Reach::Utterance, "list_far"), far, "{text:?}");
+            assert_eq!(kept(Reach::Stream, "list"), near, "{text:?}");
+        }
+    }
+
+    /// The guards against net.py's `guarded` and `guarded_utterance` on rows that each hold a
+    /// text's `words`, a `deleted` mask and both results, `stream` and `utterance`.
+    ///
+    /// ```text
+    /// GUARDS_REFERENCE=rows.jsonl cargo test --release --lib guards_match -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "needs GUARDS_REFERENCE"]
+    fn guards_match_the_reference() {
+        let path = std::env::var("GUARDS_REFERENCE").expect("GUARDS_REFERENCE names the rows");
+        let text = std::fs::read_to_string(path).unwrap();
+        let (mut rows, mut same) = (0, [0, 0]);
+        for line in text.lines() {
+            let row = crate::json::parse(line.as_bytes()).unwrap();
+            let list = |key: &str| row.get(key).and_then(|v| v.as_array()).unwrap();
+            let words: Vec<&str> = list("words").iter().map(|w| w.as_str().unwrap()).collect();
+            let flags = |key: &str| -> Vec<bool> {
+                list(key).iter().map(|f| f.as_bool().unwrap()).collect()
+            };
+            let deleted = flags("deleted");
+            for (k, (reach, key)) in [(Reach::Stream, "stream"), (Reach::Utterance, "utterance")]
+                .into_iter()
+                .enumerate()
+            {
+                let got: Vec<bool> = (vetoes(&words, &deleted, reach).iter().zip(&deleted))
+                    .map(|(kinds, &d)| d && kinds.is_empty())
+                    .collect();
+                if got == flags(key) {
+                    same[k] += 1;
+                } else {
+                    eprintln!("{key} differs on {words:?}");
+                }
+            }
+            rows += 1;
+        }
+        eprintln!(
+            "{rows} rows, stream equal on {}, utterance on {}",
+            same[0], same[1]
+        );
+        assert_eq!(same, [rows, rows]);
     }
 }

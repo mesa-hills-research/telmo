@@ -876,10 +876,12 @@ impl Compiled {
     }
 
     /// The edits of `texts`, the words after a text that can't change, whose `context` this is.
-    /// They delete the tagger's disfluencies when `whole` is an utterance and the fillers
-    /// otherwise, keep what the guards protect, then fix capitals and punctuation.
+    /// When `whole` is a finished utterance or transcript, they delete the tagger's disfluencies
+    /// and the guards read ten words ahead. A stream's text so far loses only its fillers, and
+    /// the guards read three. Then capitals and punctuation are fixed.
     pub fn edits(&self, context: &Context, texts: &[&str], whole: bool) -> Vec<Edit> {
-        let guards = self.guards.as_ref();
+        let guards = (self.guards).map(|g| if whole { g } else { g.streamed() });
+        let guards = guards.as_ref();
         let protected = &self.protected;
         // With the punctuation rules on, they decide every comma.
         let pause_commas = self.punctuation.is_none();

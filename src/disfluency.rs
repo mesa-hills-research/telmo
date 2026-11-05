@@ -51,6 +51,7 @@ use crate::source::Source;
 use crate::threads::Pool;
 use encoder::{Member, Runner};
 use punctuation::Hold;
+use units::Reach;
 
 /// The model name of a tagger's pack.
 pub const PACK_MODEL: &str = "disfluency-tagger";
@@ -267,20 +268,31 @@ impl std::fmt::Debug for Tagger {
 /// Rules that keep a word any stage of the cleanup, the fillers' included, would take where
 /// dictation needs it. They keep a spoken symbol and the words beside it ("dash dash force
 /// dash push"), a short unit after a number ("5 mm"), a filler talked about as a word ("delete
-/// ums") or a quoted word, list items that share their first word ("cleaner build, cleaner
-/// layout"), a cut that would leave a broken repeat ("we just need to uh we need to"), and a
-/// phrase said again in parallel or in contrast ("what they prefer what they not prefer"). They
-/// read at most three words ahead.
+/// ums") or a quoted word, the items of a list ("cleaner build, cleaner layout, cleaner tests"),
+/// a cut that would leave a broken repeat ("we just need to uh we need to"), a phrase said again
+/// in parallel or in contrast ("what they prefer what they not prefer"), and "so" and "well" in
+/// their own sense ("I think so", "as well"). Over a finished utterance they read up to ten words
+/// ahead, so they also keep a list whose third item comes later, and in a stream's text so far
+/// at most three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Guards {
-    _english: (),
+    reach: Reach,
 }
 
 impl Guards {
     /// The guards of a language given as an ISO 639-1 code, with or without a region, or none
     /// if Telmo has none for it. English is the only one so far.
     pub fn for_language(code: &str) -> Option<Guards> {
-        Fillers::for_language(code).map(|_| Guards { _english: () })
+        Fillers::for_language(code).map(|_| Guards {
+            reach: Reach::Utterance,
+        })
+    }
+
+    /// The same guards for a stream's text so far, reading at most three words ahead.
+    pub(crate) fn streamed(self) -> Guards {
+        Guards {
+            reach: Reach::Stream,
+        }
     }
 
     /// Which of the `deleted` words of `words`, a whole utterance, these guards keep.
@@ -290,7 +302,7 @@ impl Guards {
     /// If `deleted` and `words` differ in length.
     pub fn veto(&self, words: &[&str], deleted: &[bool]) -> Vec<bool> {
         assert_eq!(words.len(), deleted.len(), "a deletion for each word");
-        (units::vetoes(words, deleted).iter())
+        (units::vetoes(words, deleted, self.reach).iter())
             .map(|kinds| !kinds.is_empty())
             .collect()
     }
