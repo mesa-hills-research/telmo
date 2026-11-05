@@ -531,11 +531,12 @@ fn quoted(mut open: [bool; 2], parts: &[(&str, &str, &str)]) -> Vec<bool> {
 /// Opens the quotes that a word with punctuation `lead` and `trail` around its letters `core`
 /// opens, and gives the kinds it closes after it. An opening mark is one before the letters, or a
 /// mark standing alone with no quote of its kind open, except a straight single mark or ’, which a
-/// recognizer writes alone as noise and typography never opens a quote with. An apostrophe right before an elision
-/// ("'cause") or a contraction's ending written apart ("we 'll") belongs to the word instead, and
-/// a straight or right single mark there is taken for one. Other marks, such as ‘ and ‹, are only
-/// ever quote marks. A closing mark is one after the letters, or standing alone, with a quote of
-/// its kind open, so a closing mark with no quote open ("uh'", "students'") does nothing.
+/// recognizer writes alone as noise and typography never opens a quote with. An apostrophe right
+/// before an elision ("'cause") or a contraction's ending written apart ("we 'll") belongs to the
+/// word instead, and a straight or right single mark there is taken for one. Other marks, such as
+/// ‘ and ‹, are only ever quote marks. A closing mark is one after the letters, or standing alone,
+/// with a quote of its kind open, so a closing mark with no quote open ("uh'", "students'") does
+/// nothing.
 fn quote_marks(open: &mut [bool; 2], lead: &str, core: &str, trail: &str) -> [bool; 2] {
     let lead = match lead.strip_suffix(APOSTROPHES) {
         Some(rest) if ELIDED.contains(&core.to_lowercase().as_str()) => rest,
