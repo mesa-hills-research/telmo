@@ -60,19 +60,13 @@ pub(crate) const REPEATED: [&str; 35] = [
 
 const SENTENCE_END: [char; 3] = ['.', '?', '!'];
 
-/// Words that can't end a phrase, so a comma after one before a removed hesitation set off by
-/// commas is the pause's. They're the words of [`REPEATED`], the prepositions, "to", the
-/// auxiliaries and modals, and the determiners other than "no", which is mostly an interjection.
-/// An auxiliary can end a clause ("Yes we can, um, so"), but that's rare in dictation.
-const PHRASE_GOES_ON: [&str; 90] = [
-    "a", "an", "the", "and", "or", "but", "i", "my", "our", "your", "their", "we", "they", "he",
-    "she", "it's", "that's", "there's", "what's", "let's", "i'm", "we're", "they're", "you're",
-    "he's", "she's", "i've", "we've", "they've", "you've", "i'll", "we'll", "they'll", "you'll",
-    "it'll", "to", "of", "in", "on", "at", "for", "with", "from", "by", "about", "into", "onto",
-    "than", "as", "like", "over", "under", "after", "before", "through", "without", "between",
-    "is", "are", "was", "were", "be", "been", "am", "can", "could", "should", "would", "will",
-    "might", "must", "may", "do", "does", "did", "have", "has", "had", "shall", "this", "that",
-    "these", "those", "some", "any", "each", "every", "its", "his", "her",
+/// Words that never end a phrase, so a comma after one before a removed hesitation set off by
+/// commas is the pause's. They're the articles, the possessive determiners and the three
+/// coordinating conjunctions. A pronoun, a preposition or an auxiliary can end one when the
+/// speaker starts over ("Do we, um, is it necessary?", "fond of, um, you could"), and then the
+/// comma marks the break.
+const PHRASE_GOES_ON: [&str; 11] = [
+    "a", "an", "the", "my", "our", "your", "their", "its", "and", "or", "but",
 ];
 
 /// Quote marks. A quoted word is a mention rather than a filler, and a mark between two copies
@@ -711,18 +705,11 @@ mod tests {
         for (text, want) in [
             ("click the, uh, little arrow", "click the little arrow"),
             (
-                "I'd like you to, um, explain it",
-                "I'd like you to explain it",
-            ),
-            (
                 "It builds but, hmm, fails in CI",
                 "It builds but fails in CI",
             ),
-            (
-                "The tests take about, erm, four minutes",
-                "The tests take about four minutes",
-            ),
-            ("It is, uh, the third one", "It is the third one"),
+            ("Open your, um, settings file", "Open your settings file"),
+            ("Use the cache or, uh, rebuild", "Use the cache or rebuild"),
             // A comma after a word that can end a phrase marks a boundary, and stays.
             (
                 "That test is flaky, hmm, probably",
@@ -731,6 +718,22 @@ mod tests {
             ("Thank you, um, you saved me", "Thank you, you saved me"),
             ("No, um, the other file", "No, the other file"),
             ("Okay, hmm, so the first step", "Okay, so the first step"),
+            // A speaker who starts over leaves a pronoun, a discourse marker or a preposition
+            // before the break, and a model writes the comma there.
+            ("Do we, um, is it necessary?", "Do we, is it necessary?"),
+            ("Like, um, if you can", "Like, if you can"),
+            (
+                "and just be like, uh, why is there",
+                "and just be like, why is there",
+            ),
+            (
+                "not particularly fond of, um, you could",
+                "not particularly fond of, you could",
+            ),
+            (
+                "with teletext or without, uh, when it really",
+                "with teletext or without, when it really",
+            ),
             // Only a hesitation set off by commas on both sides takes the comma before it.
             ("click the, uh little arrow", "click the, little arrow"),
             ("the, uh. Then", "the. Then"),

@@ -32,12 +32,12 @@ exclamation mark between the copies keeps both.
 
 Punctuation on a removed word goes with it, except a sentence end, which moves to the word
 before ("We go there um. And then" becomes "We go there. And then"). A hesitation set off by
-commas takes the comma before it too when the word before can't end a phrase ("click the, uh,
-little arrow" becomes "click the little arrow"). Those words are the second row's, the
-prepositions, "to", the auxiliaries and modals, and the determiners other than "no". After any
-other word the comma marks a boundary and stays ("Okay, um, so" becomes "Okay, so"). When the
-removed word had a capital at the start of a sentence, the next word takes it if it's in lower
-case ("Um, so I think" becomes "So I think"). Other words keep their spelling.
+commas takes the comma before it too when the word before never ends a phrase ("click the, uh,
+little arrow" becomes "click the little arrow"). Those words are a, an, the, my, our, your,
+their, its, and, or and but. After any other word the comma marks a boundary and stays ("Okay,
+um, so" becomes "Okay, so", and "Do we, um, is it necessary?" becomes "Do we, is it
+necessary?"). When the removed word had a capital at the start of a sentence, the next word takes
+it if it's in lower case ("Um, so I think" becomes "So I think"). Other words keep their spelling.
 
 ## What stays
 
