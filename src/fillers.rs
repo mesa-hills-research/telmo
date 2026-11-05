@@ -26,11 +26,13 @@
 //!
 //! Punctuation on a removed word goes with it, except a sentence end, which moves to the word
 //! before ("We go there um. And then" becomes "We go there. And then"). A hesitation set off by
-//! commas takes the comma before it too when the word before can't end a phrase, such as "the",
-//! "to" or "is" ("click the, uh, little arrow" becomes "click the little arrow"), since that comma
-//! marks the pause. After a word that can end one the comma stays ("Okay, um, so" becomes "Okay,
-//! so"). When the removed word had a capital at the start of a sentence, the next word takes it if
-//! it's in lower case and isn't a special word ("Um, so I think" becomes "So I think").
+//! commas takes the comma before it too when the word before never ends a phrase, which is a, an,
+//! the, my, our, your, their, its, and, or and but ("click the, uh, little arrow" becomes "click
+//! the little arrow"), since that comma marks the pause. After any other word the comma stays
+//! ("Okay, um, so" becomes "Okay, so", and "Do we, um, is it necessary?" becomes "Do we, is it
+//! necessary?"). When the removed word had a capital at the start of a sentence, the next word
+//! takes it if it's in lower case and isn't a special word ("Um, so I think" becomes "So I
+//! think").
 
 use std::collections::HashMap;
 use std::ops::Range;
