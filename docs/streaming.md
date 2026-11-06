@@ -68,7 +68,13 @@ stream.finish()?;
    Where the sentence goes on, the next utterance's first word takes the case the model gave it
    there when the model wrote the same word, passing over hesitations before it, so "Sometimes"
    after "because" becomes "sometimes". Only the mark and the case change, and the words are the
-   ones the passes settled. After a longer pause the mark goes when the next words start with a
+   ones the passes settled. A restart overrides what the model heard: when the next utterance's
+   first words say the last words before the pause again, after a hesitation or an editing word
+   if any ("we should ship it, I guess. | Well, I guess we should"), the sentence goes on. A
+   comma then marks the pause, and with a tagger the copy and the words before it go instead
+   ("we should ship it, I guess we should"). A copy counts only where the clause was cut short, so
+   "the budget. | The budget is" and echoes such as "Okay. | Okay" keep their sentence ends. After
+   a longer pause the mark goes when the next words start with a
    comma or a lower-case word that joins words, such as "and", "rather", "of" or "which", and stays
    otherwise. Either way, a new sentence's first word gets a capital where the model wrote it in
    lower case. Streamed, the text at short pauses then had the mark and the case right this often.

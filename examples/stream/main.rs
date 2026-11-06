@@ -20,8 +20,8 @@
 //! text, how many tentative words were replaced before settling, the word error rate of the
 //! streamed text and of offline transcription of the same audio, and the CPU used. With
 //! `--fillers` the stream leaves out English fillers, and with `--disfluencies` a tagger's
-//! disfluencies, fillers included, and it reports the tentative words that vanish when their
-//! utterance ends.
+//! disfluencies, fillers included (`hand` for the hand-written tagger, or a pack's path), and it
+//! reports the tentative words that vanish when their utterance ends.
 
 #[path = "../wer/basic.rs"]
 #[allow(dead_code)]
@@ -298,12 +298,18 @@ fn run(args: &[String]) -> Result<(), String> {
     config.input_rate = input_rate;
     let model = Arc::new(Model::load(model_path, &options).map_err(|e| e.to_string())?);
     if let Some(path) = &tagger_path {
-        let tagger = Tagger::load(path, &options).map_err(|e| e.to_string())?;
-        eprintln!(
-            "Disfluency tagger of {} members with {} weights",
-            tagger.members(),
-            tagger.precision().map_or("mixed", |p| p.name())
-        );
+        let tagger = if path == Path::new("hand") {
+            eprintln!("Hand-written disfluency tagger");
+            Tagger::hand_written()
+        } else {
+            let tagger = Tagger::load(path, &options).map_err(|e| e.to_string())?;
+            eprintln!(
+                "Disfluency tagger of {} members with {} weights",
+                tagger.members(),
+                tagger.precision().map_or("mixed", |p| p.name())
+            );
+            tagger
+        };
         words.set_disfluencies(Some(Arc::new(tagger)));
     }
     eprintln!(

@@ -30,6 +30,7 @@
 mod bpe;
 mod encoder;
 mod punctuation;
+mod restart;
 mod rules;
 mod units;
 
@@ -51,6 +52,7 @@ use crate::source::Source;
 use crate::threads::Pool;
 use encoder::{Member, Runner};
 use punctuation::Hold;
+pub(crate) use restart::{HEAD as RESTART_HEAD, restart, without_restart};
 use units::Reach;
 
 /// The model name of a tagger's pack.

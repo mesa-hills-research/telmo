@@ -124,8 +124,8 @@ const SPELLING: [&str; 20] = [
     "ly",
     "edge",
 ];
-/// How far the guards of a finished utterance read.
-const FAR: i32 = 10;
+/// How far the guards of a finished utterance read, and the restart detectors.
+pub(super) const FAR: i32 = 10;
 /// Whether a word equals the word k places on (`same_k`, up to [`FAR`]), or is a proper prefix
 /// of it (`pre_k`, up to 3), with how far ahead each looks. In a stream the guards read `same4`
 /// and up only at words before them.
@@ -233,7 +233,7 @@ pub(super) struct Network {
     pub(super) look: Vec<i32>,
     pub(super) layers: Vec<Vec<Unit>>,
     /// How far ahead a unit may look.
-    look_limit: i32,
+    pub(super) look_limit: i32,
 }
 
 /// An input of a unit, the word `offset` places on and the feature's name.
@@ -255,7 +255,7 @@ impl Network {
     }
 
     /// A network over each word's spelling, classes and matches, and `extra`.
-    fn new(extra: &[(&str, i32)]) -> Network {
+    pub(super) fn new(extra: &[(&str, i32)]) -> Network {
         let mut network = Network::with_base(&[]);
         let lengths: Vec<String> = (1..=MAXP + 1).map(|l| format!("len{l}")).collect();
         let classes = classes().iter().map(|(name, _)| name.as_str());
@@ -371,7 +371,7 @@ fn runs(word: &str) -> String {
 }
 
 /// The features of each word that no unit computes, as `network` indexes them.
-fn base(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
+pub(super) fn base(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
     let n = words.len();
     let width = network.look.len() - network.layers.iter().map(Vec::len).sum::<usize>();
     let norms: Vec<String> = words.iter().map(|w| rules::norm(w)).collect();

@@ -304,30 +304,58 @@ fn granite_streams_a_session_with_special_words() {
 /// quietest 10 ms between them and the next word as offline transcription places them, and
 /// returns the settled text.
 fn split_by_a_pause(var: &str, clip: &str, before: &str) -> String {
+    split_by_a_pause_with(var, var, clip, before, None, None)
+}
+
+/// [`split_by_a_pause`] with the words placed by the model `timing` names (Granite's CTC
+/// frames fall at the words' starts, where Parakeet's come late in a word) and special `words`
+/// set on the stream. With `again`, the audio after the pause starts over from the word after
+/// `again`, so the words from there to the pause are said twice ("...and he recalled the | he
+/// recalled the words").
+fn split_by_a_pause_with(
+    var: &str,
+    timing: &str,
+    clip: &str,
+    before: &str,
+    again: Option<&str>,
+    words: Option<&SpecialWords>,
+) -> String {
     let model = Arc::new(model(var));
     let (_, samples) = clips().into_iter().find(|(id, _)| id == clip).unwrap();
-    let tokens = model.transcribe(&samples).unwrap().tokens;
-    let tok = model.tokenizer();
+    let timing = if timing == var {
+        model.clone()
+    } else {
+        Arc::new(self::model(timing))
+    };
+    let tokens = timing.transcribe(&samples).unwrap().tokens;
+    let tok = timing.tokenizer();
     let ids: Vec<u32> = tokens.iter().map(|t| t.id).collect();
-    let at = (1..tokens.len())
-        .find(|&i| {
-            (tok.decode(&ids[..i]).trim_end().to_lowercase()).ends_with(&before.to_lowercase())
-        })
-        .expect("the words are heard");
-    let frame = 1280;
-    let from = (tokens[at - 1].frame + tokens[at - 1].duration.max(1)) as usize * frame;
-    let to = (tokens[at].frame as usize + 1) * frame;
-    let quietest = (from..to.max(from + 160).min(samples.len() - 160))
-        .step_by(160)
-        .min_by(|&a, &b| {
-            let energy = |s: usize| samples[s..s + 160].iter().map(|x| x * x).sum::<f32>();
-            energy(a).total_cmp(&energy(b))
-        })
-        .unwrap();
+    let token_after = |text: &str| {
+        (1..tokens.len())
+            .find(|&i| {
+                (tok.decode(&ids[..i]).trim_end().to_lowercase()).ends_with(&text.to_lowercase())
+            })
+            .expect("the words are heard")
+    };
+    // The quietest 10 ms between the token before `at` and `at`.
+    let quietest_before = |at: usize| {
+        let frame = 1280;
+        let from = (tokens[at - 1].frame + tokens[at - 1].duration.max(1)) as usize * frame;
+        let to = (tokens[at].frame as usize + 1) * frame;
+        (from..to.max(from + 160).min(samples.len() - 160))
+            .step_by(160)
+            .min_by(|&a, &b| {
+                let energy = |s: usize| samples[s..s + 160].iter().map(|x| x * x).sum::<f32>();
+                energy(a).total_cmp(&energy(b))
+            })
+            .unwrap()
+    };
+    let quietest = quietest_before(token_after(before));
+    let resume = again.map_or(quietest, |again| quietest_before(token_after(again)));
     let mut audio = vec![0f32; SAMPLE_RATE / 2];
     audio.extend_from_slice(&samples[..quietest]);
     audio.extend(std::iter::repeat_n(0.0, SAMPLE_RATE));
-    audio.extend_from_slice(&samples[quietest..]);
+    audio.extend_from_slice(&samples[resume..]);
     audio.extend(std::iter::repeat_n(0.0, SAMPLE_RATE));
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     for s in &mut audio {
@@ -337,6 +365,9 @@ fn split_by_a_pause(var: &str, clip: &str, before: &str) -> String {
         *s += ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.002;
     }
     let mut streamer = Streamer::new(model, StreamConfig::default());
+    if let Some(words) = words {
+        streamer.set_special_words(words);
+    }
     let mut events = Vec::new();
     for piece in audio.chunks(SAMPLE_RATE / 2) {
         events.extend(streamer.push(piece));
@@ -389,6 +420,51 @@ fn parakeet_keeps_a_sentence_going_across_a_short_pause() {
     // "Find some Cresswells there. Big plantations, rated at two hundred and fifty thousand ..."
     let text = split_by_a_pause("PARAKEET_TDT_DIR", "clean-1995-1826-0007", "plantations,");
     assert!(goes_on(&text, "plantations", "rated"), "{text}");
+}
+
+/// Special words that leave out the hand-written cleanup's disfluencies.
+fn hand_written_cleanup() -> SpecialWords {
+    let mut words = SpecialWords::new();
+    words.set_disfluencies(Some(Arc::new(telmo::disfluency::Tagger::hand_written())));
+    words
+}
+
+/// Words said again after a short pause are a restart. The sentence goes on, and with the
+/// cleanup the copy goes.
+fn check_restart_across_a_short_pause(var: &str) {
+    // "... and he recalled the | he recalled the words, the words of Shelley's fragment ..."
+    let (clip, timing) = ("clean-joined-40s", "GRANITE_SPEECH_DIR");
+    let text = split_by_a_pause_with(var, timing, clip, "recalled the", Some("nearer, and"), None);
+    assert!(
+        goes_on(&text, "recalled the", "he recalled the words"),
+        "{text}"
+    );
+    let cleanup = hand_written_cleanup();
+    let text = split_by_a_pause_with(
+        var,
+        timing,
+        clip,
+        "recalled the",
+        Some("nearer, and"),
+        Some(&cleanup),
+    );
+    let lower = text.to_lowercase();
+    assert!(
+        lower.contains("and he recalled the words") && lower.matches("recalled").count() == 1,
+        "{text}"
+    );
+}
+
+#[test]
+#[ignore = "needs the model files"]
+fn granite_cuts_a_restart_across_a_short_pause() {
+    check_restart_across_a_short_pause("GRANITE_SPEECH_DIR");
+}
+
+#[test]
+#[ignore = "needs the model files"]
+fn parakeet_cuts_a_restart_across_a_short_pause() {
+    check_restart_across_a_short_pause("PARAKEET_TDT_DIR");
 }
 
 /// Granite's probability of a sentence end at this pause spliced into read speech is 0.06 to
