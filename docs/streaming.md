@@ -67,22 +67,23 @@ stream.finish()?;
    as many pauses right as 0.0003, the best value on the same meetings' pauses decoded offline.
    Where the sentence goes on, the next utterance's first word takes the case the model gave it
    there when the model wrote the same word, passing over hesitations before it, so "Sometimes"
-   after "because" becomes "sometimes". Only the mark and the case change, and the words are the
-   ones the passes settled. A restart overrides what the model heard: when the next utterance's
-   first words say the last words before the pause again, after a hesitation or an editing word
-   if any ("we should ship it, I guess. | Well, I guess we should"), the sentence goes on. A
-   comma then marks the pause, and with a tagger the copy and the words before it go instead
-   ("we should ship it, I guess we should"). A copy counts only where the clause was cut short, so
-   "the budget. | The budget is" and echoes such as "Okay. | Okay" keep their sentence ends. After
-   a longer pause the mark goes when the next words start with a
-   comma or a lower-case word that joins words, such as "and", "rather", "of" or "which", and stays
-   otherwise. Either way, a new sentence's first word gets a capital where the model wrote it in
-   lower case. Streamed, the text at short pauses then had the mark and the case right this often.
+   after "because" becomes "sometimes". After a longer pause the mark goes when the next words
+   start with a comma or a lower-case word that joins words, such as "and", "rather", "of" or
+   "which", and stays otherwise. Either way, a new sentence's first word gets a capital where the
+   model wrote it in lower case. Unless the speaker starts over, only the mark and the case
+   change, and the words are the ones the passes settled. After a pause of any length, when the
+   next utterance's first words say the last words before the pause again, after a hesitation or
+   an editing word if any ("we should ship it, I guess.", then "Well, I guess we should"), the
+   sentence goes on, whatever the model heard. A comma marks the pause, and with a tagger the copy
+   and the words before it go instead ("we should ship it, I guess we should"). A copy counts only
+   where the clause was cut short, so "the budget.", then "The budget is", and echoes such as
+   "Okay.", then "Okay", keep their sentence ends. Streamed, the text at short pauses then had the
+   mark and the case right this often.
 
    | | Granite, before | Granite, after | Parakeet, before | Parakeet, after |
    |---|---:|---:|---:|---:|
-   | 47 AMI windows, pauses AMI's punctuation places (140, 128) | 50.0% | 63.6% | 68.8% | 77.3% |
-   | IS1009's turns joined with pauses (246, 59) | 78.9% | 81.3% | 83.1% | 84.7% |
+   | 47 AMI windows, pauses AMI's punctuation places (140, 128) | 50.0% | 65.0% | 68.8% | 76.6% |
+   | IS1009's turns joined with pauses (246, 59) | 78.9% | 80.5% | 83.1% | 84.7% |
 
 `Streamer` is the same machinery without the thread, for callers that decide themselves when
 passes run.

@@ -112,12 +112,14 @@ far with its fillers left out, and the last pass settles the cleaned text. That 
 pass per utterance, after its last pass.
 
 With a tagger, each utterance is cleaned on its own, without the words before it, so a repeat
-split across two utterances ("fix the", then "the login page") stays. The filler rules alone read
-across them. The one exception is a restart at a pause of up to 2 s, where the utterance starts
-by saying the last words before the pause again, after a hesitation or an editing word if any
-("we need to, I guess.", then "well, I guess we need to"). The stream sees both sides there, so
-the copy and the words before it go, and the sentence goes on ("we need to, I guess we need to").
-[Streaming](streaming.md) says how the pause is decided.
+split across two utterances ("fix the login", then "login page") stays. The filler rules alone
+read across them. The one exception is a restart, where an utterance starts by saying the last
+words before the pause again, after a hesitation or an editing word if any ("we need to, I
+guess.", then "well, I guess we need to"). The stream sees both sides there, so the copy and the
+words before it go, and the sentence goes on ("we need to, I guess we need to"). They stay, with
+a comma before them, when they start a special word or follow a "no", which takes back more than
+the copy. A list with neither fillers nor a tagger keeps every word of a restart, with a comma
+where the pause was. [Streaming](streaming.md) says how the pause is decided.
 
 Without a tagger, words settle as the stream goes. The guards and the punctuation rules look up to
 three words ahead, so a word can settle before the words that would change their decision come,

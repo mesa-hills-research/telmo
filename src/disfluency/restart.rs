@@ -1,6 +1,6 @@
-//! Whether the words after a short pause start again what the words before it ended with, by a
+//! Whether the words after a pause start again what the words before it ended with, by a
 //! network of hand-set units over the junction's words, as the cleanup's own are built. A
-//! restart says the tail's last word, or its last two or three, again at the head's start, after
+//! restart says the tail's last word, or its last two to four, again at the head's start, after
 //! a hesitation, a marker or an editing word if any ("we should ship it, I guess, | well, I guess
 //! we should"). A copy after a real sentence end is an echo instead, a backchannel or an answer
 //! said twice ("Mm-hmm. | Mm-hmm."), a number or a question said back ("Why not? | Why not?"),
@@ -14,6 +14,9 @@ use super::units::{self, FAR, Input, Network};
 
 /// Words that edit what was just said. One may stand between the two copies or close the tail.
 const EDITING: &str = "well sorry actually rather like no or basically";
+/// Editing words that also join a clause, so a copy may end with one ("this or | or that", "I
+/// feel like | I feel like we").
+const EDITING_OR_JOINING: [&str; 2] = ["or", "like"];
 /// Two-word editing phrases, as (first, second).
 const EDITING_PAIRS: [(&str, &str); 2] = [("i", "mean"), ("you", "know")];
 /// Words after which a clause can't end, so one said again after a pause is a restart on its
@@ -35,9 +38,14 @@ pub(crate) struct Restart {
     /// How many of the head's words say the tail's last words again, the words between the
     /// copies included.
     pub(crate) words: usize,
-    /// Whether an editing word closed the tail ("I guess, well, | I guess"). The tail is settled,
-    /// so the copy in the head had better stay, or the editing word is left hanging.
-    pub(crate) edited_tail: bool,
+    /// Whether the copy in the head stays, with a comma before it, even where a tagger would cut
+    /// it. An editing word that closed the tail ("I guess, well, | I guess") is settled, and
+    /// would be left hanging. And after a "no" between the copies the speaker takes back more
+    /// than the copy.
+    pub(crate) keeps_copy: bool,
+    /// Whether the head's first word is a hesitation, a marker, an editing word or a function
+    /// word, which takes lower case once the sentence goes on. A name keeps its capital.
+    pub(crate) lower_first: bool,
 }
 
 /// The detectors, each as its feature and the copy's length and the words between the copies.
@@ -71,8 +79,8 @@ fn network() -> &'static (Network, Detectors) {
             &[],
             Some(0.0),
         );
-        // A word that is echoed rather than restarted: a backchannel, an answer, a marker or
-        // a number.
+        // A word that is echoed rather than restarted, such as a backchannel, an answer, a
+        // marker or a number.
         s.unit(
             &mut a,
             "echo",
@@ -108,12 +116,15 @@ fn network() -> &'static (Network, Detectors) {
                 need.extend((0..g).map(|k| ((l + k) as i32, skip)));
                 need.push((l as i32 - 1, if l == 1 { "one_word" } else { "open" }));
                 // No copy of a question or an echoed word, none that ends a sentence itself
-                // ("a two. | A two."), and no sentence end among the words between, where a
-                // new sentence starts ("how do I, uh | No, no, no. I pressed").
+                // ("a two. | A two.") or has a sentence end inside ("it's done. We | Done. We
+                // can"), and no sentence end among the words between, where a new sentence
+                // starts ("how do I, uh | No, no, no. I pressed").
                 let mut block: Vec<Input> =
                     vec![(l as i32 - 1, "quest"), ((2 * l + g) as i32 - 1, "end")];
                 block.extend((0..l).map(|j| (j as i32, "echo")));
                 block.extend((0..g).map(|k| ((l + k) as i32, "end")));
+                block.extend((0..l - 1).map(|j| (j as i32, "end")));
+                block.extend((0..l - 1).map(|j| ((l + g + j) as i32, "end")));
                 let name = format!("copy{l}_{g}");
                 s.unit(&mut b, &name, "restart", &need, &[], &block, None);
                 names.push((name, l, g));
@@ -151,9 +162,9 @@ fn is_skippable(words: &[&str], i: usize) -> bool {
 }
 
 /// The restart at a pause, if the first words after it, `head`, say the last words of the text
-/// before it, `previous`, again. `mark` is the sentence end that closed the text, if one did.
-/// Hesitations and editing words at the text's end aren't its last words.
-pub(crate) fn restart(previous: &str, mark: Option<char>, head: &[&str]) -> Option<Restart> {
+/// before it, `previous`, again. Hesitations and editing words at the text's end aren't its last
+/// words, unless the copy ends with one that also joins a clause ("this or | or that").
+pub(crate) fn restart(previous: &str, head: &[&str]) -> Option<Restart> {
     let mut tail: Vec<&str> = previous.split_whitespace().collect();
     let mut edited_tail = false;
     while let Some(&last) = tail.last() {
@@ -162,7 +173,14 @@ pub(crate) fn restart(previous: &str, mark: Option<char>, head: &[&str]) -> Opti
         let pair = EDITING_PAIRS.iter().find(|&&(_, second)| word == second);
         if word.is_empty() || rules::is_hesitation(last) {
             tail.pop();
-        } else if is_editing(&word) {
+            continue;
+        }
+        if EDITING_OR_JOINING.contains(&word.as_str())
+            && let Some(found) = copy(&tail, head, edited_tail)
+        {
+            return Some(found);
+        }
+        if is_editing(&word) {
             edited_tail = true;
             tail.pop();
         } else if let Some(&(first, _)) = pair
@@ -175,6 +193,12 @@ pub(crate) fn restart(previous: &str, mark: Option<char>, head: &[&str]) -> Opti
             break;
         }
     }
+    copy(&tail, head, edited_tail)
+}
+
+/// The restart whose copy ends with `tail`'s last word, if `head` says it again. `edited_tail`
+/// is whether an editing word closed the text after `tail`.
+fn copy(tail: &[&str], head: &[&str], edited_tail: bool) -> Option<Restart> {
     if tail.is_empty() || head.is_empty() {
         return None;
     }
@@ -203,22 +227,30 @@ pub(crate) fn restart(previous: &str, mark: Option<char>, head: &[&str]) -> Opti
         }
     }
     z[n - 1][tail_last] = 1.0;
-    if mark == Some('?')
-        || words[n - 1]
-            .trim_end_matches(['"', '\'', ')'])
-            .ends_with('?')
+    // The text keeps the mark that closed it.
+    if words[n - 1]
+        .trim_end_matches(['"', '\'', ')'])
+        .ends_with('?')
     {
         z[n - 1][quest] = 1.0;
     }
+    let lower_first = is_skippable(&words, n)
+        || units::has_class("func", &rules::norm(words[n]))
+        || z[n][one_word] > 0.5;
     let z = network.run(z);
     // The longest copy, and of those the one with the fewest words between.
-    (detectors.iter())
+    let (l, g) = (detectors.iter())
         .filter(|&&(f, l, _)| l <= n && z[n - l][f] > 0.5)
         .max_by_key(|&&(_, l, g)| (l, BETWEEN - g))
-        .map(|&(_, l, g)| Restart {
-            words: l + g,
-            edited_tail,
-        })
+        .map(|&(_, l, g)| (l, g))?;
+    // After "no" the speaker takes back more than the copy ("how do I, uh | no, no, I pressed"),
+    // so cutting the copy would join the words before it to the new ones.
+    let rejected = head[..g].iter().any(|w| rules::norm(w) == "no");
+    Some(Restart {
+        words: l + g,
+        keeps_copy: edited_tail || rejected,
+        lower_first,
+    })
 }
 
 /// `text`, an utterance's cleaned words, without the words at its start that are `restart`'s,
@@ -252,7 +284,12 @@ mod tests {
 
     fn at(previous: &str, head: &str) -> Option<usize> {
         let head: Vec<&str> = head.split_whitespace().collect();
-        restart(previous, Some('.'), &head).map(|r| r.words)
+        restart(previous, &head).map(|r| r.words)
+    }
+
+    fn found(previous: &str, head: &str) -> Option<Restart> {
+        let head: Vec<&str> = head.split_whitespace().collect();
+        restart(previous, &head)
     }
 
     #[test]
@@ -289,6 +326,7 @@ mod tests {
             None
         );
         assert_eq!(at("we have red", "Red and yellow"), None);
+        assert_eq!(at("fix the login", "login page"), None);
         assert_eq!(at("I'll do it", "It should work"), None);
         // Echoes of backchannels, answers, markers and numbers.
         assert_eq!(at("okay", "Okay, so the next slide"), None);
@@ -307,11 +345,13 @@ mod tests {
             ),
             None
         );
-        let head: Vec<&str> = "Why not? Let's hope".split_whitespace().collect();
         assert_eq!(
-            restart("options should be, why not", Some('?'), &head),
+            at("options should be, why not?", "Why not? Let's hope"),
             None
         );
+        // A sentence end inside either copy.
+        assert_eq!(at("it's done. We", "done, we can go"), None);
+        assert_eq!(at("it's done, we", "Done. We can go"), None);
         // Nothing to copy.
         assert_eq!(at("", "we can"), None);
         assert_eq!(at("we can", ""), None);
@@ -320,23 +360,68 @@ mod tests {
 
     #[test]
     fn an_editing_word_that_closed_the_tail_is_passed_over_and_reported() {
-        let head: Vec<&str> = "I guess we should".split_whitespace().collect();
-        assert_eq!(
-            restart("we should ship it, I guess, well", Some('.'), &head),
+        let head = "I guess we should";
+        let restart = |words, keeps_copy| {
             Some(Restart {
-                words: 2,
-                edited_tail: true,
+                words,
+                keeps_copy,
+                lower_first: true,
             })
+        };
+        assert_eq!(
+            found("we should ship it, I guess, well", head),
+            restart(2, true)
         );
         assert_eq!(
-            restart("we should ship it, I guess, um", Some('.'), &head),
-            Some(Restart {
-                words: 2,
-                edited_tail: false,
-            })
+            found("we should ship it, I guess, um", head),
+            restart(2, false)
+        );
+        assert_eq!(
+            found("we should ship it, I guess, or", head),
+            restart(2, true)
         );
         // A marker closing the tail is one of its words.
-        assert_eq!(restart("I guess, so", Some('.'), &head), None);
+        assert_eq!(found("I guess, so", head), None);
+        // "or" and "like" also join a clause, so a copy may end with one.
+        assert_eq!(
+            found("it works with or", "with or without it"),
+            restart(2, false)
+        );
+        assert_eq!(
+            found("I feel like", "I feel like we should"),
+            restart(3, false)
+        );
+    }
+
+    #[test]
+    fn a_no_between_the_copies_keeps_the_copy() {
+        // "how do I" was taken back, so a cut would leave "how do I pressed the".
+        let r = found("how do I, uh", "No, no, no, I pressed the");
+        assert_eq!(r.map(|r| (r.words, r.keeps_copy)), Some((4, true)));
+        let r = found("leave it on the, um", "no, the other shelf");
+        assert_eq!(r.map(|r| (r.words, r.keeps_copy)), Some((2, true)));
+        let r = found("leave it on the, um", "well, the other shelf");
+        assert_eq!(r.map(|r| (r.words, r.keeps_copy)), Some((2, false)));
+    }
+
+    #[test]
+    fn only_a_function_word_or_an_editing_word_first_takes_lower_case() {
+        let first = |previous, head| found(previous, head).map(|r| r.lower_first);
+        assert_eq!(
+            first("we should ship it, I guess", "Well, I guess we"),
+            Some(true)
+        );
+        assert_eq!(first("up to the", "The, um, the retailer"), Some(true));
+        assert_eq!(first("so we can", "Um, we can go"), Some(true));
+        // A name or a day that starts the copy keeps its capital.
+        assert_eq!(
+            first("let's meet on Monday at", "Monday at noon."),
+            Some(false)
+        );
+        assert_eq!(
+            first("we asked Priya and", "Priya and Tom said"),
+            Some(false)
+        );
     }
 
     #[test]
