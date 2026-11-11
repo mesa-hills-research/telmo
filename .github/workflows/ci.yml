@@ -1,0 +1,19 @@
+name: CI
+on:
+  pull_request:
+  push:
+
+jobs:
+  test:
+    name: Tests on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # The crate's rust-version, so lints added in later releases don't fail the build.
+      - run: rustup toolchain install 1.97 --profile minimal --component clippy && rustup default 1.97
+      - run: cargo test --no-fail-fast
+      - run: cargo clippy --all-targets -- -D warnings
