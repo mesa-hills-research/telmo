@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! cargo run --release --example stream -- sessions OUT_DIR LIST.tsv [--seconds 120] [--count 10] [--seed 1]
-//! cargo run --release --example stream -- run MODEL SESSIONS.tsv [--realtime] [--threads N] [--interval S] [--factor F] [--margin S] [--context S] [--input-rate HZ] [--piece-ms MS] [--basic] [--out DIR] [--limit N]
+//! cargo run --release --example stream -- run MODEL SESSIONS.tsv [--realtime] [--threads N] [--interval S] [--factor F] [--margin S] [--context S] [--input-rate HZ] [--piece-ms MS] [--basic] [--out DIR] [--limit N] [--fillers | --disfluencies TAGGER]
 //! ```
 //!
 //! `sessions` joins consecutive utterances of a list (`id<TAB>wav<TAB>text`, 16 kHz WAVs, the
@@ -18,7 +18,10 @@
 //! gives the same timing without waiting. It reports, over all utterances, the time from the
 //! onset of speech to the first tentative word, the time from the end of speech to the final
 //! text, how many tentative words were replaced before settling, the word error rate of the
-//! streamed text and of offline transcription of the same audio, and the CPU used.
+//! streamed text and of offline transcription of the same audio, and the CPU used. With
+//! `--fillers` the stream leaves out English fillers, and with `--disfluencies` a tagger's
+//! disfluencies, fillers included (`hand` for the hand-written tagger, or a pack's path), and it
+//! reports the tentative words that vanish when their utterance ends.
 
 #[path = "../wer/basic.rs"]
 #[allow(dead_code)]
@@ -35,8 +38,9 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use telmo::disfluency::Tagger;
 use telmo::stream::{Event, SAMPLE_RATE, Stream, StreamConfig, Streamer};
-use telmo::{Model, Options, Precision};
+use telmo::{Fillers, Model, Options, Precision, SpecialWords};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -210,12 +214,15 @@ struct Utterance {
     /// Seconds from the end of speech to the utterance's end, when all its words have settled. A
     /// sentence end that closes it settles later, with the next utterance's first words.
     words_settled: Option<f64>,
+    /// Tentative words shown last that its settled text left out.
+    vanished: usize,
 }
 
 #[derive(Default)]
 struct Totals {
     utterances: Vec<Utterance>,
     replaced: usize,
+    vanished: usize,
     settled_words: usize,
     streamed: score::Errors,
     offline: score::Errors,
@@ -239,6 +246,8 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut basic = false;
     let mut out: Option<PathBuf> = None;
     let mut limit = usize::MAX;
+    let mut words = SpecialWords::new();
+    let mut tagger_path: Option<PathBuf> = None;
     let mut positional = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -278,6 +287,8 @@ fn run(args: &[String]) -> Result<(), String> {
             "--piece-ms" => piece_ms = value()?.parse().map_err(|_| "--piece-ms takes a number")?,
             "--out" => out = Some(value()?.into()),
             "--limit" => limit = value()?.parse().map_err(|_| "--limit takes a number")?,
+            "--fillers" => words.set_fillers(Fillers::for_language("en")),
+            "--disfluencies" => tagger_path = Some(value()?.into()),
             _ => positional.push(PathBuf::from(arg)),
         }
     }
@@ -286,6 +297,21 @@ fn run(args: &[String]) -> Result<(), String> {
     };
     config.input_rate = input_rate;
     let model = Arc::new(Model::load(model_path, &options).map_err(|e| e.to_string())?);
+    if let Some(path) = &tagger_path {
+        let tagger = if path == Path::new("hand") {
+            eprintln!("Hand-written disfluency tagger");
+            Tagger::hand_written()
+        } else {
+            let tagger = Tagger::load(path, &options).map_err(|e| e.to_string())?;
+            eprintln!(
+                "Disfluency tagger of {} members with {} weights",
+                tagger.members(),
+                tagger.precision().map_or("mixed", |p| p.name())
+            );
+            tagger
+        };
+        words.set_disfluencies(Some(Arc::new(tagger)));
+    }
     eprintln!(
         "{} with {} weights, {} threads, passes at least {:.2} s and {:.1} times their length apart, {} input at {} Hz in {} ms pieces",
         model.name(),
@@ -316,9 +342,9 @@ fn run(args: &[String]) -> Result<(), String> {
         let piece = (input_rate as u64 * piece_ms / 1000) as usize;
         let cpu0 = cpu_seconds();
         let (events, stats) = if realtime {
-            replay_realtime(&model, &config, &audio, input_rate, piece)?
+            replay_realtime(&model, &config, &words, &audio, input_rate, piece)?
         } else {
-            replay_simulated(&model, &config, &audio, input_rate, piece)?
+            replay_simulated(&model, &config, &words, &audio, input_rate, piece)?
         };
         let cpu = cpu_seconds() - cpu0;
         let (text, utterances, replaced, settled_words) = summarize(&events);
@@ -396,6 +422,7 @@ fn run(args: &[String]) -> Result<(), String> {
             std::fs::write(dir.join(format!("{}.txt", session.id)), format!("{text}\n"))
                 .map_err(|e| e.to_string())?;
         }
+        totals.vanished += utterances.iter().map(|u| u.vanished).sum::<usize>();
         totals.utterances.extend(utterances);
         totals.replaced += replaced;
         totals.settled_words += settled_words;
@@ -418,6 +445,7 @@ fn run(args: &[String]) -> Result<(), String> {
 fn replay_realtime(
     model: &Arc<Model>,
     config: &StreamConfig,
+    words: &SpecialWords,
     audio: &[f32],
     rate: u32,
     piece: usize,
@@ -430,6 +458,7 @@ fn replay_realtime(
             .unwrap()
             .push((start.elapsed().as_secs_f64(), e));
     });
+    stream.set_special_words(words.clone());
     let mut fed = 0;
     for chunk in audio.chunks(piece) {
         fed += chunk.len();
@@ -456,11 +485,13 @@ fn replay_realtime(
 fn replay_simulated(
     model: &Arc<Model>,
     config: &StreamConfig,
+    words: &SpecialWords,
     audio: &[f32],
     rate: u32,
     piece: usize,
 ) -> Result<Replay, String> {
     let mut streamer = Streamer::new(model.clone(), config.clone());
+    streamer.set_special_words(words);
     let mut events: Vec<Timed> = Vec::new();
     let mut clock = 0.0f64;
     let mut fed = 0usize;
@@ -529,6 +560,9 @@ fn summarize(events: &[Timed]) -> (String, Vec<Utterance>, usize, usize) {
     let mut settled_since: Vec<String> = Vec::new();
     let mut replaced = 0;
     let mut settled_words = 0;
+    // Each utterance's last tentative words, and the words it settled since they were shown.
+    let mut last_shown: Vec<Vec<String>> = Vec::new();
+    let mut settled_after: Vec<Vec<String>> = Vec::new();
     let words = |t: &str| t.split_whitespace().map(String::from).collect::<Vec<_>>();
     let mut compare =
         |shown: &mut Vec<String>, settled_since: &mut Vec<String>, now: Vec<String>| {
@@ -549,6 +583,9 @@ fn summarize(events: &[Timed]) -> (String, Vec<Utterance>, usize, usize) {
                 utterances[i].onset = *at;
             }
             Event::Settled { utterance, text: s } => {
+                let i = *utterance as usize;
+                settled_after.resize(settled_after.len().max(i + 1), Vec::new());
+                settled_after[i].extend(words(s));
                 text.push_str(s);
                 settled_words += s.split_whitespace().count();
                 settled_since.extend(words(s));
@@ -557,6 +594,13 @@ fn summarize(events: &[Timed]) -> (String, Vec<Utterance>, usize, usize) {
                 }
             }
             Event::Tentative { utterance, text: s } => {
+                let i = *utterance as usize;
+                if !s.trim().is_empty() {
+                    last_shown.resize(last_shown.len().max(i + 1), Vec::new());
+                    last_shown[i] = words(s);
+                    settled_after.resize(settled_after.len().max(i + 1), Vec::new());
+                    settled_after[i].clear();
+                }
                 if let Some(u) = utterances.get_mut(*utterance as usize)
                     && !s.trim().is_empty()
                 {
@@ -570,8 +614,19 @@ fn summarize(events: &[Timed]) -> (String, Vec<Utterance>, usize, usize) {
                 ..
             } => {
                 compare(&mut shown, &mut settled_since, Vec::new());
-                if let Some(u) = utterances.get_mut(*utterance as usize) {
+                let i = *utterance as usize;
+                if let Some(u) = utterances.get_mut(i) {
                     u.words_settled = Some(t - speech_end);
+                    let mut left: Vec<&String> =
+                        settled_after.get(i).into_iter().flatten().collect();
+                    for w in last_shown.get(i).into_iter().flatten() {
+                        match left.iter().position(|l| *l == w) {
+                            Some(k) => {
+                                left.remove(k);
+                            }
+                            None => u.vanished += 1,
+                        }
+                    }
                 }
             }
         }
@@ -646,6 +701,11 @@ fn report(t: &Totals) {
         "words settled after the end of speech: median {:.2} s, 90th percentile {:.2} s",
         median(&last),
         quantile(&last, 0.9)
+    );
+    println!(
+        "tentative words that vanished when their utterance ended: {} ({:.1} per 100 settled words)",
+        t.vanished,
+        100.0 * t.vanished as f64 / t.settled_words.max(1) as f64
     );
     println!(
         "tentative words replaced before settling: {} per 100 settled words",

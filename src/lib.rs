@@ -31,6 +31,7 @@
 //! [`Options::isa`] or the `TELMO_ISA` environment variable names others.
 
 pub mod biasing;
+pub mod disfluency;
 pub mod error;
 pub mod features;
 pub mod fft;
@@ -46,6 +47,7 @@ pub mod pack;
 pub mod parakeet;
 pub mod quant;
 pub mod region;
+mod remote_file;
 pub mod resample;
 pub mod safetensors;
 pub mod source;
@@ -63,3 +65,4 @@ pub use granite_stream::GraniteStream;
 pub use model::Model;
 pub use parakeet::{Options, Parakeet, Transcript};
 pub use quant::Precision;
+pub use remote_file::RemoteFile;

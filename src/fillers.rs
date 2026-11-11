@@ -38,6 +38,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::biasing::SpecialWords;
+use crate::disfluency::Guards;
 use crate::tokenizer::Tokenizer;
 
 /// The fillers of one language that a transcript can leave out, as the [module](self)
@@ -109,6 +110,16 @@ pub(crate) struct Context {
 }
 
 impl Context {
+    /// The text's last word, with its punctuation.
+    pub(crate) fn last(&self) -> Option<&str> {
+        self.last.as_deref()
+    }
+
+    /// Its last words, without their punctuation, as many as a spelling can go on from.
+    pub(crate) fn tail(&self) -> &[String] {
+        &self.tail
+    }
+
     /// The context of `text`.
     pub fn after(text: &str) -> Context {
         let mut context = Context::default();
@@ -241,8 +252,13 @@ impl Fillers {
     pub fn remove(&self, text: &str) -> String {
         let words: Vec<&str> = text.split_whitespace().collect();
         let edits = self.plan(&Context::default(), &words, &Protected::default());
+        Fillers::text(&words, &edits)
+    }
+
+    /// `words` with `edits` made, separated by single spaces.
+    pub(crate) fn text(words: &[&str], edits: &[Edit]) -> String {
         let mut out = String::new();
-        for (word, edit) in words.iter().zip(&edits) {
+        for (word, edit) in words.iter().zip(edits) {
             let word = match edit {
                 Edit::Keep => *word,
                 Edit::Change(changed) => changed,
@@ -268,6 +284,19 @@ impl Fillers {
         words: &[&str],
         protected: &Protected,
     ) -> Vec<Edit> {
+        self.plan_guarded(context, words, protected, None, true)
+    }
+
+    /// The same, with the deletions `guards` veto undone, and the comma before a removed
+    /// hesitation left to a later stage unless `pause_commas`.
+    pub(crate) fn plan_guarded(
+        &self,
+        context: &Context,
+        words: &[&str],
+        protected: &Protected,
+        guards: Option<&Guards>,
+        pause_commas: bool,
+    ) -> Vec<Edit> {
         let Language::English = self.language;
         let parts: Vec<(&str, &str, &str)> = words.iter().map(|w| split(w)).collect();
         let before = context.last.as_deref().map(split);
@@ -282,7 +311,11 @@ impl Fillers {
             deleted[i] =
                 !kept[i] && !quoted[i] && !core.is_empty() && is_hesitation(core, previous);
         }
-        let hesitations = deleted.clone();
+        let hesitations = if pause_commas {
+            deleted.clone()
+        } else {
+            vec![false; words.len()]
+        };
         // The first of two copies goes, or the second when the first can't change. The copy
         // before is held with whether it may go, and `between` gathers the punctuation since it,
         // that of removed hesitations included.
@@ -319,7 +352,40 @@ impl Fillers {
             previous = Some((Some(i), core, may_go));
             between = trail.to_string();
         }
+        if let Some(guards) = guards {
+            guards.apply(words, &mut deleted);
+        }
         self.tidy(before, &parts, &deleted, &hesitations, &kept, protected)
+    }
+
+    /// Which of `words`, a text of their own, these fillers delete.
+    pub(crate) fn deletions(&self, words: &[&str], protected: &Protected) -> Vec<bool> {
+        let edits = self.plan(&Context::default(), words, protected);
+        (edits.iter())
+            .map(|e| matches!(e, Edit::Delete | Edit::Leave(_)))
+            .collect()
+    }
+
+    /// The edits that delete `deleted` from `words`, a text of their own, with punctuation and
+    /// capitals tidied as for fillers, the comma before a removed hesitation left to a later
+    /// stage unless `pause_commas`.
+    pub(crate) fn tidy_deletions(
+        &self,
+        words: &[&str],
+        deleted: &[bool],
+        protected: &Protected,
+        pause_commas: bool,
+    ) -> Vec<Edit> {
+        let parts: Vec<(&str, &str, &str)> = words.iter().map(|w| split(w)).collect();
+        let kept = protected.words(&[], words);
+        let hesitations: Vec<bool> = (0..parts.len())
+            .map(|i| {
+                let previous = i.checked_sub(1).map(|j| parts[j].1);
+                let core = parts[i].1;
+                pause_commas && deleted[i] && !core.is_empty() && is_hesitation(core, previous)
+            })
+            .collect();
+        self.tidy(None, &parts, deleted, &hesitations, &kept, protected)
     }
 
     /// The edits that delete `deleted`, of which `hesitations` are hesitations, with punctuation
@@ -388,58 +454,55 @@ impl Fillers {
         }
         edits
     }
+}
 
-    /// The edits of `tokens`, whose ids `id` gives, with the words that go left out and the
-    /// words that change spelled anew by `respell` from the word's tokens and its new ids.
-    /// `context` is that of a text that can't change before them, and words of a `protected`
-    /// spelling stay as they are.
-    pub(crate) fn rewrite<T>(
-        &self,
-        tokenizer: &Tokenizer,
-        tokens: Vec<T>,
-        id: impl Fn(&T) -> u32,
-        context: &Context,
-        protected: &Protected,
-        respell: impl Fn(&[T], Vec<u32>) -> Vec<T>,
-    ) -> Vec<T>
-    where
-        T: Clone,
-    {
-        let ids: Vec<u32> = tokens.iter().map(&id).collect();
-        let spans = words(tokenizer, &ids);
-        let texts: Vec<String> = spans
-            .iter()
-            .map(|s| {
-                tokenizer
-                    .decode_raw(&ids[s.clone()])
-                    .trim_start()
-                    .to_string()
-            })
-            .collect();
-        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let edits = self.plan(context, &texts, protected);
-        if edits.iter().all(|e| *e == Edit::Keep) {
-            return tokens;
-        }
-        let mut out = Vec::with_capacity(tokens.len());
-        for (span, edit) in spans.into_iter().zip(edits) {
-            let word = &tokens[span];
-            match edit {
-                Edit::Keep => out.extend_from_slice(word),
-                Edit::Delete => {}
-                Edit::Change(text) => match spelled(tokenizer, &text, true) {
-                    Some(ids) => out.extend(respell(word, ids)),
-                    None => out.extend_from_slice(word),
-                },
-                Edit::Leave(end) => {
-                    if let Some(ids) = spelled(tokenizer, &end.to_string(), false) {
-                        out.extend(respell(word, ids));
-                    }
+/// `tokens`, whose ids `id` gives, with the edits `plan` gives for their words made. Words that
+/// go are left out, and words that change are spelled anew by `respell` from the word's tokens
+/// and its new ids.
+pub(crate) fn rewrite<T>(
+    tokenizer: &Tokenizer,
+    tokens: Vec<T>,
+    id: impl Fn(&T) -> u32,
+    plan: impl FnOnce(&[&str]) -> Vec<Edit>,
+    respell: impl Fn(&[T], Vec<u32>) -> Vec<T>,
+) -> Vec<T>
+where
+    T: Clone,
+{
+    let ids: Vec<u32> = tokens.iter().map(&id).collect();
+    let spans = words(tokenizer, &ids);
+    let texts: Vec<String> = spans
+        .iter()
+        .map(|s| {
+            tokenizer
+                .decode_raw(&ids[s.clone()])
+                .trim_start()
+                .to_string()
+        })
+        .collect();
+    let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let edits = plan(&texts);
+    if edits.iter().all(|e| *e == Edit::Keep) {
+        return tokens;
+    }
+    let mut out = Vec::with_capacity(tokens.len());
+    for (span, edit) in spans.into_iter().zip(edits) {
+        let word = &tokens[span];
+        match edit {
+            Edit::Keep => out.extend_from_slice(word),
+            Edit::Delete => {}
+            Edit::Change(text) => match spelled(tokenizer, &text, true) {
+                Some(ids) => out.extend(respell(word, ids)),
+                None => out.extend_from_slice(word),
+            },
+            Edit::Leave(end) => {
+                if let Some(ids) = spelled(tokenizer, &end.to_string(), false) {
+                    out.extend(respell(word, ids));
                 }
             }
         }
-        out
     }
+    out
 }
 
 /// The token ranges of the words of `ids`, each starting at a token with the word-start
@@ -487,7 +550,7 @@ pub(crate) fn split(word: &str) -> (&str, &str, &str) {
 
 /// Whether `word`, a word's letters, is a hesitation sound in lower case or with one capital,
 /// after the word `previous`.
-fn is_hesitation(word: &str, previous: Option<&str>) -> bool {
+pub(crate) fn is_hesitation(word: &str, previous: Option<&str>) -> bool {
     let lower = word.to_lowercase();
     if word != lower && word != capitalized(&lower) {
         return false;

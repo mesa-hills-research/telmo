@@ -23,9 +23,11 @@ pub(crate) mod tdt_beam;
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::Arc;
 
+use crate::disfluency::{Guards, Punctuation, Tagger};
 use crate::error::{Error, Result};
-use crate::fillers::{Context, Fillers, Protected};
+use crate::fillers::{Context, Edit, Fillers, Protected};
 use crate::parakeet::Token;
 use crate::tokenizer::Tokenizer;
 
@@ -186,7 +188,7 @@ impl fmt::Display for Rejection {
 impl std::error::Error for Rejection {}
 
 /// Words to favour while decoding, each in its usual spelling, spoken forms to write as words,
-/// and fillers to leave out.
+/// and fillers and disfluencies to leave out.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SpecialWords {
     words: Vec<String>,
@@ -194,7 +196,26 @@ pub struct SpecialWords {
     spoken: Vec<(String, String)>,
     boost: Boost,
     fillers: Option<Fillers>,
+    disfluencies: Option<SharedTagger>,
+    guards: Option<Guards>,
+    punctuation: Option<Punctuation>,
 }
+
+/// A tagger shared by lists, equal to another only when it's the same one.
+#[derive(Debug, Clone)]
+struct SharedTagger(Arc<Tagger>);
+
+impl PartialEq for SharedTagger {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+// A list, with a tagger or without, can be used across `catch_unwind`.
+const _: () = {
+    const fn unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+    unwind_safe::<SpecialWords>();
+};
 
 impl SpecialWords {
     /// The most words and spoken forms a list holds.
@@ -302,6 +323,42 @@ impl SpecialWords {
     /// word with `None`, the default. A special word is never taken for a filler.
     pub fn set_fillers(&mut self, fillers: Option<Fillers>) {
         self.fillers = fillers;
+    }
+
+    /// The tagger that leaves out disfluencies, if one is set.
+    pub fn disfluencies(&self) -> Option<&Arc<Tagger>> {
+        self.disfluencies.as_ref().map(|t| &t.0)
+    }
+
+    /// Leaves out the disfluencies `tagger` finds, English fillers included whatever
+    /// [`SpecialWords::set_fillers`] says, or none with `None`, the default. It runs once over
+    /// each transcript, and in a stream once over each utterance when it ends, so an utterance's
+    /// text stays tentative until then. A special word is never taken for one. The tagger is
+    /// trained on English, so set it only for English speech.
+    pub fn set_disfluencies(&mut self, tagger: Option<Arc<Tagger>>) {
+        self.disfluencies = tagger.map(SharedTagger);
+    }
+
+    /// The guards that keep words from the cleanup, if they're set.
+    pub fn guards(&self) -> Option<Guards> {
+        self.guards
+    }
+
+    /// Keeps the words these guards protect from the fillers and disfluencies that go, or
+    /// lets every stage delete what it finds with `None`, the default.
+    pub fn set_guards(&mut self, guards: Option<Guards>) {
+        self.guards = guards;
+    }
+
+    /// The rules that fix capitals and punctuation, if they're set.
+    pub fn punctuation(&self) -> Option<Punctuation> {
+        self.punctuation
+    }
+
+    /// Fixes capitals and punctuation once fillers and disfluencies have gone, or leaves them as
+    /// the model wrote them with `None`, the default.
+    pub fn set_punctuation(&mut self, punctuation: Option<Punctuation>) {
+        self.punctuation = punctuation;
     }
 }
 
@@ -650,6 +707,12 @@ pub(crate) struct Compiled {
     pub spoken: Spoken,
     /// The fillers to leave out after that.
     pub fillers: Option<Fillers>,
+    /// The tagger that leaves out disfluencies, fillers included, in place of `fillers`.
+    pub disfluencies: Option<Arc<Tagger>>,
+    /// The guards that keep words from either.
+    pub guards: Option<Guards>,
+    /// The capitals and punctuation to fix after them.
+    pub punctuation: Option<Punctuation>,
     /// The special words and spoken forms' words, which keep their spelling.
     pub protected: Protected,
 }
@@ -763,6 +826,9 @@ impl Compiled {
                 boost,
                 spoken,
                 fillers: words.fillers,
+                disfluencies: words.disfluencies().cloned(),
+                guards: words.guards,
+                punctuation: words.punctuation,
                 protected: Protected::new(
                     words
                         .words()
@@ -775,7 +841,7 @@ impl Compiled {
 
     /// Whether there's nothing to favour, rewrite or leave out.
     pub fn is_empty(&self) -> bool {
-        self.forms.is_empty() && self.spoken.is_empty() && self.fillers.is_none()
+        self.forms.is_empty() && self.spoken.is_empty() && !self.cleans()
     }
 
     /// The first token of `ids` before token `frontier` from which a spoken form, an entry's word
@@ -804,32 +870,59 @@ impl Compiled {
         spoken.into_iter().chain(special).min()
     }
 
-    /// `tokens` with the fillers left out, if any are to go. A word's new tokens share its
-    /// frames.
-    pub fn remove_fillers(&self, tokenizer: &Tokenizer, tokens: Vec<Token>) -> Vec<Token> {
-        let Some(fillers) = &self.fillers else {
-            return tokens;
+    /// Whether the list leaves out fillers or disfluencies, or fixes punctuation.
+    pub fn cleans(&self) -> bool {
+        self.fillers.is_some() || self.disfluencies.is_some() || self.punctuation.is_some()
+    }
+
+    /// The edits of `texts`, the words after a text that can't change, whose `context` this is.
+    /// When `whole` is a finished utterance or transcript, they delete the tagger's disfluencies
+    /// and the guards read ten words ahead. A stream's text so far loses only its fillers, and
+    /// the guards read three. Then capitals and punctuation are fixed.
+    pub fn edits(&self, context: &Context, texts: &[&str], whole: bool) -> Vec<Edit> {
+        let guards = (self.guards).map(|g| if whole { g } else { g.streamed() });
+        let guards = guards.as_ref();
+        let protected = &self.protected;
+        // With the punctuation rules on, they decide every comma.
+        let pause_commas = self.punctuation.is_none();
+        let fillers = |fillers: Fillers| {
+            fillers.plan_guarded(context, texts, protected, guards, pause_commas)
         };
-        fillers.rewrite(
-            tokenizer,
-            tokens,
-            |t| t.id,
-            &Context::default(),
-            &self.protected,
-            |word, ids| {
-                let (first, last) = (word[0], word[word.len() - 1]);
-                let frame =
-                    |k| place(first.frame as usize, last.frame as usize, ids.len(), k) as u32;
-                let end = last.frame + last.duration;
-                (ids.iter().enumerate())
-                    .map(|(k, &id)| Token {
-                        id,
-                        frame: frame(k),
-                        duration: if k + 1 < ids.len() { frame(k + 1) } else { end } - frame(k),
-                    })
-                    .collect()
-            },
-        )
+        let mut edits = match (&self.disfluencies, self.fillers) {
+            (Some(tagger), _) if whole => tagger.plan(texts, protected, guards, pause_commas),
+            // A tagger reads a whole utterance, and until it ends only the fillers go.
+            (Some(_), _) => fillers(Fillers::for_language("en").expect("English has fillers")),
+            (None, Some(f)) => fillers(f),
+            (None, None) => vec![Edit::Keep; texts.len()],
+        };
+        if let Some(punctuation) = &self.punctuation {
+            let special = protected.words(context.tail(), texts);
+            punctuation.fix(texts, &mut edits, context.last(), &special);
+        }
+        edits
+    }
+
+    /// `tokens` with the fillers, or the fillers and disfluencies, left out, if any are to go,
+    /// and capitals and punctuation fixed. A word's new tokens share its frames.
+    pub fn remove_fillers(&self, tokenizer: &Tokenizer, tokens: Vec<Token>) -> Vec<Token> {
+        let respell = |word: &[Token], ids: Vec<u32>| {
+            let (first, last) = (word[0], word[word.len() - 1]);
+            let frame = |k| place(first.frame as usize, last.frame as usize, ids.len(), k) as u32;
+            let end = last.frame + last.duration;
+            (ids.iter().enumerate())
+                .map(|(k, &id)| Token {
+                    id,
+                    frame: frame(k),
+                    duration: if k + 1 < ids.len() { frame(k + 1) } else { end } - frame(k),
+                })
+                .collect()
+        };
+        if !self.cleans() {
+            return tokens;
+        }
+        let context = Context::default();
+        let plan = |texts: &[&str]| self.edits(&context, texts, true);
+        crate::fillers::rewrite(tokenizer, tokens, |t| t.id, plan, respell)
     }
 }
 
@@ -947,6 +1040,105 @@ pub(crate) mod tests {
         // Without fillers to remove, the transcript stays as decoded.
         let (c, _) = Compiled::new(&SpecialWords::new(), &tok);
         assert_eq!(c.remove_fillers(&tok, heard.clone()), heard);
+    }
+
+    #[test]
+    fn disfluencies_go_from_a_transcript_and_special_words_stay() {
+        let tok = tokenizer();
+        let token = |id, frame| Token {
+            id,
+            frame,
+            duration: 1,
+        };
+        // "the uh the city", "uh" on frame 1.
+        let heard = vec![
+            token(6, 0),
+            token(11, 1),
+            token(13, 1),
+            token(26, 1),
+            token(6, 2),
+            token(44, 3),
+        ];
+        let tagger =
+            |threshold| crate::disfluency::tests::tiny(threshold, 128, crate::Precision::F32);
+        // At a threshold no probability reaches, the fillers go, whatever `set_fillers` says.
+        let mut words = SpecialWords::new();
+        words.set_disfluencies(Some(tagger(2.0)));
+        let (c, _) = Compiled::new(&words, &tok);
+        assert_eq!(
+            c.remove_fillers(&tok, heard.clone()),
+            [token(6, 2), token(44, 3)]
+        );
+        // At one every probability reaches, only the special word stays.
+        let mut words = special(&["city"]);
+        words.set_disfluencies(Some(tagger(0.0)));
+        let (c, _) = Compiled::new(&words, &tok);
+        assert_eq!(c.remove_fillers(&tok, heard), [token(44, 3)]);
+        // Lists are equal when they share the tagger.
+        let shared = tagger(2.0);
+        let (mut a, mut b) = (SpecialWords::new(), SpecialWords::new());
+        a.set_disfluencies(Some(shared.clone()));
+        b.set_disfluencies(Some(shared));
+        assert_eq!(a, b);
+        b.set_disfluencies(Some(tagger(2.0)));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn punctuation_is_fixed_after_the_fillers_and_decides_every_comma() {
+        let tok = tokenizer();
+        let text = |words: &SpecialWords, text: &str| {
+            let (c, _) = Compiled::new(words, &tok);
+            let list: Vec<&str> = text.split(' ').collect();
+            Fillers::text(&list, &c.edits(&Context::default(), &list, true))
+        };
+        let mut words = SpecialWords::new();
+        words.set_fillers(Fillers::for_language("en"));
+        let wide = Punctuation::for_language("en").map(Punctuation::joining_more);
+        words.set_punctuation(wide);
+        assert_eq!(
+            text(
+                &words,
+                "so i think we need the, uh, patch. Release. That is due"
+            ),
+            "so I think we need the patch release that is due"
+        );
+        // Alone, the punctuation still runs, and it keeps a comma a clause can end on.
+        let mut words = SpecialWords::new();
+        words.set_punctuation(Punctuation::for_language("en"));
+        assert_eq!(text(&words, "we need, um, a way"), "we need, um, a way");
+    }
+
+    #[test]
+    fn punctuation_keeps_special_words_and_settled_text() {
+        let tok = tokenizer();
+        let mut words = SpecialWords::new();
+        words.add("Ada").unwrap();
+        words.add("GitHub").unwrap();
+        words.set_punctuation(Punctuation::for_language("en"));
+        let (c, _) = Compiled::new(&words, &tok);
+        let text = |context: &Context, text: &str| {
+            let list: Vec<&str> = text.split(' ').collect();
+            Fillers::text(&list, &c.edits(context, &list, true))
+        };
+        let start = Context::default();
+        assert_eq!(
+            text(&start, "I'll call the. Ada team."),
+            "I'll call the Ada team."
+        );
+        assert_eq!(
+            text(&start, "We push to the. GitHub repo."),
+            "We push to the GitHub repo."
+        );
+        // A period that settled stays, so the next word keeps its capital.
+        let settled = Context::after("we need a patch.");
+        assert_eq!(text(&settled, "Release. That is"), "Release. That is");
+        assert_eq!(
+            text(&start, "a patch. Release. That is"),
+            "a patch release. That is"
+        );
+        let settled = Context::after("I'll take the.");
+        assert_eq!(text(&settled, "Red one."), "Red one.");
     }
 
     #[test]

@@ -101,7 +101,11 @@ their accuracy and limits.
 For dictation, the list can also leave out English hesitations (um, uh) and stutters ("the the",
 "I, I"), offline and streamed, with `words.set_fillers(Fillers::for_language("en"))`, and
 `telmo transcribe --remove-fillers` does the same. [docs/fillers.md](docs/fillers.md) says what
-goes and what stays.
+goes and what stays. A disfluency tagger goes further, taking out false starts, repairs and
+repeated phrases once over each utterance, with `words.set_disfluencies(Some(tagger))`, and
+`Tagger::hand_written()` cleans up with hand-set rules and no model. Guards keep the words code
+dictation needs, such as spoken flags and units. `telmo transcribe --remove-disfluencies` downloads the
+tagger and runs both. [docs/disfluencies.md](docs/disfluencies.md) describes them.
 
 ## Accuracy and speed
 
@@ -143,6 +147,7 @@ implementations, and the tests that compare every layer with them need the model
 ```text
 PARAKEET_TDT_DIR=parakeet-tdt-0.6b-v3 cargo test --release --test goldens -- --include-ignored
 GRANITE_SPEECH_DIR=granite-speech-5.0-470m-turboctc cargo test --release --test granite_goldens -- --include-ignored
+DISFLUENCY_TAGGER_DIR=disfluency-tagger cargo test --release --test disfluency_goldens -- --include-ignored
 ```
 
 ## License

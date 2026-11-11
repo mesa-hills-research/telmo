@@ -15,11 +15,16 @@
 //! wait. Fillers a list leaves out go from each pass's words before any settle, so tentative
 //! text never shows them. Settled words never change. When the utterance ends, one
 //! last pass settles everything, except a sentence end at its end, which waits for the next
-//! utterance's first words, since a pause can split a sentence.
+//! utterance's first words, since a pause can split a sentence. With a list that leaves out
+//! disfluencies, nothing settles before that last pass, which settles the utterance cleaned.
 //!
 //! [`Stream`] runs it all on a thread of its own. Audio of any sample rate goes in as it comes,
 //! voice activity splits it into utterances, passes run as often as the computer keeps up with,
-//! and the text comes back as [`Event`]s.
+//! and the text comes back as [`Event`]s. After a pause of up to 2 s, the pass that first settles
+//! an utterance's words also decodes, once, the 2 s of audio before it with up to its first 3 s,
+//! so the model hears both sides of the pause. The sentence end that closed the last utterance
+//! then stays only if the model puts one there, and the utterance's first word takes the case
+//! the model gave it there.
 
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -31,6 +36,7 @@ use std::time::{Duration, Instant};
 use crate::biasing::{
     self, Compiled, Entries, SpecialWords, Spoken, Unit, normalized_words, place,
 };
+use crate::disfluency;
 use crate::error::Result;
 use crate::features::LogMelStream;
 use crate::fillers::{self, Context, Protected};
@@ -221,6 +227,13 @@ pub struct UtteranceStream {
     /// The last words the stream's previous utterance settled, which filler removal goes on from
     /// too, so a stutter split by a pause loses its second copy.
     carried: String,
+    /// The audio before the utterance after a short pause, the end of the last one and the pause,
+    /// which the pass that first settles words decodes once with the utterance.
+    context: Vec<f32>,
+    /// Granite's tokens for a sentence end.
+    sentence_ends: Vec<u32>,
+    /// What the model heard at the pause, from that decode.
+    pause: Option<Pause>,
     passes: usize,
     /// The special words passes favour.
     words: Option<Arc<Compiled>>,
@@ -266,6 +279,9 @@ impl UtteranceStream {
             log_mel,
             settled: String::new(),
             carried: String::new(),
+            context: Vec::new(),
+            sentence_ends: Vec::new(),
+            pause: None,
             passes: 0,
             words,
             timings,
@@ -306,11 +322,84 @@ impl UtteranceStream {
     pub fn pass(&mut self, model: &Model, config: &PassConfig, mode: PassMode) -> Result<PassText> {
         self.passes += 1;
         let config = &config.for_pass(matches!(model, Model::Parakeet(_)), self.seconds());
+        let finished = mode == PassMode::Final;
         let heard = match model {
-            Model::Parakeet(m) => self.parakeet_hypothesis(m, config, mode == PassMode::Final)?,
-            Model::Granite(m) => self.granite_hypothesis(m, mode == PassMode::Final)?,
+            Model::Parakeet(m) => self.parakeet_hypothesis(m, config, finished)?,
+            Model::Granite(m) => self.granite_hypothesis(m, finished)?,
         };
-        Ok(self.settle(model.tokenizer(), heard, config, mode))
+        let first = self.settled.is_empty();
+        let out = self.settle(model.tokenizer(), heard, config, mode);
+        if first && !self.settled.is_empty() && !self.context.is_empty() {
+            self.pause = self.hear_the_pause(model, finished);
+        }
+        Ok(out)
+    }
+
+    /// Decodes the context and the start of the audio so far in one go, once, to tell what the
+    /// model hears at the pause before the utterance's first words, with the end of the last
+    /// utterance before it. None when it hears no word on one side.
+    fn hear_the_pause(&mut self, model: &Model, finished: bool) -> Option<Pause> {
+        let after = self.audio.len().min(samples(AFTER_PAUSE));
+        let finished = finished && after == self.audio.len();
+        let mut audio = self.context.clone();
+        audio.extend_from_slice(&self.audio[..after]);
+        let timings = &mut self.timings;
+        let (tokens, blocks) = match model {
+            Model::Granite(m) => {
+                let mut blocks = GraniteStream::new(m);
+                blocks.keep_probability_of(self.sentence_ends.clone());
+                blocks.push(&audio);
+                blocks.update(m, finished, timings);
+                let blank = m.config().blank as u32;
+                (
+                    ctc_hypothesis(blocks.frame_ids(), 0, u32::MAX, blank),
+                    Some(blocks),
+                )
+            }
+            Model::Parakeet(m) => {
+                let mut log_mel = m.front_end().stream();
+                log_mel.push(&audio);
+                if finished {
+                    log_mel.finish();
+                }
+                if log_mel.frames() < FRAME / HOP {
+                    return None;
+                }
+                let features = log_mel.normalize(0..log_mel.frames());
+                let encoded = m.encode(&features.data, features.frames, timings, &mut |_, _, _| {});
+                let state = m.initial_decoder_state(timings);
+                let tokens = (m.decode_from(&encoded, 0, &state, timings).into_iter())
+                    .map(|(t, _)| {
+                        let end_frame = t.frame as usize + (t.duration as usize).max(1);
+                        Hyp {
+                            id: t.id,
+                            frame: t.frame as usize,
+                            end_frame,
+                            resume: Resume::Frame(end_frame),
+                            joined: false,
+                            heard_end: 0,
+                            entry: None,
+                        }
+                    })
+                    .collect();
+                (tokens, None)
+            }
+        };
+        // A word said softly before voice activity's onset starts in the context's last frames,
+        // so the utterance's words count from 4 frames before its audio.
+        let lead = self.context.len() / FRAME;
+        let heard = after_settled(tokens.into_iter(), lead.saturating_sub(3));
+        let (frames, mark, first) = junction(model.tokenizer(), &heard)?;
+        // Heard with the speech after it, a pause is rarely Granite's most likely place for a
+        // sentence end, even between sentences, so its probability of one decides.
+        let sentence_end = match &blocks {
+            Some(blocks) => blocks.highest_probability(frames) >= GRANITE_SENTENCE_END,
+            None => mark,
+        };
+        Some(Pause {
+            sentence_end,
+            first_words: first_words(model.tokenizer(), &heard.tokens[first..]),
+        })
     }
 
     /// Settles what a pass heard. Repeats of the settled text go and the stream's timing is
@@ -434,6 +523,17 @@ impl UtteranceStream {
         let settled = tokenizer.decode_raw(&settled_ids);
         let tentative = tokenizer.decode_raw(&tentative_ids);
         self.settled.push_str(&settled);
+        let (settled, tentative) = match self.words.as_deref() {
+            Some(words) if words.disfluencies.is_some() => {
+                let (settled, tentative) = hold_until_last(words, &self.settled, &tentative, last);
+                if last {
+                    // The next utterance goes on from the text this one settled, cleaned.
+                    self.settled = settled.clone();
+                }
+                (settled, tentative)
+            }
+            _ => (settled, tentative),
+        };
         PassText {
             settled,
             tentative,
@@ -708,6 +808,8 @@ struct Active {
     seen: usize,
     /// The tentative text last reported.
     tentative: String,
+    /// Whether any of its words settled.
+    settled_words: bool,
 }
 
 /// The synchronous core of a [`Stream`], experimental like it. It takes audio, splits it into
@@ -719,7 +821,8 @@ pub struct Streamer {
     /// Resampled samples still to drop at the start, the resampler's delay.
     to_drop: usize,
     vad: Vad,
-    /// The latest 16 kHz audio, as far back as voice activity can begin an utterance.
+    /// The latest 16 kHz audio, as far back as voice activity can begin an utterance and the
+    /// context before it.
     history: VecDeque<f32>,
     /// The stream's sample `history[0]` is.
     history_start: u64,
@@ -739,6 +842,10 @@ pub struct Streamer {
     /// The settled text of the last utterance whose final pass ran, which the next one's filler
     /// removal goes on from.
     last_text: String,
+    /// Where the last utterance's speech ended, by voice activity.
+    speech_end: Option<u64>,
+    /// Granite's tokens for a sentence end.
+    sentence_ends: Vec<u32>,
     /// The special words new utterances favour.
     words: Option<Arc<Compiled>>,
 }
@@ -746,6 +853,10 @@ pub struct Streamer {
 impl Streamer {
     pub fn new(model: Arc<Model>, config: StreamConfig) -> Streamer {
         let resampler = Resampler::new(config.input_rate, SAMPLE_RATE as u32);
+        let sentence_ends = match &*model {
+            Model::Granite(m) => sentence_end_tokens(m.tokenizer()),
+            Model::Parakeet(_) => Vec::new(),
+        };
         Streamer {
             to_drop: resampler.delay(),
             resampler,
@@ -762,6 +873,8 @@ impl Streamer {
             started: 0,
             words: None,
             last_text: String::new(),
+            speech_end: None,
+            sentence_ends,
         }
     }
 
@@ -802,7 +915,8 @@ impl Streamer {
         }
         let found = self.vad.push(&audio);
         let events = self.on_voice_activity(found);
-        let excess = (self.history.len() as u64).saturating_sub(self.vad.look_back()) as usize;
+        let keep = self.vad.look_back() + samples(CONTEXT) as u64;
+        let excess = (self.history.len() as u64).saturating_sub(keep) as usize;
         self.history.drain(..excess);
         self.history_start += excess as u64;
         events
@@ -831,21 +945,35 @@ impl Streamer {
                             .split_off(audio_from.saturating_sub(ended.start) as usize);
                         self.closing.push_back(ended);
                     }
+                    let start = audio_from.max(self.history_start);
                     let mut stream =
                         UtteranceStream::with_compiled(&self.model, self.words.clone());
-                    stream.push(&self.history_since(audio_from));
+                    stream.push(&self.history_since(start));
+                    // After a short pause the utterance keeps the audio before it, the end of the
+                    // last one and the pause, to hear once what the model makes of the pause.
+                    if let Some(end) = self.speech_end
+                        && onset.saturating_sub(end) <= samples(CONTEXT_PAUSE) as u64
+                    {
+                        let lead = samples(CONTEXT).min((start - self.history_start) as usize);
+                        let from = start - (lead / FRAME * FRAME) as u64;
+                        let mut context = self.history_since(from);
+                        context.truncate((start - from) as usize);
+                        stream.context = context;
+                        stream.sentence_ends = self.sentence_ends.clone();
+                    }
                     let index = self.started;
                     self.started += 1;
                     self.active = Some(Active {
                         index,
                         stream,
-                        start: audio_from.max(self.history_start),
+                        start,
                         end: None,
                         cut: false,
                         reopened: None,
                         after_end: Vec::new(),
                         seen: 0,
                         tentative: String::new(),
+                        settled_words: false,
                     });
                     events.push(Event::SpeechStart {
                         utterance: index,
@@ -857,6 +985,7 @@ impl Streamer {
                     decided_at,
                     cut,
                 } => {
+                    self.speech_end = Some(speech_end);
                     if let Some(a) = &mut self.active {
                         a.end = Some((speech_end, decided_at));
                         a.cut = cut;
@@ -942,14 +1071,24 @@ impl Streamer {
         if !self.wrote {
             settled = settled.trim_start().to_string();
         }
-        if !settled.is_empty()
-            && let Some(held) = self.held.take()
-        {
-            let (resolved, text) =
-                resolve_held(held, &self.last_text, &settled, a.stream.words.as_deref());
-            events.extend(resolved);
-            settled = text;
-        }
+        // What the model made of the pause before the utterance, heard with the words before it,
+        // goes with the utterance's first settled words.
+        let first = !settled.is_empty() && !a.settled_words;
+        a.settled_words |= first;
+        let pause = (!settled.is_empty())
+            .then(|| a.stream.pause.take())
+            .flatten();
+        let words = a.stream.words.as_deref();
+        let (resolved, text) = resolve_pause(
+            &self.last_text,
+            &mut self.held,
+            pause.as_ref(),
+            first,
+            settled,
+            words,
+        );
+        events.extend(resolved);
+        let mut settled = text;
         if out.last
             && let Some(mark) = settled.chars().last().filter(|c| SENTENCE_END.contains(c))
         {
@@ -1038,25 +1177,98 @@ impl Streamer {
     }
 }
 
+/// The events that settle or drop the sentence end `held` once the next utterance's words first
+/// settle (`first`), and those words, `settled`, after the text before the pause, `previous`.
+/// `pause` is what the decode of the pause heard, if there was one. A restart across the pause
+/// decides first, then what the model heard there, and then the words' case.
+fn resolve_pause(
+    previous: &str,
+    held: &mut Option<(u64, char)>,
+    pause: Option<&Pause>,
+    first: bool,
+    mut settled: String,
+    words: Option<&Compiled>,
+) -> (Vec<Event>, String) {
+    let mut events = Vec::new();
+    // The utterance's first words saying the last words before the pause again, after a
+    // hesitation or an editing word if any, start the sentence over ("I guess, | well, I
+    // guess we"), whatever the decode made of the pause, and after a pause of any length.
+    // The words are the decode's, as said, or the first settled ones when there was no
+    // decode or it heard nothing. With a tagger the utterance's text is whole and cleaned by
+    // now, and the copy and the words before it go from it, unless they start a special
+    // word, which keeps its words as a stutter's copy does.
+    let heard: Vec<&str> = match pause {
+        Some(p) => p.first_words.iter().map(String::as_str).collect(),
+        None if first => settled.split_whitespace().take(FIRST_WORDS).collect(),
+        None => Vec::new(),
+    };
+    let restart = disfluency::restart(previous, &heard);
+    let starts_special = |w: &&str| {
+        words.is_some_and(|c| c.protected.keeps_case(&fillers::split(w).1.to_lowercase()))
+    };
+    let mut cut = false;
+    if let Some(r) = &restart
+        && !r.keeps_copy
+        && words.is_some_and(|w| w.disfluencies.is_some())
+        && !heard[..r.words].iter().any(starts_special)
+        && let Some(rest) = disfluency::without_restart(&settled, &heard[..r.words])
+    {
+        settled = rest;
+        cut = true;
+    }
+    if !settled.is_empty()
+        && let Some(held) = held.take()
+    {
+        let goes_on = match (&restart, pause) {
+            (Some(_), _) => Some(true),
+            (None, Some(p)) => Some(!p.sentence_end),
+            (None, None) => sentence_goes_on(&settled, words),
+        };
+        let comma = restart.is_some() && !cut;
+        let (resolved, text) = resolve_held(held, previous, &settled, goes_on, comma, words);
+        events.extend(resolved);
+        settled = text;
+    }
+    match (&restart, pause) {
+        // After a cut the first word is one the passes wrote inside the sentence, whose case
+        // is right already.
+        (Some(r), _) => {
+            if !cut && r.lower_first {
+                settled = lowercased(&settled, words);
+            }
+        }
+        (None, Some(p)) if !p.sentence_end => {
+            settled = with_case_of(&settled, &p.first_words, words);
+        }
+        _ => {}
+    }
+    (events, settled)
+}
+
 /// Marks that end a sentence.
 const SENTENCE_END: [char; 3] = ['.', '?', '!'];
 
 /// The events that settle or drop the sentence end `held` (an utterance's number and its mark)
 /// once the next utterance's first words, `settled`, settle, and those words to settle. The mark
-/// goes when the sentence goes on, and the next words take a capital when they start a new one.
-/// Either way it leaves the held utterance's tentative text. When the sentence goes on with a
-/// copy of the held utterance's last word, `previous` ending in it, and that's a word that can't
-/// end a clause, the copy is a stutter and goes with the mark ("...and." then "and then").
+/// goes when the sentence goes on (`goes_on` is `Some(true)`), and the next words take a capital
+/// when they start a new one (`Some(false)`). Either way it leaves the held utterance's tentative
+/// text. When the sentence goes on with a copy of the held utterance's last word, `previous`
+/// ending in it, and that's a word that can't end a clause, the copy is a stutter and goes with
+/// the mark ("...and." then "and then"). When the sentence goes on with a `restart` whose words
+/// stay, a comma marks the pause before them ("...I guess," then "well, I guess we"). With a list
+/// that removes no words, a restart's copy stays even where it's a stutter.
 fn resolve_held(
     held: (u64, char),
     previous: &str,
     settled: &str,
+    goes_on: Option<bool>,
+    restart: bool,
     words: Option<&Compiled>,
 ) -> (Vec<Event>, String) {
     let (utterance, mark) = held;
-    let goes_on = sentence_goes_on(settled, words);
-    let settled = match goes_on {
-        Some(true) => without_a_copy_of(previous, settled),
+    let removes = words.is_some_and(|w| w.fillers.is_some() || w.disfluencies.is_some());
+    let kept = match goes_on {
+        Some(true) if removes || !restart => without_a_copy_of(previous, settled, words),
         _ => settled,
     };
     let mut events = Vec::new();
@@ -1065,7 +1277,13 @@ fn resolve_held(
             utterance,
             text: mark.to_string(),
         });
+    } else if restart && kept.len() == settled.len() {
+        events.push(Event::Settled {
+            utterance,
+            text: ",".to_string(),
+        });
     }
+    let settled = kept;
     events.push(Event::Tentative {
         utterance,
         text: String::new(),
@@ -1078,8 +1296,9 @@ fn resolve_held(
 }
 
 /// `settled` without its first word when that's a copy of the last word of `previous` that can't
-/// end a clause.
-fn without_a_copy_of<'a>(previous: &str, settled: &'a str) -> &'a str {
+/// end a clause, and doesn't start a special word that keeps its case ("to the." then "The
+/// Hague").
+fn without_a_copy_of<'a>(previous: &str, settled: &'a str, words: Option<&Compiled>) -> &'a str {
     let core = |w: &str| fillers::split(w).1.to_lowercase();
     let (Some(last), Some(first)) = (
         previous.split_whitespace().next_back(),
@@ -1088,7 +1307,10 @@ fn without_a_copy_of<'a>(previous: &str, settled: &'a str) -> &'a str {
         return settled;
     };
     let word = core(first);
-    if word != core(last) || !fillers::REPEATED.contains(&word.as_str()) {
+    if word != core(last)
+        || !fillers::REPEATED.contains(&word.as_str())
+        || words.is_some_and(|w| w.protected.keeps_case(&word))
+    {
         return settled;
     }
     let rest = settled.trim_start();
@@ -1098,6 +1320,103 @@ fn without_a_copy_of<'a>(previous: &str, settled: &'a str) -> &'a str {
         Some(end) => &settled[space.len() + end..],
         None => "",
     }
+}
+
+/// The longest pause, from the end of one utterance's speech to the start of the next one's,
+/// after which the next utterance is decoded once with the audio before it.
+const CONTEXT_PAUSE: Duration = Duration::from_secs(2);
+
+/// The audio before an utterance after a short pause that it's decoded with once, so the model
+/// hears whether the sentence goes on.
+const CONTEXT: Duration = Duration::from_secs(2);
+
+/// The most of an utterance's audio that the decode hearing the pause before it takes, which
+/// bounds its cost.
+const AFTER_PAUSE: Duration = Duration::from_secs(3);
+
+/// The probability of a sentence end Granite must give a short pause, heard with the context
+/// before it and the words after it, for the sentence end that closed the utterance before the
+/// pause to stay. Streamed, 0.003 got more dictated pauses right than 0.0003, the best value on
+/// pauses in AMI meetings decoded offline, and as many of the same meetings' pauses.
+const GRANITE_SENTENCE_END: f32 = 0.003;
+
+/// Samples of 16 kHz audio in `d`.
+fn samples(d: Duration) -> usize {
+    (d.as_secs_f64() * SAMPLE_RATE as f64) as usize
+}
+
+/// The tokens that are a sentence end alone.
+fn sentence_end_tokens(tokenizer: &Tokenizer) -> Vec<u32> {
+    (0..tokenizer.len() as u32)
+        .filter(|&id| matches!(tokenizer.decode_raw(&[id]).trim(), "." | "?" | "!"))
+        .collect()
+}
+
+/// What the model heard at the pause before an utterance, decoding the audio before it with it.
+#[derive(Debug, Clone, PartialEq)]
+struct Pause {
+    /// Whether a sentence ends there.
+    sentence_end: bool,
+    /// The utterance's first words as written hearing the words before it.
+    first_words: Vec<String>,
+}
+
+/// Where a decode of the context and the utterance heard the pause between them, as the frames
+/// from the context's last word to just after the utterance's first word, whether a sentence
+/// end came between them, and the index of the first word's first token. None when it heard no
+/// word on one side.
+fn junction(tokenizer: &Tokenizer, heard: &Heard) -> Option<(Range<usize>, bool, usize)> {
+    let word = |h: &Hyp| tokenizer.decode(&[h.id]).chars().any(char::is_alphanumeric);
+    let (context, new) = heard.tokens.split_at(heard.new);
+    let last = context.iter().rposition(word)?;
+    let first = context.len() + new.iter().position(word)?;
+    let ids: Vec<u32> = heard.tokens[last..first].iter().map(|h| h.id).collect();
+    let text = tokenizer.decode(&ids);
+    let between = &text[text.trim_end_matches(|c: char| !c.is_alphanumeric()).len()..];
+    // A sentence end often comes a frame or two into the next word's run of frames.
+    let frames = heard.tokens[last].frame..heard.tokens[first].frame + 3;
+    Some((frames, between.contains(SENTENCE_END), first))
+}
+
+/// The first few words `tokens` start with, as decoded.
+fn first_words(tokenizer: &Tokenizer, tokens: &[Hyp]) -> Vec<String> {
+    (split_words(tokenizer, None, tokens)
+        .iter()
+        .take(FIRST_WORDS))
+    .map(|w| tokenizer.decode(&word_ids(tokens, w)).trim().to_string())
+    .collect()
+}
+
+/// The decoded words kept of an utterance's start, enough for a restart's words, and for
+/// [`with_case_of`] to pass over the hesitations filler removal may have left out before the
+/// first word.
+const FIRST_WORDS: usize = disfluency::RESTART_HEAD;
+
+/// `text` with its first word in the case of the same word in `heard`, the utterance's first
+/// words as the model wrote them hearing the words before it. Hesitations before it in `heard`
+/// are passed over, since filler removal may have left them out of `text`. The word keeps its
+/// case if `heard` spells it otherwise, or it's "I" or a special word that keeps its case.
+fn with_case_of(text: &str, heard: &[String], words: Option<&Compiled>) -> String {
+    let start = text.len() - text.trim_start().len();
+    let rest = &text[start..];
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let (before, core, after) = fillers::split(&rest[..end]);
+    let lower = core.to_lowercase();
+    let same = (heard.iter())
+        .map(|w| fillers::split(w).1)
+        .find(|w| w.to_lowercase() == lower || !fillers::is_hesitation(w, None));
+    let Some(same) = same.filter(|w| w.to_lowercase() == lower) else {
+        return text.to_string();
+    };
+    if core.is_empty()
+        || core == same
+        || lower == "i"
+        || lower.starts_with("i'")
+        || words.is_some_and(|w| w.protected.keeps_case(&lower))
+    {
+        return text.to_string();
+    }
+    format!("{}{before}{same}{after}{}", &text[..start], &rest[end..])
 }
 
 /// The last words of an utterance's settled `text`, as many as filler removal goes on from.
@@ -1134,6 +1453,26 @@ const JOINING: [&str; 33] = [
     "than", "as", "to", "of", "in", "on", "at", "for", "with", "by", "from", "into", "about", "if",
     "when", "while", "where", "though", "although", "unless", "until",
 ];
+
+/// `text` with its first word in lower case, if that's a plain capitalized word and not "I" or a
+/// special word that keeps its case.
+fn lowercased(text: &str, words: Option<&Compiled>) -> String {
+    let start = text.len() - text.trim_start().len();
+    let rest = &text[start..];
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let (before, core, after) = fillers::split(&rest[..end]);
+    let lower = core.to_lowercase();
+    let mut chars = core.chars();
+    let plain = chars.next().is_some_and(char::is_uppercase) && !chars.any(char::is_uppercase);
+    if !plain
+        || lower == "i"
+        || lower.starts_with("i'")
+        || words.is_some_and(|w| w.protected.keeps_case(&lower))
+    {
+        return text.to_string();
+    }
+    format!("{}{before}{lower}{after}{}", &text[..start], &rest[end..])
+}
 
 /// `text` with its first word capitalized, if that's plain lower case and not a special word.
 fn capitalized(text: &str, words: Option<&Compiled>) -> String {
@@ -1381,15 +1720,16 @@ fn remove_fillers(
     context: &Context,
     hyp: Vec<Hyp>,
 ) -> Vec<Hyp> {
-    let Some(fillers) = &words.fillers else {
+    // With a disfluency tagger, the fillers stay until the utterance ends, as the tagger reads
+    // them.
+    if words.disfluencies.is_some() || !words.cleans() {
         return hyp;
-    };
-    fillers.rewrite(
+    }
+    crate::fillers::rewrite(
         tokenizer,
         hyp,
         |h| h.id,
-        context,
-        &words.protected,
+        |texts| words.edits(context, texts, false),
         |word, ids| {
             let (first, last) = (&word[0], &word[word.len() - 1]);
             (ids.iter().enumerate())
@@ -1405,6 +1745,30 @@ fn remove_fillers(
                 .collect()
         },
     )
+}
+
+/// The settled and tentative text of a pass when `words` leave out disfluencies, given the
+/// utterance's text settled so far, fillers in, and the pass's tentative text. Nothing settles
+/// before the `last` pass, which settles the whole utterance cleaned. Until then the tentative
+/// text is the utterance so far without its fillers.
+fn hold_until_last(
+    words: &Compiled,
+    utterance: &str,
+    tentative: &str,
+    last: bool,
+) -> (String, String) {
+    let text = format!("{utterance}{tentative}");
+    let list: Vec<&str> = text.split_whitespace().collect();
+    let edits = words.edits(&Context::default(), &list, last);
+    let mut text = fillers::Fillers::text(&list, &edits);
+    if !text.is_empty() {
+        text.insert(0, ' ');
+    }
+    if last {
+        (text, String::new())
+    } else {
+        (String::new(), text)
+    }
 }
 
 /// Joins settled words that spell an entry's spoken form or word whole into one with its
@@ -1715,6 +2079,9 @@ mod tests {
             log_mel: None,
             settled: String::new(),
             carried: String::new(),
+            context: Vec::new(),
+            sentence_ends: Vec::new(),
+            pause: None,
             passes: 0,
             words: Some(Arc::new(compiled)),
             timings: Timings::default(),
@@ -2053,6 +2420,32 @@ mod tests {
         assert_eq!(shown[1], "| the");
         assert_eq!(settled, " the city the");
         assert!(shown.iter().all(|s| !s.contains("uh")), "{shown:?}");
+    }
+
+    #[test]
+    fn with_disfluencies_an_utterance_settles_once_cleaned_when_it_ends() {
+        let mut words = SpecialWords::new();
+        let tagger = crate::disfluency::tests::tiny(2.0, 128, crate::Precision::F32);
+        words.set_disfluencies(Some(tagger));
+        let (mut s, tok) = stream_with(&words, 50);
+        let config = PassConfig::default();
+        let first: Vec<(u32, usize)> = [(6, 0)].into_iter().chain(uh(2)).collect();
+        let later: Vec<(u32, usize)> = (first.iter().copied())
+            .chain([(6, 3), (44, 4), (6, 40)])
+            .collect();
+        let mut shown = Vec::new();
+        for heard in [&first, &first, &later, &later] {
+            let out = s.settle(&tok, window(&s, heard), &config, PassMode::Tentative);
+            assert_eq!(out.settled, "");
+            shown.push(out.tentative);
+        }
+        // The tentative text is the utterance so far, fillers left out.
+        assert_eq!(shown, [" the", " the", " the city the", " the city the"]);
+        let out = s.settle(&tok, window(&s, &later), &config, PassMode::Final);
+        assert_eq!(
+            (out.settled.as_str(), out.tentative.as_str()),
+            (" the city the", "")
+        );
     }
 
     #[test]
@@ -2395,7 +2788,15 @@ mod tests {
             (" hello, world", Some("."), " Hello, world"),
             (" 'hello world", Some("."), " 'Hello world"),
         ] {
-            let (events, out) = resolve_held(held, " so we test it and.", next, Some(&words));
+            let goes_on = sentence_goes_on(next, Some(&words));
+            let (events, out) = resolve_held(
+                held,
+                " so we test it and.",
+                next,
+                goes_on,
+                false,
+                Some(&words),
+            );
             let want: Vec<String> = mark.into_iter().map(String::from).collect();
             assert_eq!((settled(&events), out.as_str()), (want, text), "{next}");
             assert!(events.contains(&cleared), "{next}");
@@ -2405,8 +2806,285 @@ mod tests {
         place.add("The Hague").unwrap();
         let place = Compiled::new(&place, &tok).0;
         let next = " the Hague office";
-        let (events, out) = resolve_held(held, " we flew to the.", next, Some(&place));
+        let goes_on = sentence_goes_on(next, Some(&place));
+        let (events, out) =
+            resolve_held(held, " we flew to the.", next, goes_on, false, Some(&place));
         assert_eq!((settled(&events), out.as_str()), (vec![".".into()], next));
+    }
+
+    #[test]
+    fn a_held_sentence_end_follows_what_the_model_heard_at_the_pause() {
+        let held = (3, '.');
+        let marks = |events: &[Event]| -> usize {
+            (events.iter())
+                .filter(|e| matches!(e, Event::Settled { utterance: 3, .. }))
+                .count()
+        };
+        // "...we wrote a test." then "plan that", heard with the test before it.
+        let (events, out) = resolve_held(held, " a test.", " plan that", Some(true), false, None);
+        assert_eq!((marks(&events), out.as_str()), (0, " plan that"));
+        // A capital the model wrote hearing the sentence go on stays ("...because I").
+        let (events, out) = resolve_held(held, " because.", " I think", Some(true), false, None);
+        assert_eq!((marks(&events), out.as_str()), (0, " I think"));
+        // A new sentence keeps the mark and takes a capital.
+        let (events, out) = resolve_held(held, " a test.", " plan it.", Some(false), false, None);
+        assert_eq!((marks(&events), out.as_str()), (1, " Plan it."));
+        // A copy of the last word that starts a special word stays with it ("...to the." then
+        // "The Hague").
+        let tok = crate::biasing::tests::tokenizer();
+        let mut place = SpecialWords::new();
+        place.add("The Hague").unwrap();
+        let place = Compiled::new(&place, &tok).0;
+        let next = " The Hague office";
+        let (events, out) = resolve_held(
+            held,
+            " we flew to the.",
+            next,
+            Some(true),
+            false,
+            Some(&place),
+        );
+        assert_eq!((marks(&events), out.as_str()), (0, next));
+        // Without the special word it's a stutter, and goes with the mark.
+        let (events, out) = resolve_held(held, " we flew to the.", next, Some(true), false, None);
+        assert_eq!((marks(&events), out.as_str()), (0, " Hague office"));
+    }
+
+    #[test]
+    fn a_restart_whose_words_stay_gets_a_comma_where_the_mark_was() {
+        let held = (3, '.');
+        let settled = |events: &[Event]| -> Vec<String> {
+            (events.iter())
+                .filter_map(|e| match e {
+                    Event::Settled { utterance: 3, text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        // "...we should ship it, I guess." then "well, I guess we should", left as said.
+        let (events, out) = resolve_held(
+            held,
+            " I guess.",
+            " well, I guess we",
+            Some(true),
+            true,
+            None,
+        );
+        assert_eq!(
+            (settled(&events), out.as_str()),
+            (vec![",".into()], " well, I guess we")
+        );
+        // The copy went with the cleanup, so nothing marks the pause.
+        let (events, out) = resolve_held(held, " I guess.", " we should", Some(true), false, None);
+        assert_eq!((settled(&events), out.as_str()), (vec![], " we should"));
+        // A stutter copy goes as before, and needs no comma ("...to the." then "the retailer").
+        let light = list(true, false, &[]);
+        let (events, out) = resolve_held(
+            held,
+            " to the.",
+            " the retailer",
+            Some(true),
+            true,
+            Some(&light),
+        );
+        assert_eq!((settled(&events), out.as_str()), (vec![], " retailer"));
+        // A list that removes no words keeps it, with the comma.
+        let (events, out) = resolve_held(held, " to the.", " the retailer", Some(true), true, None);
+        assert_eq!(
+            (settled(&events), out.as_str()),
+            (vec![",".into()], " the retailer")
+        );
+    }
+
+    /// Special words with English fillers, the hand-written tagger and `special` as asked.
+    fn list(fillers: bool, tagger: bool, special: &[&str]) -> Compiled {
+        let tok = crate::biasing::tests::tokenizer();
+        let mut words = SpecialWords::new();
+        for word in special {
+            words.add(word).unwrap();
+        }
+        if fillers {
+            words.set_fillers(fillers::Fillers::for_language("en"));
+        }
+        if tagger {
+            let tagger = crate::disfluency::Tagger::hand_written();
+            words.set_disfluencies(Some(Arc::new(tagger)));
+        }
+        Compiled::new(&words, &tok).0
+    }
+
+    #[test]
+    fn a_restart_keeps_names_special_words_and_at_off_every_word() {
+        // The marks and the text an utterance's first settled words give after "previous", the
+        // decode having heard `heard` with a sentence end, or nothing.
+        let resolve = |previous, settled: &str, heard: Option<&str>, first, words| {
+            let pause = heard.map(|h| Pause {
+                sentence_end: true,
+                first_words: h.split_whitespace().map(String::from).collect(),
+            });
+            let mut held = Some((3, '.'));
+            let (events, text) = resolve_pause(
+                previous,
+                &mut held,
+                pause.as_ref(),
+                first,
+                settled.to_string(),
+                words,
+            );
+            let marks: Vec<String> = (events.iter())
+                .filter_map(|e| match e {
+                    Event::Settled { utterance: 3, text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect();
+            (marks, text)
+        };
+        let medium = list(false, true, &["The Hague"]);
+        let light = list(true, false, &[]);
+        let comma = || vec![",".to_string()];
+        // A name after the cut keeps its capital, and one that starts a copy that stays too.
+        let next = " To Sarah about it.";
+        assert_eq!(
+            resolve(" I talked to.", next, Some(next), true, Some(&medium)),
+            (vec![], " Sarah about it.".into())
+        );
+        let next = " Monday at noon.";
+        assert_eq!(
+            resolve(" let's meet on Monday at.", next, Some(next), true, None),
+            (comma(), next.into())
+        );
+        // A cut never splits a special word, which keeps its copy and its capital.
+        let next = " The Hague office";
+        assert_eq!(
+            resolve(" we flew to the.", next, Some(next), true, Some(&medium)),
+            (comma(), next.into())
+        );
+        // With no fillers and no tagger, a stutter's copy stays too, with a comma.
+        let next = " the retailer";
+        assert_eq!(
+            resolve(" up to the.", next, Some(next), true, None),
+            (comma(), next.into())
+        );
+        assert_eq!(
+            resolve(" up to the.", next, Some(next), true, Some(&light)),
+            (vec![], " retailer".into())
+        );
+        // Only the utterance's first settled words can start it over, so a later pass that
+        // settles a copy leaves it as it is.
+        let next = " We can also go.";
+        assert_eq!(
+            resolve(" and we can.", next, None, true, None),
+            (comma(), " we can also go.".into())
+        );
+        assert_eq!(
+            resolve(" and we can.", next, None, false, None),
+            (vec![".".into()], next.into())
+        );
+    }
+
+    #[test]
+    fn the_first_word_takes_lower_case_after_a_restart() {
+        assert_eq!(lowercased(" Well, I guess", None), " well, I guess");
+        assert_eq!(lowercased(" 'Well,' I guess", None), " 'well,' I guess");
+        assert_eq!(lowercased(" I guess", None), " I guess");
+        assert_eq!(lowercased(" I'm sure", None), " I'm sure");
+        assert_eq!(lowercased(" NASA said", None), " NASA said");
+        assert_eq!(lowercased(" McDonald said", None), " McDonald said");
+        assert_eq!(lowercased("", None), "");
+        let tok = crate::biasing::tests::tokenizer();
+        let mut place = SpecialWords::new();
+        place.add("The Hague").unwrap();
+        let place = Compiled::new(&place, &tok).0;
+        assert_eq!(
+            lowercased(" The Hague office", Some(&place)),
+            " The Hague office"
+        );
+    }
+
+    /// What a window heard, as (id, frame) tokens, with those from `new` on after the context.
+    fn heard_at(tokens: &[(u32, usize)], new: usize) -> Heard {
+        Heard {
+            tokens: hyps(tokens).collect(),
+            new,
+        }
+    }
+
+    #[test]
+    fn the_junction_is_what_a_decode_heard_between_the_context_and_the_new_words() {
+        let tok = crate::biasing::tests::tokenizer();
+        // "the city." heard as context, then "New York".
+        let heard = heard_at(&[(6, 10), (44, 12), (60, 13), (42, 20), (43, 21)], 3);
+        assert_eq!(junction(&tok, &heard), Some((12..23, true, 3)));
+        let heard = heard_at(&[(6, 10), (44, 12), (42, 20), (43, 21)], 2);
+        assert_eq!(junction(&tok, &heard), Some((12..23, false, 2)));
+        // A sentence end heard in the pause after the context counts too.
+        let heard = heard_at(&[(6, 10), (44, 12), (60, 16), (42, 20)], 2);
+        assert_eq!(junction(&tok, &heard), Some((12..23, true, 3)));
+        // A sentence end inside the new words doesn't.
+        let heard = heard_at(&[(44, 12), (42, 20), (60, 21), (43, 22)], 1);
+        assert_eq!(junction(&tok, &heard), Some((12..23, false, 1)));
+        // With no word on one side, the pause can't be placed.
+        assert_eq!(junction(&tok, &heard_at(&[(60, 5), (42, 20)], 1)), None);
+        assert_eq!(junction(&tok, &heard_at(&[(44, 12), (60, 20)], 1)), None);
+    }
+
+    #[test]
+    fn the_first_words_are_split_where_a_word_can_start() {
+        let tok = crate::biasing::tests::tokenizer();
+        // "▁cu be ▁control" is "cube" then "control".
+        let tokens: Vec<Hyp> = hyps(&[(36, 0), (2, 1), (5, 2)]).collect();
+        assert_eq!(first_words(&tok, &tokens), ["cube", "control"]);
+        let tokens: Vec<Hyp> = hyps(&[(44, 0), (60, 1), (6, 2)]).collect();
+        assert_eq!(first_words(&tok, &tokens), ["city.", "the"]);
+    }
+
+    #[test]
+    fn the_first_word_takes_the_case_the_model_heard_it_in() {
+        let heard =
+            |words: &[&str]| -> Vec<String> { words.iter().map(|w| w.to_string()).collect() };
+        // "...because" then "Sometimes you", heard as "sometimes" after the words before it.
+        let sometimes = heard(&["sometimes", "you"]);
+        assert_eq!(
+            with_case_of(" Sometimes you", &sometimes, None),
+            " sometimes you"
+        );
+        assert_eq!(
+            with_case_of(" 'Sometimes,' you", &sometimes, None),
+            " 'sometimes,' you"
+        );
+        // A different spelling leaves the word as decoded.
+        assert_eq!(
+            with_case_of(" Sometime you", &sometimes, None),
+            " Sometime you"
+        );
+        // Hesitations before it are passed over, since filler removal may have left them out
+        // ("...a test." then "Um, plan that", settled as "Plan that").
+        let plan = heard(&["um,", "plan", "that"]);
+        assert_eq!(
+            with_case_of(" Plan that covers", &plan, None),
+            " plan that covers"
+        );
+        assert_eq!(
+            with_case_of(" Um, plan that", &plan, None),
+            " um, plan that"
+        );
+        // Only hesitations, so a word that differs stops the search.
+        assert_eq!(with_case_of(" That plan", &plan, None), " That plan");
+        // "I" keeps its capital whatever the model wrote.
+        assert_eq!(with_case_of(" I think", &heard(&["i"]), None), " I think");
+        assert_eq!(
+            with_case_of(" I'm sure", &heard(&["i'm"]), None),
+            " I'm sure"
+        );
+        // A special word keeps its case.
+        let tok = crate::biasing::tests::tokenizer();
+        let mut place = SpecialWords::new();
+        place.add("The Hague").unwrap();
+        let place = Compiled::new(&place, &tok).0;
+        assert_eq!(
+            with_case_of(" The Hague", &heard(&["the"]), Some(&place)),
+            " The Hague"
+        );
     }
 
     #[test]
@@ -2748,6 +3426,63 @@ mod tests {
         let from = 7 * SAMPLE_RATE / 10;
         assert_eq!(a.start, from as u64);
         assert!(a.stream.audio() == &audio[from..]);
+    }
+
+    #[test]
+    #[ignore = "needs a model, named by GRANITE_SPEECH_DIR"]
+    fn an_utterance_after_a_short_pause_keeps_the_audio_before_it() {
+        let dir = std::env::var_os("GRANITE_SPEECH_DIR").expect("set GRANITE_SPEECH_DIR");
+        let model = Arc::new(Model::load(dir.as_ref(), &crate::Options::default()).unwrap());
+        // Speech-level noise from 1 s to 4 s and for 1 s after a pause, with quiet around it.
+        for (pause, context) in [(1.0, true), (3.0, false)] {
+            let second = ((4.0 + pause) * SAMPLE_RATE as f64) as usize;
+            let mut seed = 0x9e37_79b9u64;
+            let audio: Vec<f32> = (0..second + 3 * SAMPLE_RATE)
+                .map(|i| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let speech = (SAMPLE_RATE..4 * SAMPLE_RATE).contains(&i)
+                        || (second..second + SAMPLE_RATE).contains(&i);
+                    let level = if speech { 0.2 } else { 0.0005 };
+                    ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * level
+                })
+                .collect();
+            // The same whether the first utterance's final pass runs before the second starts
+            // or after.
+            let mut found = Vec::new();
+            for passes in [false, true] {
+                let mut s = Streamer::new(model.clone(), StreamConfig::default());
+                let mut events = Vec::new();
+                for chunk in audio[..second + SAMPLE_RATE / 2].chunks(SAMPLE_RATE / 50) {
+                    events.extend(s.push(chunk));
+                    while passes && s.wants_final() {
+                        events.extend(s.pass().unwrap());
+                    }
+                }
+                let onset = (events.iter())
+                    .find_map(|e| match e {
+                        Event::SpeechStart { utterance: 1, at } => Some(*at),
+                        _ => None,
+                    })
+                    .expect("a second utterance started");
+                let a = s.active.as_ref().expect("the second utterance is active");
+                // Its audio starts 300 ms before its onset, with the context before that.
+                let start = a.start as f64 / SAMPLE_RATE as f64;
+                assert!((start - (onset - 0.3)).abs() < 0.02, "{start} for {onset}");
+                assert!(a.stream.audio() == &audio[a.start as usize..second + SAMPLE_RATE / 2]);
+                let lead = if context {
+                    samples(CONTEXT) / FRAME * FRAME
+                } else {
+                    0
+                };
+                assert_eq!(a.stream.context.len(), lead, "a pause of {pause} s");
+                let from = a.start as usize - lead;
+                assert!(a.stream.context == audio[from..a.start as usize]);
+                found.push((a.start, a.stream.context.len()));
+            }
+            assert_eq!(found[0], found[1], "a pause of {pause} s");
+        }
     }
 
     #[test]

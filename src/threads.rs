@@ -54,6 +54,11 @@ pub struct Pool {
     running: Mutex<()>,
 }
 
+// A task's panic leaves the pool whole. `run` clears its job and raises the panic again only
+// after every worker has left the job, so a pool seen across a caught panic works as before.
+impl std::panic::UnwindSafe for Pool {}
+impl std::panic::RefUnwindSafe for Pool {}
+
 impl Pool {
     /// A pool of `threads` threads in all (at least 1).
     pub fn new(threads: usize) -> Pool {

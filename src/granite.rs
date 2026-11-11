@@ -589,8 +589,8 @@ impl Granite {
     ) -> Vec<Token> {
         let (words, _) = Compiled::new(words, &self.tokenizer);
         let columns = (!words.forms.is_empty()).then_some(words.tokens.as_slice());
-        let (ids, scores) = timed(timings, "ctc_head", || {
-            self.frame_scores(&encoded.data, encoded.frames, columns)
+        let FrameScores { ids, scores, .. } = timed(timings, "ctc_head", || {
+            self.frame_scores(&encoded.data, encoded.frames, columns, None)
         });
         let mut tokens = ctc_tokens(&ids, self.config.blank);
         if !words.forms.is_empty() {
@@ -680,31 +680,38 @@ impl Granite {
     /// The most likely token of each of `frames` frames of encoder output, computed a chunk of
     /// frames at a time.
     pub(crate) fn ids_of(&self, x: &[f32], frames: usize) -> Vec<u32> {
-        self.frame_scores(x, frames, None).0
+        self.frame_scores(x, frames, None, None).ids
     }
 
-    /// The most likely token of each of `frames` frames of encoder output and, with `columns`,
-    /// the rows word spotting reads for them (see [`biasing::score_row`]).
+    /// The most likely token of each of `frames` frames of encoder output, with `columns` the
+    /// rows word spotting reads for them (see [`biasing::score_row`]), and with `any_of` each
+    /// frame's probability of any of those tokens.
     pub(crate) fn frame_scores(
         &self,
         x: &[f32],
         frames: usize,
         columns: Option<&[u32]>,
-    ) -> (Vec<u32>, Vec<f32>) {
+        any_of: Option<&[u32]>,
+    ) -> FrameScores {
         let (d, vocab) = (self.config.d_model, self.config.vocab);
-        let mut ids = Vec::with_capacity(frames);
-        let mut scores = Vec::new();
+        let mut out = FrameScores {
+            ids: Vec::with_capacity(frames),
+            ..FrameScores::default()
+        };
         for first in (0..frames).step_by(LOGIT_ROWS) {
             let rows = (frames - first).min(LOGIT_ROWS);
             let logits = self.logits_of(&x[first * d..(first + rows) * d], rows);
             for row in logits.chunks_exact(vocab) {
-                ids.push(argmax(row) as u32);
+                out.ids.push(argmax(row) as u32);
                 if let Some(columns) = columns {
-                    biasing::score_row(row, self.config.blank, columns, &mut scores);
+                    biasing::score_row(row, self.config.blank, columns, &mut out.scores);
+                }
+                if let Some(tokens) = any_of {
+                    out.probabilities.push(probability_of(row, tokens));
                 }
             }
         }
-        (ids, scores)
+        out
     }
 
     /// The encoder's blocks.
@@ -1105,6 +1112,28 @@ impl Scratch {
     }
 }
 
+/// What [`Granite::frame_scores`] reads from each frame's CTC logits.
+#[derive(Debug, Default)]
+pub(crate) struct FrameScores {
+    /// Each frame's most likely token.
+    pub ids: Vec<u32>,
+    /// The rows word spotting reads, one for each frame, if asked for.
+    pub scores: Vec<f32>,
+    /// Each frame's probability of the tokens asked for, if any.
+    pub probabilities: Vec<f32>,
+}
+
+/// The probability of any of `tokens` in a row of logits.
+fn probability_of(row: &[f32], tokens: &[u32]) -> f32 {
+    let max = row.iter().fold(f32::NEG_INFINITY, |m, &x| m.max(x));
+    let total: f32 = row.iter().map(|&x| (x - max).exp()).sum();
+    tokens
+        .iter()
+        .map(|&t| (row[t as usize] - max).exp())
+        .sum::<f32>()
+        / total
+}
+
 /// The index of the first largest value.
 fn argmax(v: &[f32]) -> usize {
     let mut best = 0;
@@ -1169,5 +1198,15 @@ mod tests {
             tokens.iter().map(|t| (t.id, t.frame, t.duration)).collect();
         assert_eq!(got, vec![(5, 1, 2), (5, 4, 1), (7, 5, 3), (2, 10, 1)]);
         assert!(ctc_tokens(&[0, 0], 0).is_empty());
+    }
+
+    #[test]
+    fn a_frames_probability_of_some_tokens_is_their_share_of_the_softmax() {
+        let row = [2f32.ln(), 1f32.ln(), 1f32.ln(), 4f32.ln()];
+        assert!((probability_of(&row, &[1, 2]) - 0.25).abs() < 1e-6);
+        assert!((probability_of(&row, &[3]) - 0.5).abs() < 1e-6);
+        // Large logits don't overflow.
+        let row = [1000.0, 1000.0];
+        assert!((probability_of(&row, &[0]) - 0.5).abs() < 1e-6);
     }
 }
