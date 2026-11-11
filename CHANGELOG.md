@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.4.0
+
+### Disfluency cleanup
+
+- `disfluency::Tagger` leaves false starts, repairs, repeated phrases and filler words out of
+  English text, once over each whole utterance, with `words.set_disfluencies(Some(tagger))`. It
+  only deletes, so every word left is one the speech model wrote. Its pack is Ettin encoder 68M
+  fine-tuned on the AMI Meeting Corpus's annotations, in q8_0 (158 MB), from this repository's
+  `disfluency-tagger-1` release. `disfluency::PACK_DOWNLOAD` pins it by size and SHA-256, and
+  `disfluency::PACK_NOTICE` says what it's made from and under which licences.
+- `Tagger::hand_written()` cleans up with hand-set rules and no pack. Beside the fillers it takes
+  out cut-off words and fragments, a word or two-word phrase said again, and sentence-opening and
+  trailing markers, in well under a millisecond an utterance.
+- `words.set_guards(Guards::for_language("en"))` keeps words that a cleanup would take where
+  dictation needs them, such as spoken symbols, a unit after a number, a filler talked about as a
+  word, a list's items, and "so" and "well" in their own sense. On 112,000 words of seven AMI
+  meeting series they undo 58 of the tagger's 12,521 deletions.
+- `words.set_punctuation(Punctuation::for_language("en"))` fixes capitals and punctuation after
+  the cleanup, and `Punctuation::joining_more()` joins more of what a pause split.
+- `telmo transcribe --remove-disfluencies` downloads the tagger on first use, after asking, and
+  runs it with the guards. A pack put in the cache by hand is checked against the same pins before
+  its first use.
+- In a stream with a tagger, an utterance's words stay tentative until it ends, and its last pass
+  settles the cleaned text.
+- `RemoteFile` is a file to download with its URL, size and SHA-256.
+
+[docs/disfluencies.md](docs/disfluencies.md) has the rules, the guards and the tagger's speed.
+
+### Streaming
+
+- After a pause of at most 2 s, the pass that first settles the next utterance's words also
+  decodes the audio on both sides of the pause, once, and the sentence end at the pause follows
+  what the model hears there. The next word takes the case the model gave it. On 47 windows of
+  AMI meetings, the mark and the case at short pauses were right 65.0% of the time with Granite
+  (50.0% before) and 76.6% with Parakeet (68.8% before). The extra decode settles Parakeet's words
+  about 0.2 s later at the median.
+- When an utterance starts by saying the last words before the pause again, after a hesitation or
+  an editing word if any, the sentence goes on with a comma at the pause. With a tagger the copy
+  and the words before it go. They stay when they start a special word or follow a "no".
+
 ## 0.3.3
 
 ### Filler removal
