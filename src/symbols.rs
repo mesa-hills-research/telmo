@@ -477,8 +477,13 @@ impl El {
         self.text.to_lowercase()
     }
 
+    /// Whether it's a function word or a hesitation kept as a word, either of which leaves a
+    /// symbol beside it as prose.
     fn is_function(&self) -> bool {
-        self.kind == Kind::Atom && !self.letters && !self.snapped && listed(FUNCTION, &self.bare())
+        self.kind == Kind::Atom
+            && !self.letters
+            && !self.snapped
+            && (listed(FUNCTION, &self.bare()) || is_hesitation(&self.text))
     }
 
     fn is_atom(&self) -> bool {

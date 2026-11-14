@@ -53,6 +53,7 @@ Use the well hyphen known name.	Use the well-known name.	=
 Look at source slash S R C dot R S.	Look at source/src.rs.	=
 Use the source slash engine file.	Use the source/engine file.	=
 Open source slash um engine dot rs.	Open source slash um engine.rs.	Open source/um engine.rs.
+Uh slash tmp slash cache is full.	Uh /tmp/cache is full.	Uh/tmp/cache is full.
 Use the dash dash token parameter.	Use the --token parameter.	=
 Then build it with dash-dash release.	Then build it with --release.	=
 Dash dash allow dash empty skips the check.	--allow-empty skips the check.	=
