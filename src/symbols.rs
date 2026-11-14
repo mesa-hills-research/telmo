@@ -96,12 +96,12 @@ impl Symbols {
         joins
     }
 
-    /// The first of `words` that may still join the words after the last of them, if a run
-    /// could still go on past the last, or none.
-    pub(crate) fn open_from(&self, words: &[&str]) -> Option<usize> {
-        let els = elements(words, true, &[]);
+    /// The first of `words` that may still join the words after the last of them, if a run with
+    /// a symbol in it could still go on past the last, or none. With `hesitations_go`, a
+    /// hesitation inside the run doesn't end it.
+    pub(crate) fn open_from(&self, words: &[&str], hesitations_go: bool) -> Option<usize> {
+        let els = elements(words, hesitations_go, &[]);
         let last = els.last()?;
-        // Words before a symbol, or before one of their own, may join what follows it.
         let open = matches!(last.kind, Kind::Symbol(..) | Kind::Hesitation)
             || last.is_atom() && last.open_after;
         if !open {
@@ -124,9 +124,9 @@ impl Symbols {
             }
             k -= 1;
         }
-        // A lone word at the end waits only for a symbol, which the next pass shows.
-        let start = els[k].words.start;
-        (k + 1 < els.len() || matches!(last.kind, Kind::Symbol(..))).then_some(start)
+        // Words without a symbol among them wait for nothing, since the next pass shows one.
+        let symbol = els[k..].iter().any(|e| matches!(e.kind, Kind::Symbol(..)));
+        symbol.then_some(els[k].words.start)
     }
 
     /// The parts of `run` that may join. A word of code that starts with symbols ("dash dash

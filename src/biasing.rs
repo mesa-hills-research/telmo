@@ -911,7 +911,7 @@ impl Compiled {
     /// The first of `texts`, a stream's words up to the first that may still change, from which
     /// a run of spoken symbols could still go on past them, or none.
     pub fn code_open_from(&self, texts: &[&str]) -> Option<usize> {
-        self.symbols.and_then(|s| s.open_from(texts))
+        (self.symbols).and_then(|s| s.open_from(texts, self.hesitations_go()))
     }
 
     /// `tokens` with the spoken symbols of code-like runs written as characters and dictated

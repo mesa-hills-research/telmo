@@ -118,7 +118,7 @@ fn words_written_as_code_are_told_apart() {
 
 #[test]
 fn a_run_still_open_at_the_end_of_a_stream_holds_its_words() {
-    let open = |text: &str| prose().open_from(&text.split(' ').collect::<Vec<_>>());
+    let open = |text: &str| prose().open_from(&text.split(' ').collect::<Vec<_>>(), true);
     assert_eq!(open("so in source slash engine dot"), Some(2));
     assert_eq!(open("so in source slash engine"), Some(2));
     assert_eq!(open("so in source slash"), Some(2));
@@ -129,6 +129,14 @@ fn a_run_still_open_at_the_end_of_a_stream_holds_its_words() {
     assert_eq!(open("hello there"), None);
     assert_eq!(open("engine."), None);
     assert_eq!(open("engine dot, rs"), None);
+    // A hesitation holds words only inside a run.
+    assert_eq!(open("so in source slash um"), Some(2));
+    assert_eq!(open("so in source um"), None);
+    assert_eq!(open("we need um"), None);
+    // When fillers stay, "um" is a word like any other.
+    let kept = prose().open_from(&["in", "source", "slash", "um"], false);
+    assert_eq!(kept, Some(1));
+    assert_eq!(prose().open_from(&["we", "need", "um"], false), None);
 }
 
 /// A tokenizer with a piece for each character, with and without the word-start marker, so any
