@@ -75,7 +75,7 @@ dependencies.
 
 ```toml
 [dependencies]
-telmo = { version = "0.4", default-features = false }
+telmo = { version = "0.5", default-features = false }
 ```
 
 ```rust
@@ -106,6 +106,12 @@ repeated phrases once over each utterance, with `words.set_disfluencies(Some(tag
 `Tagger::hand_written()` cleans up with hand-set rules and no model. Guards keep the words code
 dictation needs, such as spoken flags and units. `telmo transcribe --remove-disfluencies` downloads the
 tagger and runs both. [docs/disfluencies.md](docs/disfluencies.md) describes them.
+
+Spoken symbols such as "slash" and "dot" come out as characters where the words read as code,
+with `words.set_symbols(Symbols::for_language("en"))`, while "a dot on the map" stays as said.
+Given a project's folder, `Paths::scan` makes a dictated path come out as the file it names, so
+"source slash engine dot rs" gives src/engine.rs. `telmo transcribe --symbols` and `--paths DIR`
+do the same. [docs/paths.md](docs/paths.md) describes both.
 
 ## Accuracy and speed
 

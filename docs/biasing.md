@@ -76,7 +76,9 @@ phrase too. With "read me" for README, "read me a story" would become "README a 
 
 `SpecialWords::add`, `add_code_word` and `add_spoken` return a `Rejection` for a word or form the
 list refuses, and `Model::unusable_special_words` lists the words and forms a model's vocabulary
-can't spell.
+can't spell. A spoken form's word may have any printable ASCII character, since Telmo writes
+those a vocabulary lacks with written-only pieces, as [paths.md](paths.md) says. A word to
+favour can't, since the model can't emit them.
 
 | Limit | Value |
 |---|---|

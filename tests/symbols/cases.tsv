@@ -26,7 +26,7 @@ Use a colon, not a dash.	Use a colon, not a dash.	=
 The dot product of the vectors.	The dot product of the vectors.	The.product of the vectors.
 Write it with an em dash here.	Write it with an em dash here.	Write it with an em-here.
 # Files, paths, identifiers, flags, URLs
-So in source slash engine dot rs in the loop function.	So in source/engine.rs in the loop function.	=
+So in source slash engine dot rs, the parser needs a test.	So in source/engine.rs, the parser needs a test.	=
 Open engine dot rs.	Open engine.rs.	=
 Update the README dot md.	Update the README.md.	=
 Check Cargo dot toml for it.	Check Cargo.toml for it.	=
@@ -53,9 +53,9 @@ Use the well hyphen known name.	Use the well-known name.	=
 Look at source slash S R C dot R S.	Look at source/src.rs.	=
 Use the source slash engine file.	Use the source/engine file.	=
 Open source slash um engine dot rs.	Open source slash um engine.rs.	Open source/um engine.rs.
-Use the dash dash password parameter.	Use the --password parameter.	=
-And it can be generated with dash-dash generate.	And it can be generated with --generate.	=
-Dash dash require dash auth requires a password.	--require-auth requires a password.	=
+Use the dash dash token parameter.	Use the --token parameter.	=
+Then build it with dash-dash release.	Then build it with --release.	=
+Dash dash allow dash empty skips the check.	--allow-empty skips the check.	=
 Commit with git commit dash m.	Commit with git commit -m.	=
 Read source slash engine.rs again.	Read source/engine.rs again.	=
 # Left as words in prose, and joined in a code field
@@ -65,9 +65,9 @@ Check it with is underscore empty.	Check it with is underscore empty.	Check it w
 Print self dot name.	Print self dot name.	Print self.name.
 Do a force dash push.	Do a force dash push.	Do a force-push.
 Check the source slash engine module.	Check the source/engine module.	=
-Make that lead system instructions with underscore separating the words.	Make that lead system instructions with underscore separating the words.	Make that lead system instructions with_separating the words.
-It sits behind a triple dot menu.	It sits behind a triple dot menu.	It sits behind a...menu.
-The dash I command parameter sets the interface.	The -I command parameter sets the interface.	=
+Name it user settings with underscore separating the words.	Name it user settings with underscore separating the words.	Name it user settings with_separating the words.
+Open the triple dot menu.	Open the triple dot menu.	Open the...menu.
+The dash I option sets the port.	The -I option sets the port.	=
 And I dash I mean it.	And I dash I mean it.	And I -I mean it.
 # More of both, written after the rule and run once before any change to it
 Can you look at tests slash fixtures slash audio dot wav for me?	Can you look at tests/fixtures/audio.wav for me?

@@ -64,8 +64,8 @@ fn a_listed_path_is_written_as_spelled_and_a_new_file_joins_its_folder() {
     ]);
     for (said, written) in [
         (
-            "So in source slash engine dot rs in the loop function,",
-            "So in src/engine.rs in the loop function,",
+            "So in source slash engine dot rs, the parser needs a test.",
+            "So in src/engine.rs, the parser needs a test.",
         ),
         ("Update the readme dot md.", "Update the README.md."),
         (
