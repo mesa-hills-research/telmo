@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.5.0
+
+### Symbols and paths
+
+- `words.set_symbols(Symbols::for_language("en"))` writes spoken symbols (slash, dot,
+  underscore, dash, colon and others) as characters inside runs that read as code, after spoken
+  forms are written. "source slash engine dot rs" gives source/engine.rs and "dash dash allow
+  dash empty" gives --allow-empty, while "a dot on the map" and "and slash or" stay as said. A
+  function word beside a symbol ends a run in prose, and a run is written as code only on a sign
+  that it is, such as a file extension or a domain after a dot, the shape of a flag, two symbols
+  or more, or a name rare in prose. On 232,000 words of LibriSpeech and FLEURS no run was.
+- `Symbols::for_code()` takes every run for code, for a terminal or a code editor.
+- `Paths::scan` lists the names under a folder, breadth first and keeping to `.gitignore`, and
+  `Paths::from_list` takes a caller's paths. With `words.set_paths(Some(paths))`, a dictated path
+  that spells a listed one, or the end of one, is written as it's spelled there, so "source slash
+  engine dot rs" gives src/engine.rs. Only folder listings and `.gitignore` files are read.
+- The cleanup keeps every word written as code, and in a stream a run's words settle together.
+- `Symbols::write` does the same on text, and `telmo transcribe` takes `--symbols`, `--code` and
+  `--paths DIR`.
+
+[docs/paths.md](docs/paths.md) has the rules, the limits and the measurements.
+
+### Written-only pieces
+
+- Telmo's tokenizer adds a piece past the vocabulary's end for each printable ASCII character the
+  vocabulary can't spell, so text written after decoding may use it. Parakeet can now write `_`,
+  `~`, `\`, `@` and brackets in spoken forms' words and in code, and the text stays the decoding
+  of the tokens, with their frames. Decoding never emits or favours these pieces.
+- `Transcript::tokens` may hold ids at or past the vocabulary's size, which Telmo's tokenizer
+  (`Model::tokenizer`) decodes and a model's own `tokenizer.json` doesn't. `Tokenizer::encode`
+  gives them for those characters where it gave the unknown token before, and
+  `Tokenizer::is_written_only` tells them apart.
+
+### Disfluency cleanup
+
+- A word beside a spoken "dot" stays when disfluencies go. "So in source slash engine dot rs"
+  lost its "rs", which the tagger took for a cut-off fragment. The symbols
+  guard now also knows dot, hash, colon, semicolon, equals and backtick.
+- A sentence-opening "so" or "well" goes before a word written any way. With a spoken form for
+  src/engine.rs, "So in src/engine.rs in the loop" kept its "So", because the rule counted only
+  words of plain letters. A word now counts when it has a letter or a digit.
+
 ## 0.4.0
 
 ### Disfluency cleanup
