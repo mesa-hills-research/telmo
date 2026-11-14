@@ -159,11 +159,14 @@ impl Context {
 
 /// The spellings a transcript keeps as they are, the special words and spoken forms' words. A
 /// word goes nowhere where its whole spelling occurs, and the first word of a spelling keeps its
-/// case anywhere.
+/// case anywhere. With spoken symbols written, so does a word written as code, such as a path or
+/// a flag.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Protected {
     /// Each spelling's words in lower case, by its first word.
     spellings: HashMap<String, Vec<Vec<String>>>,
+    /// Whether words written as code stay.
+    code: bool,
 }
 
 impl Protected {
@@ -181,9 +184,25 @@ impl Protected {
         protected
     }
 
+    /// The same, also keeping words written as code ("src/engine.rs", "--force").
+    pub fn with_code_words(self) -> Protected {
+        Protected { code: true, ..self }
+    }
+
     /// Which of `words`, after the words `before` without their punctuation, are part of a
-    /// spelling that occurs whole among them, one that began in `before` included.
+    /// spelling that occurs whole among them, one that began in `before` included, or written
+    /// as code when code words stay.
     pub fn words(&self, before: &[String], words: &[&str]) -> Vec<bool> {
+        let mut covered = self.spelled(before, words);
+        if self.code {
+            for (k, w) in words.iter().enumerate() {
+                covered[k] |= crate::symbols::is_code_word(w);
+            }
+        }
+        covered
+    }
+
+    fn spelled(&self, before: &[String], words: &[&str]) -> Vec<bool> {
         let mut covered = vec![false; before.len() + words.len()];
         if !self.spellings.is_empty() {
             let bare: Vec<String> = (before.iter().cloned())
@@ -520,7 +539,7 @@ pub(crate) fn words(tokenizer: &Tokenizer, ids: &[u32]) -> Vec<Range<usize>> {
 
 /// The ids of `text` as a word, with the word-start marker if `start`, or none if the
 /// vocabulary can't spell it.
-fn spelled(tokenizer: &Tokenizer, text: &str, start: bool) -> Option<Vec<u32>> {
+pub(crate) fn spelled(tokenizer: &Tokenizer, text: &str, start: bool) -> Option<Vec<u32>> {
     let ids = if start {
         tokenizer.encode(text)
     } else {

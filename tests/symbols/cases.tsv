@@ -1,0 +1,102 @@
+# Dictated text as a speech model writes it, what the symbols pass writes in prose, and what it
+# writes in a code field, where "=" means the same as in prose and no third column means it isn't
+# checked there.
+# Prose that uses symbol names
+Use and slash or in the contract.	Use and slash or in the contract.	Use and/or in the contract.
+There's a dot on the map.	There's a dot on the map.	There's a.on the map.
+Add a dash of salt.	Add a dash of salt.	Add a-of salt.
+He had colon cancer.	He had colon cancer.	He had:cancer.
+It rose by point five percent.	It rose by point five percent.	=
+Type the slash command to start.	Type the slash command to start.	Type the/command to start.
+And then dot dot dot, nothing.	And then dot dot dot, nothing.	=
+We're on version two point one.	We're on version two point one.	=
+The power button is on slash off.	The power button is on slash off.	The power button is on/off.
+I want to underscore the point.	I want to underscore the point.	I want to_the point.
+Put a hyphen there.	Put a hyphen there.	Put a-there.
+Slash the prices by half.	Slash the prices by half.	/the prices by half.
+She made a mad dash for the door.	She made a mad dash for the door.	She made a mad-for the door.
+Dot the i's and cross the t's.	Dot the i's and cross the t's.	.the i's and cross the t's.
+I bought a polka dot dress.	I bought a polka dot dress.	I bought a polka.dress.
+We sorted the segments slash utterances first.	We sorted the segments slash utterances first.	We sorted the segments/utterances first.
+That was the dot com bubble.	That was the dot com bubble.	That was the.com bubble.
+His slash her pronouns.	His slash her pronouns.	His/her pronouns.
+Then the dash dash and then nothing.	Then the dash dash and then nothing.	Then the --and then nothing.
+Input slash output is slow.	Input slash output is slow.	Input/output is slow.
+Use a colon, not a dash.	Use a colon, not a dash.	=
+The dot product of the vectors.	The dot product of the vectors.	The.product of the vectors.
+Write it with an em dash here.	Write it with an em dash here.	Write it with an em-here.
+# Files, paths, identifiers, flags, URLs
+So in source slash engine dot rs in the loop function.	So in source/engine.rs in the loop function.	=
+Open engine dot rs.	Open engine.rs.	=
+Update the README dot md.	Update the README.md.	=
+Check Cargo dot toml for it.	Check Cargo.toml for it.	=
+Rename it to lead underscore system underscore instructions.	Rename it to lead_system_instructions.	=
+Pass dash dash remove dash disfluencies to it.	Pass --remove-disfluencies to it.	=
+Run git push dash dash force dash with dash lease.	Run git push --force-with-lease.	=
+Run it with dash v.	Run it with -v.	=
+Call std colon colon fs colon colon read.	Call std::fs::read.	=
+Go to https colon slash slash example dot com slash docs.	Go to https://example.com/docs.	=
+Visit example dot com today.	Visit example.com today.	=
+It listens on localhost colon 8080.	It listens on localhost:8080.	=
+Look in tilde slash projects.	Look in ~/projects.	=
+Run dot slash build dot sh first.	Run ./build.sh first.	=
+It's in dot dot slash lib.	It's in ../lib.	=
+Add it to dot gitignore.	Add it to .gitignore.	Add it to.gitignore.
+The binary is in slash user slash local slash bin.	The binary is in /user/local/bin.	The binary is in/user/local/bin.
+Delete all the dot rs files.	Delete all the .rs files.	Delete all the.rs files.
+Read source slash biasing slash spoken dot rs.	Read source/biasing/spoken.rs.	=
+Set the user underscore id field.	Set the user_id field.	=
+It's in node dot js.	It's in node.js.	=
+Edit vite dot config dot ts.	Edit vite.config.ts.	=
+The path is C colon backslash users backslash ada.	The path is C:\users\ada.	=
+Use the well hyphen known name.	Use the well-known name.	=
+Look at source slash S R C dot R S.	Look at source/src.rs.	=
+Use the source slash engine file.	Use the source/engine file.	=
+Open source slash um engine dot rs.	Open source slash um engine.rs.	Open source/um engine.rs.
+Use the dash dash password parameter.	Use the --password parameter.	=
+And it can be generated with dash-dash generate.	And it can be generated with --generate.	=
+Dash dash require dash auth requires a password.	--require-auth requires a password.	=
+Commit with git commit dash m.	Commit with git commit -m.	=
+Read source slash engine.rs again.	Read source/engine.rs again.	=
+# Left as words in prose, and joined in a code field
+Call x dot to underscore string.	Call x dot to underscore string.	Call x.to_string.
+Call map dot get underscore or underscore insert.	Call map.get_or_insert.	Call map.get_or_insert.
+Check it with is underscore empty.	Check it with is underscore empty.	Check it with is_empty.
+Print self dot name.	Print self dot name.	Print self.name.
+Do a force dash push.	Do a force dash push.	Do a force-push.
+Check the source slash engine module.	Check the source/engine module.	=
+Make that lead system instructions with underscore separating the words.	Make that lead system instructions with underscore separating the words.	Make that lead system instructions with_separating the words.
+It sits behind a triple dot menu.	It sits behind a triple dot menu.	It sits behind a...menu.
+The dash I command parameter sets the interface.	The -I command parameter sets the interface.	=
+And I dash I mean it.	And I dash I mean it.	And I -I mean it.
+# More of both, written after the rule and run once before any change to it
+Can you look at tests slash fixtures slash audio dot wav for me?	Can you look at tests/fixtures/audio.wav for me?
+The config lives in dot cargo slash config dot toml.	The config lives in .cargo/config.toml.
+Rename get underscore user underscore name to fetch underscore user.	Rename get_user_name to fetch_user.
+Run cargo build dash dash release and tell me how long it takes.	Run cargo build --release and tell me how long it takes.
+Add a dash dash dry dash run flag to the install command.	Add a --dry-run flag to the install command.
+Put the logs in slash var slash log slash app.	Put the logs in /var/log/app.
+I think the bug is in main dot py, not utils dot py.	I think the bug is in main.py, not utils.py.
+Send it to support at example dot org.	Send it to support at example.org.
+The docs are at docs dot rs slash telmo.	The docs are at docs.rs/telmo.
+Use serde colon colon Deserialize for that struct.	Use serde::Deserialize for that struct.
+Open package dot json and bump the version.	Open package.json and bump the version.
+Check the dot env file for the key.	Check the .env file for the key.
+It's served on port 8080, so try localhost colon 8080 slash health.	It's served on port 8080, so try localhost:8080/health.
+The function is called parse underscore args.	The function is called parse_args.
+Set the dash dash threads option to four.	Set the --threads option to four.
+Look at the style dot css file.	Look at the style.css file.
+I'd rather use a slash than a dash in the title.	I'd rather use a slash than a dash in the title.
+Draw a dot at the center of the circle.	Draw a dot at the center of the circle.
+The colon is the longest part of the large intestine.	The colon is the longest part of the large intestine.
+She used an underscore as a placeholder.	She used an underscore as a placeholder.
+Put a hyphen between the two words.	Put a hyphen between the two words.
+We need to slash the budget by a third.	We need to slash the budget by a third.
+The score was three dash two at half time.	The score was three dash two at half time.
+Dot and I went to the market.	Dot and I went to the market.
+It was a fifty dash fifty chance.	It was a fifty dash fifty chance.
+Use a forward slash, not a backslash, in the URL.	Use a forward slash, not a backslash, in the URL.
+The tilde key is next to the one.	The tilde key is next to the one.
+He wrote it as his slash her in the form.	He wrote it as his slash her in the form.
+We'll dash off a reply tonight.	We'll dash off a reply tonight.
+They connected the dots on the chart.	They connected the dots on the chart.

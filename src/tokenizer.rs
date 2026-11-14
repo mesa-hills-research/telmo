@@ -20,6 +20,9 @@ enum Piece {
 #[derive(Debug, Clone)]
 pub struct Tokenizer {
     pieces: Vec<Piece>,
+    /// Pieces past the vocabulary's end for the printable ASCII characters it can't spell, which
+    /// text written after decoding may use and the model never emits.
+    written: Vec<Piece>,
     /// Whether the file's decoder includes `ByteFallback`, which decodes each run of byte pieces
     /// on its own and turns a run that isn't valid UTF-8 into one U+FFFD per byte.
     byte_runs: bool,
@@ -154,21 +157,47 @@ impl Tokenizer {
                 merges.entry((l, r)).or_insert((rank as u32, m));
             }
         }
+        let byte_fallback = model.get("byte_fallback").and_then(|b| b.as_bool()) == Some(true);
+        let mut written = Vec::new();
+        for c in (b'!'..=b'~').map(char::from) {
+            let text = c.to_string();
+            let as_byte = byte_fallback && byte_ids[c as usize].is_some();
+            if !ids.contains_key(&text) && !as_byte {
+                ids.insert(text.clone(), (pieces.len() + written.len()) as u32);
+                written.push(Piece::Text(text));
+            }
+        }
         Ok(Tokenizer {
             pieces,
+            written,
             byte_runs,
             ids,
             byte_ids,
             merges,
-            byte_fallback: model.get("byte_fallback").and_then(|b| b.as_bool()) == Some(true),
+            byte_fallback,
             unk,
             fuse_unk: model.get("fuse_unk").and_then(|b| b.as_bool()) == Some(true),
         })
     }
 
-    /// The vocabulary size, added tokens included.
+    /// The vocabulary size, added tokens included. Written-only pieces come after it.
     pub fn len(&self) -> usize {
         self.pieces.len()
+    }
+
+    /// Whether `id` is a written-only piece, one Telmo adds past the end of the vocabulary for a
+    /// printable ASCII character the vocabulary can't spell. Text written after decoding, such as
+    /// a spoken form's word or a spoken symbol, may use one, and the model never emits one.
+    pub fn is_written_only(&self, id: u32) -> bool {
+        (id as usize)
+            .checked_sub(self.pieces.len())
+            .is_some_and(|k| k < self.written.len())
+    }
+
+    /// The piece of `id`, written-only pieces included.
+    fn piece(&self, id: u32) -> Option<&Piece> {
+        let id = id as usize;
+        (self.pieces.get(id)).or_else(|| self.written.get(id.checked_sub(self.pieces.len())?))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -187,7 +216,8 @@ impl Tokenizer {
 
     /// Splits text into token ids as the BPE model does, each word with the word-start marker
     /// `▁` before it, as the Metaspace pre-tokenizer splits text. Characters the vocabulary lacks
-    /// become byte pieces where the model falls back to bytes, and the unknown token otherwise.
+    /// become byte pieces where the model falls back to bytes, written-only pieces for printable
+    /// ASCII, and the unknown token otherwise.
     ///
     /// This takes a shortcut. The tokenizer file's Unicode normalization (NFKC-like) isn't applied,
     /// which only matters for compatibility characters such as full-width letters. Apply it if
@@ -248,7 +278,7 @@ impl Tokenizer {
     /// Whether a word may end just before token `id`, which it may if the token starts a word or
     /// holds no letter or digit (punctuation, a special token).
     pub fn is_word_boundary(&self, id: u32) -> bool {
-        match self.pieces.get(id as usize) {
+        match self.piece(id) {
             Some(Piece::Text(t)) => t.starts_with(' ') || !t.chars().any(char::is_alphanumeric),
             Some(Piece::Byte(b)) => b.is_ascii() && !b.is_ascii_alphanumeric(),
             Some(Piece::Control) | None => true,
@@ -257,7 +287,7 @@ impl Tokenizer {
 
     /// The bytes token `id` adds to the text, with a space for `▁`. Special tokens add none.
     pub(crate) fn piece_bytes(&self, id: u32) -> &[u8] {
-        match self.pieces.get(id as usize) {
+        match self.piece(id) {
             Some(Piece::Text(t)) => t.as_bytes(),
             Some(Piece::Byte(b)) => std::slice::from_ref(b),
             Some(Piece::Control) | None => &[],
@@ -284,7 +314,7 @@ impl Tokenizer {
         let mut bytes = Vec::new();
         let mut text = String::new();
         for &id in ids {
-            match self.pieces.get(id as usize) {
+            match self.piece(id) {
                 Some(Piece::Text(piece)) if self.byte_runs => {
                     flush_byte_run(&mut bytes, &mut text);
                     text.push_str(piece);
@@ -306,7 +336,7 @@ impl Tokenizer {
     /// starts (a `▁` piece), or next to a CJK character, since Japanese and Chinese have no
     /// spaces. Never inside the bytes of one character.
     pub fn may_split_before(&self, prev: Option<u32>, id: u32) -> bool {
-        let piece = |id: u32| self.pieces.get(id as usize);
+        let piece = |id: u32| self.piece(id);
         match piece(id) {
             Some(Piece::Text(t)) if t.starts_with(' ') => return true,
             Some(Piece::Byte(b)) if (0x80..0xc0).contains(b) => return false,
@@ -366,7 +396,7 @@ mod tests {
         assert_eq!(tok.decode(&[3, 8, 8]), "wor77");
         assert_eq!(tok.decode(&[1, 6, 7]), "hel\u{e9}");
         assert_eq!(tok.decode(&[]), "");
-        assert_eq!(tok.decode(&[99]), "");
+        assert_eq!(tok.decode(&[999]), "");
         assert!(tok.has_pieces(&["<unk>", "▁hel", "lo"]));
         assert_eq!(tok.decode_raw(&[3, 4]), " world,");
         assert!(tok.may_split_before(Some(2), 3));

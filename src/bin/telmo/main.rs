@@ -20,7 +20,7 @@ use telmo::disfluency::{Guards, Tagger};
 use telmo::kernels::Isa;
 use telmo::model::ModelType;
 use telmo::pack::{self, FileSink};
-use telmo::{Fillers, Model, Options, Precision, SpecialWords};
+use telmo::{Fillers, Model, Options, PathLimits, Paths, Precision, SpecialWords, Symbols};
 
 use install::KnownModel;
 
@@ -63,6 +63,13 @@ Options
                    Leaves out English fillers, false starts, repairs and repeats
                    with the disfluency tagger, keeping spoken symbols, units and
                    words talked about. It downloads on first use (158 MB)
+  --symbols        Writes spoken symbols such as \"slash\" and \"dot\" as characters
+                   where the words read as code, as in \"engine dot rs\"
+  --code           Writes them in every run of words and spoken symbols, as for
+                   a terminal or a code editor
+  --paths DIR      Writes a dictated path as the file or folder under DIR it
+                   names, as in \"source slash engine dot rs\" for src/engine.rs.
+                   Only names are read
 
 Granite, Parakeet and the tagger download on first use, after asking, into the
 cache directory that telmo models shows. Downloads use the proxy environment
@@ -100,6 +107,9 @@ struct Transcribe {
     device: Option<String>,
     remove_fillers: bool,
     remove_disfluencies: bool,
+    symbols: bool,
+    code: bool,
+    paths: Option<PathBuf>,
     files: Vec<PathBuf>,
 }
 
@@ -166,6 +176,9 @@ fn parse(args: &[String]) -> Result<Command, String> {
         device: None,
         remove_fillers: false,
         remove_disfluencies: false,
+        symbols: false,
+        code: false,
+        paths: None,
         files: Vec::new(),
     };
     let mut rest = rest.iter();
@@ -200,6 +213,9 @@ fn parse(args: &[String]) -> Result<Command, String> {
             }
             "--remove-fillers" => transcribe.remove_fillers = true,
             "--remove-disfluencies" => transcribe.remove_disfluencies = true,
+            "--symbols" => transcribe.symbols = true,
+            "--code" => transcribe.code = true,
+            "--paths" => transcribe.paths = Some(value("--paths takes a folder.")?.into()),
             option if option.starts_with('-') => {
                 return Err(format!("Unknown option {option}."));
             }
@@ -216,6 +232,9 @@ fn parse(args: &[String]) -> Result<Command, String> {
             ("--device", transcribe.device.is_some()),
             ("--remove-fillers", transcribe.remove_fillers),
             ("--remove-disfluencies", transcribe.remove_disfluencies),
+            ("--symbols", transcribe.symbols),
+            ("--code", transcribe.code),
+            ("--paths", transcribe.paths.is_some()),
         ];
         match given
             .iter()
@@ -238,6 +257,9 @@ fn parse(args: &[String]) -> Result<Command, String> {
                 "--yes",
                 "--remove-fillers",
                 "--remove-disfluencies",
+                "--symbols",
+                "--code",
+                "--paths",
             ])?;
             Ok(Command::Transcribe(transcribe))
         }
@@ -324,6 +346,25 @@ fn transcribe(args: &Transcribe) -> Result<(), String> {
         let tagger = Tagger::load(&pack, &options).map_err(|e| e.to_string())?;
         words.set_disfluencies(Some(std::sync::Arc::new(tagger)));
         words.set_guards(Guards::for_language("en"));
+    }
+    if args.symbols || args.code {
+        let symbols = Symbols::for_language("en");
+        words.set_symbols(if args.code {
+            symbols.map(Symbols::for_code)
+        } else {
+            symbols
+        });
+    }
+    if let Some(dir) = &args.paths {
+        let paths = Paths::scan(dir, &PathLimits::default()).map_err(|e| e.to_string())?;
+        if !paths.is_complete() {
+            eprintln!(
+                "Listed the first {} names under {}.",
+                paths.len(),
+                dir.display()
+            );
+        }
+        words.set_paths(Some(std::sync::Arc::new(paths)));
     }
     let several = args.files.len() > 1;
     let mut failures = 0;
@@ -446,6 +487,9 @@ mod tests {
                 device: None,
                 remove_fillers: false,
                 remove_disfluencies: false,
+                symbols: false,
+                code: false,
+                paths: None,
                 files: vec!["a.wav".into(), "b.wav".into()],
             }))
         );
@@ -463,8 +507,24 @@ mod tests {
                 device: None,
                 remove_fillers: true,
                 remove_disfluencies: false,
+                symbols: false,
+                code: false,
+                paths: None,
                 files: vec!["a.wav".into()],
             }))
+        );
+        let Ok(Command::Transcribe(args)) = parse("transcribe a.wav --symbols --paths proj") else {
+            panic!("symbols and paths");
+        };
+        assert!(args.symbols && !args.code);
+        assert_eq!(args.paths, Some("proj".into()));
+        assert_eq!(
+            parse("transcribe a.wav --paths"),
+            Err("--paths takes a folder.".into())
+        );
+        assert_eq!(
+            parse("pack m out.pack --code"),
+            Err("pack doesn't take --code.".into())
         );
         let Ok(Command::Transcribe(args)) = parse("transcribe --model models/x.pack a.wav") else {
             panic!("a model path");

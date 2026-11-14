@@ -418,6 +418,10 @@ impl UtteranceStream {
         let none = Spoken::default();
         let spoken = self.words.as_ref().map_or(&none, |w| &w.spoken);
         let hyp = write_spoken(spoken, tokenizer, &heard);
+        let hyp = match self.words.as_deref() {
+            Some(words) => write_symbols(words, tokenizer, hyp),
+            None => hyp,
+        };
         // Fillers go before anything settles, going on from the settled text, so a word whose
         // fate depends on the next one is the last of the pass until that one comes, and what
         // protects a word from going may have settled before it.
@@ -467,20 +471,34 @@ impl UtteranceStream {
             // way, since the words from the first that can't settle on may still change. So a
             // word that one may still protect from filler removal settles only once it's whole
             // or can no longer be. A form or word holds back at most its own words.
+            // Nor from where a run of words and spoken symbols could still go on, so a run
+            // settles whole.
             let ids: Vec<u32> = heard.iter().map(|h| h.id).collect();
             while settle > 0
                 && let Some(words_list) = self.words.as_deref()
             {
                 let frontier = hyp[words[settle].start - 1].heard_end;
-                let Some(open) =
-                    words_list.open_before(tokenizer, &ids, frontier, &settled_context)
-                else {
+                let open = words_list.open_before(tokenizer, &ids, frontier, &settled_context);
+                let texts: Vec<String> = (words[..=settle].iter())
+                    .map(|w| {
+                        let text = tokenizer.decode_raw(&word_ids(&hyp, w));
+                        text.trim_start().to_string()
+                    })
+                    .collect();
+                let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+                let code = words_list.code_open_from(&texts).filter(|&k| k < settle);
+                let before = settle;
+                if let Some(open) = open {
+                    settle = (words[..settle].iter())
+                        .take_while(|w| hyp[w.end - 1].heard_end <= open)
+                        .count();
+                }
+                if let Some(code) = code {
+                    settle = settle.min(code);
+                }
+                if settle == before {
                     break;
-                };
-                settle = words[..settle]
-                    .iter()
-                    .take_while(|w| hyp[w.end - 1].heard_end <= open)
-                    .count();
+                }
             }
         }
         let settled_tokens = words.get(settle.wrapping_sub(1)).map_or(0, |w| w.end);
@@ -1709,6 +1727,35 @@ fn write_spoken(spoken: &Spoken, tokenizer: &Tokenizer, heard: &[Hyp]) -> Vec<Hy
         i = r.heard.end;
     }
     out
+}
+
+/// `hyp` with the spoken symbols of code-like runs written as characters and dictated paths
+/// snapped, if `words` write them. A run's tokens are joined so they settle together, take the
+/// frames of its words and resume where its last word did.
+fn write_symbols(words: &Compiled, tokenizer: &Tokenizer, hyp: Vec<Hyp>) -> Vec<Hyp> {
+    if words.symbols.is_none() {
+        return hyp;
+    }
+    crate::symbols::rewrite(
+        tokenizer,
+        hyp,
+        |h| h.id,
+        |texts| words.code_runs(texts),
+        |run, ids| {
+            let (first, last) = (&run[0], &run[run.len() - 1]);
+            (ids.iter().enumerate())
+                .map(|(k, &id)| Hyp {
+                    id,
+                    frame: place(first.frame, last.frame, ids.len(), k),
+                    end_frame: last.end_frame,
+                    resume: last.resume.clone(),
+                    joined: k > 0 || first.joined,
+                    heard_end: last.heard_end,
+                    entry: None,
+                })
+                .collect()
+        },
+    )
 }
 
 /// `hyp` with `words`' fillers left out, if any are to go, after the settled text, whose

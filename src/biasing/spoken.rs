@@ -836,13 +836,18 @@ mod tests {
     fn forms_and_words_the_vocabulary_cant_spell_are_listed() {
         let tok = tokenizer();
         let mut list = SpecialWords::new();
-        list.add_spoken("Zed", "cube control").unwrap();
+        list.add_spoken("Øl", "cube control").unwrap();
         list.add_spoken("kubectl", "zip control").unwrap();
         list.add_spoken("nginx", "engine x").unwrap();
+        // A word written only takes written-only pieces for the ASCII the vocabulary lacks.
+        list.add_spoken("Zed", "new york city").unwrap();
         let (c, unusable) = Compiled::new(&list, &tok);
         let names: Vec<&str> = unusable.iter().map(|(w, _)| w.as_str()).collect();
         assert_eq!(names, vec!["cube control", "zip control"]);
         // "engine x" is spelled in letters, which the vocabulary has.
         assert!(!c.spoken.is_empty());
+        let zed = tok.encode("Zed");
+        assert!(zed.iter().any(|&t| tok.is_written_only(t)));
+        assert_eq!(tok.decode(&zed), "Zed");
     }
 }

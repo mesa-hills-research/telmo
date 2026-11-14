@@ -29,6 +29,8 @@ use crate::disfluency::{Guards, Punctuation, Tagger};
 use crate::error::{Error, Result};
 use crate::fillers::{Context, Edit, Fillers, Protected};
 use crate::parakeet::Token;
+use crate::paths::Paths;
+use crate::symbols::Symbols;
 use crate::tokenizer::Tokenizer;
 
 pub(crate) use spoken::{Entries, Spoken, Unit, normalized_words, place};
@@ -188,7 +190,7 @@ impl fmt::Display for Rejection {
 impl std::error::Error for Rejection {}
 
 /// Words to favour while decoding, each in its usual spelling, spoken forms to write as words,
-/// and fillers and disfluencies to leave out.
+/// spoken symbols and paths to write as code, and fillers and disfluencies to leave out.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SpecialWords {
     words: Vec<String>,
@@ -199,6 +201,18 @@ pub struct SpecialWords {
     disfluencies: Option<SharedTagger>,
     guards: Option<Guards>,
     punctuation: Option<Punctuation>,
+    symbols: Option<Symbols>,
+    paths: Option<SharedPaths>,
+}
+
+/// A list of paths shared by lists, equal to another only when it's the same one.
+#[derive(Debug, Clone)]
+struct SharedPaths(Arc<Paths>);
+
+impl PartialEq for SharedPaths {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// A tagger shared by lists, equal to another only when it's the same one.
@@ -359,6 +373,32 @@ impl SpecialWords {
     /// the model wrote them with `None`, the default.
     pub fn set_punctuation(&mut self, punctuation: Option<Punctuation>) {
         self.punctuation = punctuation;
+    }
+
+    /// The spoken symbols written as characters, if they're set.
+    pub fn symbols(&self) -> Option<Symbols> {
+        self.symbols
+    }
+
+    /// Writes spoken symbols as characters inside runs that read as code, after spoken forms are
+    /// written, so "engine dot rs" comes out as engine.rs and "a dot on the map" as said, or
+    /// keeps them as words with `None`, the default. A run written so is never taken for a
+    /// filler or a disfluency.
+    pub fn set_symbols(&mut self, symbols: Option<Symbols>) {
+        self.symbols = symbols;
+    }
+
+    /// The paths dictated paths snap to, if they're set.
+    pub fn paths(&self) -> Option<&Arc<Paths>> {
+        self.paths.as_ref().map(|p| &p.0)
+    }
+
+    /// Writes a dictated path that spells one of `paths`, or the end of one, as it's spelled
+    /// there, so "source slash engine dot rs" comes out as src/engine.rs, or snaps none with
+    /// `None`, the default. Paths snap the runs the spoken symbols find, so with paths set the
+    /// English symbols are written whatever [`SpecialWords::set_symbols`] says.
+    pub fn set_paths(&mut self, paths: Option<Arc<Paths>>) {
+        self.paths = paths.map(SharedPaths);
     }
 }
 
@@ -713,6 +753,10 @@ pub(crate) struct Compiled {
     pub guards: Option<Guards>,
     /// The capitals and punctuation to fix after them.
     pub punctuation: Option<Punctuation>,
+    /// The spoken symbols to write as characters after spoken forms are written, and the paths
+    /// to snap to.
+    pub symbols: Option<Symbols>,
+    pub paths: Option<Arc<Paths>>,
     /// The special words and spoken forms' words, which keep their spelling.
     pub protected: Protected,
 }
@@ -739,7 +783,7 @@ impl Compiled {
             let mut problem = None;
             let mut usable = false;
             for spelling in [word.to_string(), capitalized(word)] {
-                match spell(tokenizer, &spelling) {
+                match spell(tokenizer, &spelling, true) {
                     Ok(tokens) => {
                         usable = true;
                         favour(tokens, &spelling);
@@ -756,7 +800,7 @@ impl Compiled {
         }
         let mut spoken = Spoken::default();
         for (written, form) in words.spoken() {
-            let word = match spell(tokenizer, written) {
+            let word = match spell(tokenizer, written, false) {
                 Ok(tokens) => tokens,
                 Err(e) => {
                     unusable.push((form.to_string(), e));
@@ -767,7 +811,7 @@ impl Compiled {
             let mut problem = None;
             let mut usable = false;
             for variant in capitalizations(form) {
-                match spell(tokenizer, &variant) {
+                match spell(tokenizer, &variant, true) {
                     Ok(tokens) => {
                         usable = true;
                         favour(tokens, &variant);
@@ -818,6 +862,11 @@ impl Compiled {
                 }
             })
             .collect();
+        let paths = words.paths().cloned();
+        let symbols =
+            (words.symbols).or_else(|| paths.as_ref().and_then(|_| Symbols::for_language("en")));
+        let protected =
+            Protected::new((words.words()).chain(words.spoken().map(|(written, _)| written)));
         (
             Compiled {
                 matcher,
@@ -829,11 +878,12 @@ impl Compiled {
                 disfluencies: words.disfluencies().cloned(),
                 guards: words.guards,
                 punctuation: words.punctuation,
-                protected: Protected::new(
-                    words
-                        .words()
-                        .chain(words.spoken().map(|(written, _)| written)),
-                ),
+                symbols,
+                paths,
+                protected: match symbols {
+                    Some(_) => protected.with_code_words(),
+                    None => protected,
+                },
             },
             unusable,
         )
@@ -841,7 +891,42 @@ impl Compiled {
 
     /// Whether there's nothing to favour, rewrite or leave out.
     pub fn is_empty(&self) -> bool {
-        self.forms.is_empty() && self.spoken.is_empty() && !self.cleans()
+        self.forms.is_empty() && self.spoken.is_empty() && !self.cleans() && self.symbols.is_none()
+    }
+
+    /// Whether a hesitation inside a run of spoken symbols goes with it, as it does when the
+    /// list leaves out fillers.
+    fn hesitations_go(&self) -> bool {
+        self.fillers.is_some() || self.disfluencies.is_some()
+    }
+
+    /// The runs of `texts`, a transcript's words, to write as code, if spoken symbols are.
+    pub fn code_runs(&self, texts: &[&str]) -> Vec<crate::symbols::Join> {
+        match self.symbols {
+            Some(symbols) => symbols.plan(texts, self.hesitations_go(), self.paths.as_deref()),
+            None => Vec::new(),
+        }
+    }
+
+    /// The first of `texts`, a stream's words up to the first that may still change, from which
+    /// a run of spoken symbols could still go on past them, or none.
+    pub fn code_open_from(&self, texts: &[&str]) -> Option<usize> {
+        self.symbols.and_then(|s| s.open_from(texts))
+    }
+
+    /// `tokens` with the spoken symbols of code-like runs written as characters and dictated
+    /// paths snapped, if spoken symbols are written. A run's new tokens share its frames.
+    pub fn write_symbols(&self, tokenizer: &Tokenizer, tokens: Vec<Token>) -> Vec<Token> {
+        if self.symbols.is_none() {
+            return tokens;
+        }
+        crate::symbols::rewrite(
+            tokenizer,
+            tokens,
+            |t| t.id,
+            |texts| self.code_runs(texts),
+            spread,
+        )
     }
 
     /// The first token of `ids` before token `frontier` from which a spoken form, an entry's word
@@ -905,32 +990,40 @@ impl Compiled {
     /// `tokens` with the fillers, or the fillers and disfluencies, left out, if any are to go,
     /// and capitals and punctuation fixed. A word's new tokens share its frames.
     pub fn remove_fillers(&self, tokenizer: &Tokenizer, tokens: Vec<Token>) -> Vec<Token> {
-        let respell = |word: &[Token], ids: Vec<u32>| {
-            let (first, last) = (word[0], word[word.len() - 1]);
-            let frame = |k| place(first.frame as usize, last.frame as usize, ids.len(), k) as u32;
-            let end = last.frame + last.duration;
-            (ids.iter().enumerate())
-                .map(|(k, &id)| Token {
-                    id,
-                    frame: frame(k),
-                    duration: if k + 1 < ids.len() { frame(k + 1) } else { end } - frame(k),
-                })
-                .collect()
-        };
         if !self.cleans() {
             return tokens;
         }
         let context = Context::default();
         let plan = |texts: &[&str]| self.edits(&context, texts, true);
-        crate::fillers::rewrite(tokenizer, tokens, |t| t.id, plan, respell)
+        crate::fillers::rewrite(tokenizer, tokens, |t| t.id, plan, spread)
     }
 }
 
+/// Tokens `ids` written in place of `word`, spread over its frames as [`place`] puts them, the
+/// last lasting to its end.
+fn spread(word: &[Token], ids: Vec<u32>) -> Vec<Token> {
+    let (first, last) = (word[0], word[word.len() - 1]);
+    let frame = |k| place(first.frame as usize, last.frame as usize, ids.len(), k) as u32;
+    let end = last.frame + last.duration;
+    (ids.iter().enumerate())
+        .map(|(k, &id)| Token {
+            id,
+            frame: frame(k),
+            duration: if k + 1 < ids.len() { frame(k + 1) } else { end } - frame(k),
+        })
+        .collect()
+}
+
 /// `spelling`'s tokens, if the model's vocabulary spells it in at most
-/// [`SpecialWords::MAX_TOKENS`].
-fn spell(tokenizer: &Tokenizer, spelling: &str) -> Result<Vec<u32>, Rejection> {
+/// [`SpecialWords::MAX_TOKENS`]. A spelling to favour can't use a written-only piece, which the
+/// model never emits, and one only written can.
+fn spell(tokenizer: &Tokenizer, spelling: &str, favoured: bool) -> Result<Vec<u32>, Rejection> {
     let tokens = tokenizer.encode(spelling);
-    if tokens.is_empty() || tokenizer.decode(&tokens) != spelling {
+    let emitted = |t: &u32| !tokenizer.is_written_only(*t);
+    if tokens.is_empty()
+        || tokenizer.decode(&tokens) != spelling
+        || favoured && !tokens.iter().all(emitted)
+    {
         Err(Rejection::NotInVocabulary)
     } else if tokens.len() > SpecialWords::MAX_TOKENS {
         Err(Rejection::TooManyTokens)
@@ -1209,6 +1302,51 @@ pub(crate) mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn written_only_pieces_decode_keep_their_frames_and_are_never_favoured() {
+        let tok = tokenizer();
+        // Every written-only piece comes after the vocabulary and decodes to its character.
+        let written: Vec<u32> = (tok.len() as u32..)
+            .take_while(|&id| tok.is_written_only(id))
+            .collect();
+        assert!(written.len() > 10);
+        for &id in &written {
+            let text = tok.decode_raw(&[id]);
+            assert_eq!(text.chars().count(), 1, "{id}");
+            assert_eq!(tok.encode_continuation(&text), [id]);
+        }
+        assert!(!tok.is_written_only(tok.len() as u32 + written.len() as u32));
+        assert!(!tok.is_written_only(5));
+        // The test vocabulary has no "_", so "kube_ctl" needs one.
+        let underscore = tok.encode_continuation("_")[0];
+        assert!(written.contains(&underscore));
+        let mut words = SpecialWords::new();
+        words.add_code_word("kube_ctl").unwrap();
+        words.add_spoken("kube_ctl", "cube control").unwrap();
+        let (c, unusable) = Compiled::new(&words, &tok);
+        // Never favoured, so the decoders can't emit one.
+        assert_eq!(
+            unusable,
+            vec![("kube_ctl".to_string(), Rejection::NotInVocabulary)]
+        );
+        assert!(c.tokens.iter().all(|&t| !tok.is_written_only(t)));
+        let forms = c.forms.iter().flat_map(|f| f.tokens.iter());
+        assert!(forms.copied().all(|t| !tok.is_written_only(t)));
+        // Written for its spoken form, on the frames the form took.
+        let token = |id, frame| Token {
+            id,
+            frame,
+            duration: 1,
+        };
+        let heard = vec![token(6, 0), token(4, 3), token(5, 6), token(6, 9)];
+        let out = c.spoken.rewrite(&tok, heard);
+        let ids: Vec<u32> = out.iter().map(|t| t.id).collect();
+        assert_eq!(tok.decode(&ids), "the kube_ctl the");
+        let mark = out.iter().find(|t| t.id == underscore).unwrap();
+        assert!((3..=6).contains(&mark.frame));
+        assert_eq!(out.last().unwrap().frame, 9);
     }
 
     #[test]

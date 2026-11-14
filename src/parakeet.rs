@@ -1313,6 +1313,7 @@ impl Parakeet {
             self.beam_search(encoded, 0, &start, &words, timings)
         };
         let tokens = words.spoken.rewrite(&self.tokenizer, tokens);
+        let tokens = words.write_symbols(&self.tokenizer, tokens);
         words.remove_fillers(&self.tokenizer, tokens)
     }
 
