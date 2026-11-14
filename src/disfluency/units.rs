@@ -404,11 +404,10 @@ pub(super) fn base(network: &Network, words: &[&str]) -> Vec<Vec<f32>> {
                 core.chars().next().is_some_and(char::is_uppercase) && !allcaps,
             ),
             ("letters", only(a, |c| c.is_ascii_lowercase())),
+            // A word in any spelling that isn't a marker, an answer or a hesitation.
             (
                 "ordinary",
-                only(a, |c| c.is_ascii_lowercase() || c == '\'' || c == '-')
-                    && !has_class("not_clause", a)
-                    && !hes,
+                rules::is_word(a) && !has_class("not_clause", a) && !hes,
             ),
             ("quote", w.starts_with(['\'', '"'])),
             // An opening quote mark, or a closing double one. A word that is all punctuation
@@ -1488,6 +1487,10 @@ mod tests {
         assert_eq!(
             marked("So in source slash engine dot rs in the loop"),
             "[So/F] in source slash engine dot [rs/RM] in the loop"
+        );
+        assert_eq!(
+            marked("So in src/engine.rs in the loop"),
+            "[So/F] in src/engine.rs in the loop"
         );
         assert!(hand_written(&[]).is_empty());
     }

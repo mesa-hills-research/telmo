@@ -934,6 +934,10 @@ pub(crate) mod tests {
             for (text, want) in [
                 (path, "In source slash engine dot rs in the loop function,"),
                 (
+                    "So in src/engine.rs in the loop function,",
+                    "In src/engine.rs in the loop function,",
+                ),
+                (
                     "Um, so open config dot yaml and fix the port.",
                     "Open config dot yaml and fix the port.",
                 ),

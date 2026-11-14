@@ -27,6 +27,8 @@ let clean = tagger.remove("Um, so I think we should move the the config.");
 
 The tagger is trained on English, so set it only for English speech. The filler rules run as
 part of it, whatever `set_fillers` says. Special words and spoken forms' words always stay.
+The rules read a word in any spelling as a word, so "So in src/engine.rs" loses its "So" just as
+"So in source slash engine dot rs" does.
 
 `Tagger::hand_written()` is a tagger with no pack, a network of hand-set rules over each word's
 spelling, its word class and the next three words. Beside the fillers it takes out cut-off words
@@ -53,7 +55,7 @@ Over a finished utterance or a whole transcript the guards read up to ten words 
 keeps its items when the third comes later ("set up like a cleaner build, cleaner layout for that
 one screen, cleaner tests"). In a stream's text so far they read three.
 
-On 112,000 words of seven AMI meeting series they undo 58 of the tagger's 12,521 deletions.
+On 112,000 words of seven AMI meeting series they undo 58 of the tagger's 12,520 deletions.
 `examples/disfluency.rs` with `--guards` writes each word's decision with and without them, and
 `Guards::veto` applies them to any deletions.
 

@@ -1162,6 +1162,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_leading_filler_goes_before_a_spoken_forms_word_as_before_its_spoken_words() {
+        let tok = tokenizer();
+        let taggers = [
+            Arc::new(Tagger::hand_written()),
+            crate::disfluency::tests::tiny(2.0, 128, crate::Precision::F32),
+        ];
+        for tagger in taggers {
+            let mut spoken = SpecialWords::new();
+            spoken
+                .add_spoken("src/engine.rs", "source slash engine dot rs")
+                .unwrap();
+            // The speech model may write the word itself when it's a special word.
+            for mut words in [spoken, special(&["src/engine.rs"])] {
+                words.set_disfluencies(Some(tagger.clone()));
+                words.set_guards(Guards::for_language("en"));
+                let (c, _) = Compiled::new(&words, &tok);
+                let clean = |text: &str| {
+                    let list: Vec<&str> = text.split(' ').collect();
+                    Fillers::text(&list, &c.edits(&Context::default(), &list, true))
+                };
+                for (heard, written, want) in [
+                    (
+                        "So in source slash engine dot rs in the loop function,",
+                        "So in src/engine.rs in the loop function,",
+                        "In {} in the loop function,",
+                    ),
+                    (
+                        "Um, so in source slash engine dot rs the loop runs.",
+                        "Um, so in src/engine.rs the loop runs.",
+                        "In {} the loop runs.",
+                    ),
+                    (
+                        "Well, um, in source slash engine dot rs it loops.",
+                        "Well, um, in src/engine.rs it loops.",
+                        "In {} it loops.",
+                    ),
+                ] {
+                    let path = "source slash engine dot rs";
+                    assert_eq!(clean(heard), want.replace("{}", path), "{heard:?}");
+                    assert_eq!(
+                        clean(written),
+                        want.replace("{}", "src/engine.rs"),
+                        "{written:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn words_split_into_tokens_in_both_spellings() {
         let tok = tokenizer();
         assert_eq!(tok.encode("kubectl"), vec![1, 2, 3]);

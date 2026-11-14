@@ -25,9 +25,9 @@
 //!    mean" goes before a clause ("So I think", "Well, we need").
 //! 8. A trailing "so", "and yeah", "but yeah", "so yeah" or "you know" goes, and so do "you know"
 //!    and "I mean" between commas ("we need, you know, a way").
-//! 9. A sentence-opening "so" or "well" also goes before two ordinary words ("So the method is"),
-//!    but not as "so that", "so much" or "well done", nor before a word that answers on its own
-//!    ("So no.").
+//! 9. A sentence-opening "so" or "well" also goes before two more words, written any way ("So
+//!    the method is", "So in src/engine.rs"), but not as "so that", "so much" or "well done", nor
+//!    before a marker or a word that answers on its own ("So no.").
 
 use std::collections::HashSet;
 
@@ -270,6 +270,13 @@ pub(crate) fn is_upper(word: &str) -> bool {
 
 fn only(word: &str, allowed: impl Fn(char) -> bool) -> bool {
     !word.is_empty() && word.chars().all(allowed)
+}
+
+/// Whether `word` has a letter or a digit, which makes it a word in any spelling ("the", "café",
+/// "50", "src/engine.rs"). So a spoken form's word or a special word counts as one, however it's
+/// written.
+pub(crate) fn is_word(word: &str) -> bool {
+    word.chars().any(char::is_alphanumeric)
 }
 
 /// Lower-case letters and apostrophes.
@@ -709,7 +716,7 @@ fn plain_openers(w: &Words) -> HashSet<usize> {
                 k += 1;
                 continue;
             }
-            let ordinary = only(&n[k], |c| c.is_ascii_lowercase() || c == '\'' || c == '-')
+            let ordinary = is_word(&n[k])
                 && !is_initial_marker(&n[k])
                 && !BACKCHANNEL.contains(&n[k].as_str())
                 && !has(ANSWERS, &n[k]);
@@ -1015,6 +1022,30 @@ mod tests {
         );
         assert!(deletions(&[]).is_empty());
         assert_eq!(deletions(&["so"]), [false]);
+    }
+
+    #[test]
+    fn a_plain_opener_goes_before_words_in_any_spelling() {
+        check(
+            &[
+                (
+                    "So in src/engine.rs in the loop function,",
+                    "In src/engine.rs in the loop function,",
+                ),
+                (
+                    "So in source slash engine dot rs in the loop function,",
+                    "In source slash engine dot rs in the loop function,",
+                ),
+                ("So node.js starts slowly.", "node.js starts slowly."),
+                ("Well, 3 tests fail.", "3 tests fail."),
+                ("So the café opens at nine.", "The café opens at nine."),
+                ("Um so x86 builds fail.", "x86 builds fail."),
+                // One word and the sentence's end aren't a clause.
+                ("So src/engine.rs.", "So src/engine.rs."),
+                ("So 6.", "So 6."),
+            ],
+            &RULES,
+        );
     }
 
     #[test]
