@@ -915,6 +915,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_dictated_path_keeps_its_words_and_loses_the_filler_before_it() {
+        let guards = Guards::for_language("en").unwrap();
+        let clean = |tagger: &Tagger, text: &str, guards: Option<&Guards>| {
+            let words: Vec<&str> = text.split(' ').collect();
+            Fillers::text(
+                &words,
+                &tagger.plan(&words, &Protected::default(), guards, true),
+            )
+        };
+        let path = "So in source slash engine dot rs in the loop function,";
+        let hand_written = Tagger::hand_written();
+        assert_eq!(
+            clean(&hand_written, path, None),
+            "In source slash engine dot in the loop function,"
+        );
+        for tagger in [&hand_written, &*tiny(2.0, 128, Precision::F32)] {
+            for (text, want) in [
+                (path, "In source slash engine dot rs in the loop function,"),
+                (
+                    "Um, so open config dot yaml and fix the port.",
+                    "Open config dot yaml and fix the port.",
+                ),
+                (
+                    "Well, rename my underscore old underscore name.",
+                    "Rename my underscore old underscore name.",
+                ),
+            ] {
+                assert_eq!(clean(tagger, text, Some(&guards)), want, "{text:?}");
+            }
+        }
+    }
+
+    #[test]
     fn the_notice_keeps_ettins_licence() {
         let copyright =
             "Copyright (c) 2025 Johns Hopkins University Center for Language and Speech Processing";

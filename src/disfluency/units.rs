@@ -59,9 +59,12 @@ dunno reckon say said maybe no right sure just also even actually basically real
 yes";
 /// Short words the cut-off rules took for fragments in meeting transcripts.
 const MORE_KNOWN: &str = "wee mac mic sec veg alt ooh ada ami ass eh ta hi";
-/// Spoken names of symbols, as in a dictated flag or path ("dash dash force dash push").
-const SYMBOLS: &str =
-    "dash hyphen slash backslash underscore tilde caret ampersand asterisk pipe hashtag";
+/// Spoken names of the symbols in dictated paths, file names, flags, identifiers and addresses
+/// ("source slash engine dot rs", "dash dash force dash push"). A name that is often something
+/// else in speech stays out, such as "at", "point", "plus", "star", "percent" or "question",
+/// since the guard would keep the hesitations and repairs beside it there.
+const SYMBOLS: &str = "dot slash backslash dash hyphen underscore tilde caret ampersand asterisk
+pipe hash hashtag colon semicolon equals backtick";
 pub(super) const NUMBER_WORDS: &str =
     "zero one two three four five six seven eight nine ten eleven twelve
 thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty
@@ -1481,6 +1484,11 @@ mod tests {
             marked("we will move to f conceptual design"),
             "we will move to [f/RM] conceptual design"
         );
+        // A short code word reads as a fragment here, and the symbols guard keeps it.
+        assert_eq!(
+            marked("So in source slash engine dot rs in the loop"),
+            "[So/F] in source slash engine dot [rs/RM] in the loop"
+        );
         assert!(hand_written(&[]).is_empty());
     }
 
@@ -1605,6 +1613,49 @@ mod tests {
             for reach in [Reach::Stream, Reach::Utterance] {
                 let got = veto(text, deleted, reach);
                 assert!(got.iter().all(Vec::is_empty), "{text:?} {reach:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_spoken_symbol_keeps_itself_and_the_words_beside_it() {
+        // Dictated paths, file names, flags, identifiers and addresses, as a speech model writes
+        // them. With every word deleted, these are the words the symbols keep.
+        for (text, kept) in [
+            (
+                "So in source slash engine dot rs in the loop",
+                &[2, 3, 4, 5, 6][..],
+            ),
+            ("open config dot yaml first", &[1, 2, 3]),
+            ("call my underscore old underscore name", &[1, 2, 3, 4, 5]),
+            ("cargo build dash dash release now", &[1, 2, 3, 4]),
+            ("in docs backslash read me", &[1, 2, 3]),
+            ("use std colon colon fmt here", &[1, 2, 3, 4]),
+            // "at" stays out, so only the words beside "dot" stay.
+            ("write ada at example dot com", &[3, 4, 5]),
+            ("the tilde slash notes folder", &[0, 1, 2, 3]),
+            ("x plus equals one", &[1, 2, 3]),
+            ("cat log pipe grep error", &[1, 2, 3]),
+            ("wrap it in backtick code backtick", &[2, 3, 4, 5]),
+        ] {
+            let all: Vec<usize> = (0..text.split(' ').count()).collect();
+            for reach in [Reach::Stream, Reach::Utterance] {
+                let got = veto(text, &all, reach);
+                let symbol: Vec<usize> = (all.iter().copied())
+                    .filter(|&i| got[i].contains(&"symbol"))
+                    .collect();
+                assert_eq!(symbol, kept, "{text:?} {reach:?}");
+            }
+        }
+        // Every name keeps the word on each side of it, in any case and with punctuation.
+        for name in SYMBOLS.split_whitespace() {
+            for text in [
+                format!("um so src {name} lib um"),
+                format!("um so Src {} lib, um", name.to_uppercase()),
+            ] {
+                let got = veto(&text, &[0, 1, 2, 3, 4, 5], Reach::Utterance);
+                let symbol: Vec<bool> = got.iter().map(|k| k.contains(&"symbol")).collect();
+                assert_eq!(symbol, [false, false, true, true, true, false], "{text:?}");
             }
         }
     }

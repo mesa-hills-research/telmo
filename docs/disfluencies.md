@@ -41,7 +41,7 @@ dictation needs them, whichever stage made it, the filler rules included.
 
 | Guard | Keeps |
 |---|---|
-| Symbols | a spoken symbol and the words beside it, as in "dash dash force dash push" |
+| Symbols | a spoken symbol and the words beside it, as in "source slash engine dot rs" and "dash dash force dash push" |
 | Units | a short unit after a number, as in "5 mm" |
 | Mentions | a filler talked about as a word ("delete ums") and a quoted word |
 | Lists | items that share their first word when a third item or an "and" shows a list, as in "cleaner build, cleaner layout, cleaner tests" |
