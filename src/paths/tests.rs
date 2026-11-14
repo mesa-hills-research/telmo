@@ -15,6 +15,7 @@ fn tree() -> Paths {
         ".github/workflows/ci.yml",
         "migrations/0001_init.sql",
         "assets/v2/logo.png",
+        "vendor/telmo-0.2.0",
     ])
 }
 
@@ -121,6 +122,9 @@ fn a_folder_snaps_before_a_slash_and_a_near_miss_stays() {
         pair("source", "src")
     );
     for said in [
+        // Symbols a model wrote inside a word aren't said.
+        "update telmo 0.2.0 now",
+        "read cargo.toml",
         "open source code",
         "a dot on the map",
         "and slash or",

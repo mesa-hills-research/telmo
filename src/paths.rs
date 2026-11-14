@@ -270,7 +270,7 @@ impl Paths {
     fn best(&self, heard: &[Heard], window: Range<usize>) -> Option<(Snap, Score)> {
         let part = &heard[window.clone()];
         // A folder named by itself snaps only before a slash.
-        let has_symbol = part.iter().any(|h| matches!(h.kind, Kind::Symbol(_)));
+        let has_symbol = part.iter().any(|h| h.spoken);
         let before_slash = !part.last()?.stop_after && starts_slash(heard.get(window.end));
         let options = options(part);
         let last_slash =
@@ -366,7 +366,7 @@ impl Score {
 
 /// Whether `heard` is a spoken symbol that starts with a slash.
 fn starts_slash(heard: Option<&Heard>) -> bool {
-    matches!(heard, Some(Heard { kind: Kind::Symbol(c), .. }) if c.starts_with('/'))
+    matches!(heard, Some(Heard { kind: Kind::Symbol(c), spoken: true, .. }) if c.starts_with('/'))
 }
 
 /// The byte where the last `slashes + 1` components of `path` start.
@@ -440,6 +440,9 @@ struct Heard {
     word: usize,
     /// Whether punctuation stands between it and the next.
     stop_after: bool,
+    /// Whether it's a symbol said by its name, rather than one the model wrote in a word
+    /// ("api.py").
+    spoken: bool,
 }
 
 /// The words and symbols of `words`. A word written with code characters ("api.py") splits at
@@ -460,6 +463,7 @@ fn heard(words: &[&str], hesitations_go: bool) -> Vec<Heard> {
                 kind: Kind::Symbol(chars),
                 word: i,
                 stop_after: !trail.is_empty(),
+                spoken: true,
             });
             i += taken;
             continue;
@@ -468,15 +472,20 @@ fn heard(words: &[&str], hesitations_go: bool) -> Vec<Heard> {
             i += 1;
             continue;
         }
+        // A word with hyphens between symbol names ("dash-dash") says them.
+        let named = core
+            .split('-')
+            .any(|p| symbols::spoken_symbol(&[p], 0).is_some());
         for part in symbols::split_code(core) {
-            let kind = match part {
-                symbols::Part::Word(w) => Kind::Word(w.to_string()),
-                symbols::Part::Symbol(c) => Kind::Symbol(c),
+            let (kind, spoken) = match part {
+                symbols::Part::Word(w) => (Kind::Word(w.to_string()), false),
+                symbols::Part::Symbol(c) => (Kind::Symbol(c), named),
             };
             out.push(Heard {
                 kind,
                 word: i,
                 stop_after: false,
+                spoken,
             });
         }
         if !trail.is_empty()
@@ -493,8 +502,9 @@ fn heard(words: &[&str], hesitations_go: bool) -> Vec<Heard> {
 const REACH: usize = 5;
 
 /// The stretches of `heard` worth matching. Each ends with a word, starts with a word or a dot,
-/// never crosses punctuation, and has a symbol in it or comes before a slash, with at most
-/// [`REACH`] words in a row without a symbol.
+/// never crosses punctuation, and has a spoken symbol in it or comes before a spoken slash, with
+/// at most [`REACH`] words in a row without a symbol. Symbols a model wrote inside a word don't
+/// count, so "telmo 0.2.0" never becomes telmo-0.2.0.
 fn windows(heard: &[Heard]) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let is_word = |k: usize| matches!(heard[k].kind, Kind::Word(_));
@@ -513,7 +523,7 @@ fn windows(heard: &[Heard]) -> Vec<Range<usize>> {
                 }
             } else {
                 plain = 0;
-                symbol = true;
+                symbol |= heard[end].spoken;
             }
             let before_slash = !heard[end].stop_after && starts_slash(heard.get(end + 1));
             if is_word(end) && (symbol || before_slash) {
