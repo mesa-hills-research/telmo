@@ -75,7 +75,7 @@ dependencies.
 
 ```toml
 [dependencies]
-telmo = { version = "0.3", default-features = false }
+telmo = { version = "0.4", default-features = false }
 ```
 
 ```rust
