@@ -179,7 +179,7 @@ impl Symbols {
     }
 }
 
-/// Words written as one, the run `words` as `text`.
+/// A run of words and the one word it's written as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Join {
     pub words: Range<usize>,
@@ -400,9 +400,9 @@ pub(crate) enum Part<'a> {
     Symbol(String),
 }
 
-/// `core`, a word's core, split at the characters of code ("api.py" into api, ".", py). A word
-/// a model wrote with hyphens between symbol names ("dash-dash", "dot-com") splits into the
-/// names' characters and the other words.
+/// A word's core split at the characters of code ("api.py" into api, ".", py). A word a model
+/// wrote with hyphens between symbol names ("dash-dash", "dot-com") splits into the names'
+/// characters and the other words.
 pub(crate) fn split_code(core: &str) -> Vec<Part<'_>> {
     let hyphened: Vec<&str> = core.split('-').collect();
     if hyphened.len() > 1

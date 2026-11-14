@@ -900,7 +900,7 @@ impl Compiled {
         self.fillers.is_some() || self.disfluencies.is_some()
     }
 
-    /// The runs of `texts`, a transcript's words, to write as code, if spoken symbols are.
+    /// The runs of a transcript's words `texts` to write as code, if spoken symbols are.
     pub fn code_runs(&self, texts: &[&str]) -> Vec<crate::symbols::Join> {
         match self.symbols {
             Some(symbols) => symbols.plan(texts, self.hesitations_go(), self.paths.as_deref()),
@@ -908,8 +908,8 @@ impl Compiled {
         }
     }
 
-    /// The first of `texts`, a stream's words up to the first that may still change, from which
-    /// a run of spoken symbols could still go on past them, or none.
+    /// The first of a stream's words `texts`, which end with the first that may still change,
+    /// from which a run of spoken symbols could still go on past them, or none.
     pub fn code_open_from(&self, texts: &[&str]) -> Option<usize> {
         (self.symbols).and_then(|s| s.open_from(texts, self.hesitations_go()))
     }
