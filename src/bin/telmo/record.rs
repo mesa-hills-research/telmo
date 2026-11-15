@@ -568,7 +568,7 @@ Text with `sets/dictation-seed.txt`.
         let failing = Arc::clone(&capture);
         let device = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
-            failing.push([0.5; 4800].into_iter(), 1);
+            failing.push([0.5; 4800].into_iter());
             failing.fail("device disconnected".into());
             send.send(String::new()).unwrap();
         });
@@ -592,7 +592,7 @@ Text with `sets/dictation-seed.txt`.
             let capture = Arc::clone(&capture);
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(20));
-                capture.push([0.5; 480].into_iter(), 1);
+                capture.push([0.5; 480].into_iter());
                 send.send(String::new()).unwrap();
             })
         };

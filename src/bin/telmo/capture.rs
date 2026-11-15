@@ -12,7 +12,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::{Mutex, MutexGuard};
 
-/// The ring holds about 6 seconds at 44.1 kHz. The session drains it every 100 ms. It is a
+/// The ring holds about 5 seconds at 48 kHz. The session drains it every 100 ms. It is a
 /// power of two, so an index stays right when the counters wrap around.
 const RING: usize = 1 << 18;
 
@@ -66,18 +66,18 @@ impl Capture {
         }
     }
 
-    /// Takes interleaved samples from the audio callback. It never blocks or allocates. When
-    /// the ring is full it drops the samples and notes the loss for the take it belongs to.
-    pub fn push(&self, samples: impl Iterator<Item = f32>, channels: usize) {
+    /// Takes mono samples from the audio callback. It never blocks or allocates. When the ring
+    /// is full it drops the samples and notes the loss for the take it belongs to.
+    pub fn push(&self, samples: impl Iterator<Item = f32>) {
         let generation = self.generation.load(Acquire);
         let keeping = generation % 2 == 1;
         let read = self.read.load(Acquire);
         let mut written = self.written.load(Relaxed);
         let (mut peak, mut dropped) = (0.0_f32, false);
-        downmix(samples, channels, |sample| {
+        for sample in samples {
             peak = peak.max(sample.abs());
             if !keeping {
-                return;
+                continue;
             }
             if written.wrapping_sub(read) < RING {
                 let slot = u64::from(generation) << 32 | u64::from(sample.to_bits());
@@ -86,7 +86,7 @@ impl Capture {
             } else {
                 dropped = true;
             }
-        });
+        }
         // The loss goes first, so whoever sees these samples through `written` sees it too.
         if dropped {
             self.dropped.fetch_max(generation, Relaxed);
@@ -185,21 +185,6 @@ impl Capture {
     }
 }
 
-/// Mixes interleaved samples down to one channel, handing each frame's average to `emit`. A
-/// partial frame at the end is dropped.
-pub fn downmix(samples: impl Iterator<Item = f32>, channels: usize, mut emit: impl FnMut(f32)) {
-    let channels = channels.max(1);
-    let (mut sum, mut count) = (0.0, 0);
-    for sample in samples {
-        sum += sample;
-        count += 1;
-        if count == channels {
-            emit(sum / channels as f32);
-            (sum, count) = (0.0, 0);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,15 +218,12 @@ mod tests {
             let (capture, entered, release) = (capture.clone(), entered.clone(), release.clone());
             std::thread::spawn(move || {
                 let mut first = true;
-                capture.push(
-                    samples.into_iter().inspect(move |_| {
-                        if std::mem::take(&mut first) {
-                            entered.wait();
-                            release.wait();
-                        }
-                    }),
-                    1,
-                );
+                capture.push(samples.into_iter().inspect(move |_| {
+                    if std::mem::take(&mut first) {
+                        entered.wait();
+                        release.wait();
+                    }
+                }));
             })
         };
         entered.wait();
@@ -253,25 +235,15 @@ mod tests {
     }
 
     #[test]
-    fn channels_are_averaged_and_a_partial_frame_is_dropped() {
-        let mut out = Vec::new();
-        downmix([1.0, 0.0, 0.5, 0.5, 0.25].into_iter(), 2, |s| out.push(s));
-        assert_eq!(out, [0.5, 0.5]);
-        out.clear();
-        downmix([0.25, 0.5].into_iter(), 1, |s| out.push(s));
-        assert_eq!(out, [0.25, 0.5]);
-    }
-
-    #[test]
     fn a_take_holds_what_was_heard_between_start_and_stop() {
         let capture = Capture::new();
-        capture.push(mono(&[0.9]), 1);
+        capture.push(mono(&[0.9]));
         capture.start().unwrap();
-        capture.push([0.5, -0.5, 0.25, 0.75].into_iter(), 2);
+        capture.push(mono(&[-0.5, 0.25]));
         assert_eq!(capture.level(), 0.5);
         assert_eq!(capture.level(), 0.0, "the level is since the last ask");
-        assert_eq!(capture.stop(), Ok(vec![0.0, 0.5]));
-        capture.push(mono(&[0.9]), 1);
+        assert_eq!(capture.stop(), Ok(vec![-0.5, 0.25]));
+        capture.push(mono(&[0.9]));
         capture.start().unwrap();
         assert_eq!(capture.stop(), Ok(vec![]), "the next take starts empty");
     }
@@ -282,7 +254,7 @@ mod tests {
         // without having polled.
         let capture = Capture::new();
         capture.start().unwrap();
-        capture.push(mono(&[0.5; 100]), 1);
+        capture.push(mono(&[0.5; 100]));
         capture.fail("device disconnected".into());
         assert_eq!(
             capture.stop(),
@@ -308,13 +280,13 @@ mod tests {
         // Nothing drains, as when the session thread is stalled.
         let chunk = vec![0.1_f32; RING / 4];
         for _ in 0..6 {
-            capture.push(mono(&chunk), 1);
+            capture.push(mono(&chunk));
         }
         assert_eq!(capture.poll(), Err(Refused::Dropped));
         assert_eq!(capture.stop(), Err(Refused::Dropped));
         // The next take is clean.
         capture.start().unwrap();
-        capture.push(mono(&chunk), 1);
+        capture.push(mono(&chunk));
         assert_eq!(capture.stop().unwrap().len(), chunk.len());
     }
 
@@ -328,7 +300,7 @@ mod tests {
             std::thread::spawn(move || {
                 for start in (0..total).step_by(480) {
                     let end = (start + 480).min(total);
-                    capture.push((start..end).map(|n| n as f32), 1);
+                    capture.push((start..end).map(|n| n as f32));
                 }
             })
         };
@@ -365,7 +337,7 @@ mod tests {
     fn a_loss_noted_by_a_callback_running_at_stop_does_not_refuse_the_next_take() {
         let capture = Arc::new(Capture::new());
         capture.start().unwrap();
-        capture.push(vec![0.1; RING].into_iter(), 1);
+        capture.push(vec![0.1; RING].into_iter());
         let release = Arc::new(Barrier::new(2));
         // The callback saw a full ring, which the session then drained.
         let callback = callback_in_flight(&capture, vec![0.75], &release);
@@ -374,7 +346,7 @@ mod tests {
         release.wait();
         callback.join().unwrap();
         assert_eq!(capture.poll(), Ok(()));
-        capture.push([0.5].into_iter(), 1);
+        capture.push([0.5].into_iter());
         assert_eq!(capture.stop(), Ok(vec![0.5]));
     }
 
@@ -382,7 +354,7 @@ mod tests {
     fn a_callback_that_loses_samples_in_its_own_take_refuses_it() {
         let capture = Arc::new(Capture::new());
         capture.start().unwrap();
-        capture.push(vec![0.1; RING].into_iter(), 1);
+        capture.push(vec![0.1; RING].into_iter());
         let release = Arc::new(Barrier::new(2));
         let callback = callback_in_flight(&capture, vec![0.75], &release);
         release.wait();
@@ -396,9 +368,9 @@ mod tests {
             let capture = Capture::at(position);
             capture.start().unwrap();
             let samples: Vec<f32> = (0..5000).map(|n| n as f32).collect();
-            capture.push(mono(&samples), 1);
+            capture.push(mono(&samples));
             capture.poll().unwrap();
-            capture.push(mono(&samples), 1);
+            capture.push(mono(&samples));
             let take = capture.stop().unwrap();
             assert_eq!(take.len(), 2 * samples.len(), "from {position}");
             assert!(take.chunks(5000).all(|half| half == samples));
@@ -409,10 +381,10 @@ mod tests {
     fn a_full_ring_that_wraps_around_is_detected_and_recovers() {
         let capture = Capture::at(usize::MAX - 100);
         capture.start().unwrap();
-        capture.push(vec![0.1; RING + 1].into_iter(), 1);
+        capture.push(vec![0.1; RING + 1].into_iter());
         assert_eq!(capture.stop(), Err(Refused::Dropped));
         capture.start().unwrap();
-        capture.push(vec![0.2; RING].into_iter(), 1);
+        capture.push(vec![0.2; RING].into_iter());
         assert_eq!(capture.stop().map(|take| take.len()), Ok(RING));
     }
 
@@ -431,7 +403,7 @@ mod tests {
                     }));
                 });
                 // One sample more than the ring holds, so one is lost.
-                capture.push(vec![0.5; RING + 1].into_iter(), 1);
+                capture.push(vec![0.5; RING + 1].into_iter());
             })
         };
         // The callback has published its samples and is not done yet.

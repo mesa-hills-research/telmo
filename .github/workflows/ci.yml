@@ -17,3 +17,6 @@ jobs:
       - run: rustup toolchain install 1.97 --profile minimal --component clippy && rustup default 1.97
       - run: cargo test --no-fail-fast
       - run: cargo clippy --all-targets -- -D warnings
+      # The record feature needs no system package, so every runner builds it as it is.
+      - run: cargo build --features record
+      - run: cargo clippy --all-targets --all-features -- -D warnings

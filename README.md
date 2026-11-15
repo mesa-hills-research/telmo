@@ -57,8 +57,9 @@ telmo transcribe --model granite-int8.pack speech.wav
 ## Record prompted speech
 
 To collect test recordings, install the command with the `record` feature. It records from the
-microphone with [cpal](https://crates.io/crates/cpal), which needs the ALSA headers on Linux
-(`libasound2-dev` on Debian and Ubuntu).
+microphone with [Capta](https://crates.io/crates/capta), in pure Rust, so building it needs no
+system package. On Linux it needs PulseAudio, or PipeWire with pipewire-pulse, which the desktops
+of Ubuntu, Fedora and Debian run by default.
 
 ```text
 cargo install telmo --features record
@@ -71,12 +72,12 @@ item, Enter starts the recording and Enter stops it. Then Enter keeps it, `r` re
 skips it and `q` quits. A bar shows the level while recording, and the command says so when it
 hears nothing.
 
-Each kept item is saved as a 16-bit mono WAV file at the microphone's rate, named by its
-number, such as `recordings/07.wav`. When parts repeat numbers, a part's files start with the
-letter of a file name in backticks before its first item (`t01.m4a` gives `t01.wav`), or else
-with `p` and the part's number (`p2-01.wav`). Run the command again to continue with the items
-that have no file, and delete a file to record its item again. `telmo record --device list` shows
-the inputs, and `--device 2` or `--device usb` picks one.
+Each kept item is saved as a 16-bit mono WAV file at 48 kHz, named by its number, such as
+`recordings/07.wav`. When parts repeat numbers, a part's files start with the letter of a file
+name in backticks before its first item (`t01.m4a` gives `t01.wav`), or else with `p` and the
+part's number (`p2-01.wav`). Run the command again to continue with the items that have no file,
+and delete a file to record its item again. `telmo record --device list` shows the inputs, and
+`--device 2` or `--device usb` picks one.
 
 ## Use it as a library
 

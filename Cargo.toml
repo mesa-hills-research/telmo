@@ -18,7 +18,7 @@ exclude = ["tests/goldens/", "examples/wer/scripts/"]
 name = "telmo"
 
 # The command downloads models over HTTPS with ureq, and with the record feature it records
-# prompts from the microphone with cpal. The library needs none of it, so it has no dependencies
+# prompts from the microphone with Capta. The library needs none of it, so it has no dependencies
 # with default features off.
 [[bin]]
 name = "telmo"
@@ -27,11 +27,11 @@ required-features = ["download"]
 [features]
 default = ["download"]
 download = ["dep:ureq"]
-record = ["dep:cpal"]
+record = ["dep:capta"]
 
 [dependencies]
 ureq = { version = "3.5", default-features = false, features = ["rustls"], optional = true }
-cpal = { version = "0.15", optional = true }
+capta = { version = "0.2", optional = true }
 
 [profile.release]
 debug = "line-tables-only"

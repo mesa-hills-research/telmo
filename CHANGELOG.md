@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1
+
+- `telmo record` records through [Capta](https://crates.io/crates/capta) instead of cpal, so
+  building the `record` feature needs no system package such as `libasound2-dev`. On Linux it
+  needs PulseAudio, or PipeWire with pipewire-pulse.
+- Recordings are saved at 48 kHz rather than the microphone's own rate. On macOS and Windows a
+  device the system can't resample records at its own rate, which the command shows when it
+  starts.
+
 ## 0.5.0
 
 ### Symbols and paths

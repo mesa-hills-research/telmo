@@ -1,12 +1,14 @@
-//! The microphone, through cpal. It records at the device's own rate and sample format, mixed
-//! down to one channel.
+//! The microphone, through Capta. The system mixes the device down to one channel and
+//! resamples it to 48 kHz. On macOS and Windows a device the system can't resample records at
+//! its own rate.
 
 use std::sync::Arc;
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-
 use crate::capture::Capture;
 use crate::record::pick_device;
+
+/// The rate to record at, the usual rate of a microphone, so the system seldom resamples.
+const SAMPLE_RATE: u32 = 48_000;
 
 /// An open input device. It listens from `open` on, and `capture` keeps what it hears between
 /// a take's start and stop.
@@ -14,95 +16,48 @@ pub struct Mic {
     pub name: String,
     pub sample_rate: u32,
     pub capture: Arc<Capture>,
-    _stream: cpal::Stream,
+    _recording: capta::Capture,
 }
 
-/// The input devices that have a name.
-fn input_devices(host: &cpal::Host) -> Result<Vec<(String, cpal::Device)>, String> {
-    let devices = host
-        .input_devices()
-        .map_err(|e| format!("Couldn't list the input devices ({e})."))?;
-    Ok(devices
-        .filter_map(|d| d.name().ok().map(|name| (name, d)))
-        .collect())
+fn input_devices() -> Result<Vec<capta::Device>, String> {
+    capta::devices().map_err(|e| format!("Couldn't list the input devices ({e})."))
 }
 
 /// The names of the input devices, and whether each is the system's default.
 pub fn devices() -> Result<Vec<(String, bool)>, String> {
-    let host = cpal::default_host();
-    let default = host.default_input_device().and_then(|d| d.name().ok());
-    Ok(input_devices(&host)?
+    Ok(input_devices()?
         .into_iter()
-        .map(|(name, _)| {
-            let is_default = default.as_deref() == Some(name.as_str());
-            (name, is_default)
-        })
+        .map(|d| (d.name, d.is_default))
         .collect())
 }
 
 /// Opens the system's default input, or the one `device` picks by number or by part of its name.
 pub fn open(device: Option<&str>) -> Result<Mic, String> {
-    let host = cpal::default_host();
-    let (name, device) = match device {
-        None => {
-            let device = host.default_input_device().ok_or("No microphone found.")?;
-            (device.name().unwrap_or_else(|_| "unnamed".into()), device)
-        }
+    let device = match device {
+        None => None,
         Some(pick) => {
-            let mut all = input_devices(&host)?;
-            let names: Vec<String> = all.iter().map(|(name, _)| name.clone()).collect();
-            all.swap_remove(pick_device(&names, pick)?)
+            let mut all = input_devices()?;
+            let names: Vec<String> = all.iter().map(|d| d.name.clone()).collect();
+            Some(all.swap_remove(pick_device(&names, pick)?).id)
         }
     };
-    let config = device
-        .default_input_config()
-        .map_err(|e| format!("Couldn't open {name} ({e})."))?;
-    let format = config.sample_format();
-    let config: cpal::StreamConfig = config.into();
+    let options = capta::Options {
+        device,
+        sample_rate: SAMPLE_RATE,
+        ..capta::Options::default()
+    };
     let capture = Arc::new(Capture::new());
-    let stream = match format {
-        cpal::SampleFormat::F32 => build::<f32>(&device, &config, &capture),
-        cpal::SampleFormat::F64 => build::<f64>(&device, &config, &capture),
-        cpal::SampleFormat::I8 => build::<i8>(&device, &config, &capture),
-        cpal::SampleFormat::I16 => build::<i16>(&device, &config, &capture),
-        cpal::SampleFormat::I32 => build::<i32>(&device, &config, &capture),
-        cpal::SampleFormat::U8 => build::<u8>(&device, &config, &capture),
-        cpal::SampleFormat::U16 => build::<u16>(&device, &config, &capture),
-        cpal::SampleFormat::U32 => build::<u32>(&device, &config, &capture),
-        other => Err(format!(
-            "{name} uses the sample format {other}, which isn't supported."
-        )),
-    }?;
-    stream
-        .play()
-        .map_err(|e| format!("Couldn't start {name} ({e})."))?;
+    let (on_audio, on_error) = (Arc::clone(&capture), Arc::clone(&capture));
+    let recording = capta::open(
+        &options,
+        move |samples, _| on_audio.push(samples.iter().copied()),
+        move |error| on_error.fail(error.to_string()),
+    )
+    .map_err(|e| format!("Couldn't open the microphone ({e})."))?;
     Ok(Mic {
-        name,
-        sample_rate: config.sample_rate.0,
+        name: recording.device().name.clone(),
+        sample_rate: recording.sample_rate(),
         capture,
-        _stream: stream,
+        _recording: recording,
     })
-}
-
-fn build<T>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    capture: &Arc<Capture>,
-) -> Result<cpal::Stream, String>
-where
-    T: cpal::SizedSample,
-    f32: cpal::FromSample<T>,
-{
-    let channels = usize::from(config.channels.max(1));
-    let (on_data, on_error) = (Arc::clone(capture), Arc::clone(capture));
-    device
-        .build_input_stream(
-            config,
-            move |data: &[T], _: &cpal::InputCallbackInfo| {
-                on_data.push(data.iter().map(|s| s.to_sample::<f32>()), channels);
-            },
-            move |error| on_error.fail(error.to_string()),
-            None,
-        )
-        .map_err(|e| format!("Couldn't open the microphone ({e})."))
 }
