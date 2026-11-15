@@ -1,7 +1,17 @@
-# Telmo
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mesa-hills-research/telmo/main/assets/readme-header-dark.svg">
+    <img src="https://raw.githubusercontent.com/mesa-hills-research/telmo/main/assets/readme-header-light.svg" alt="Telmo" width="284">
+  </picture>
+</h1>
 
-Telmo is a speech recognition engine in pure Rust that runs on the CPU, in a library with no
+Telmo is a speech recognition engine in pure Rust that runs on the CPU in a library with no
 dependencies. It transcribes with two open models, both with punctuation and capitals.
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/mesa-hills-research/telmo/main/docs/images/telmo-demo.png">
+  <img src="https://raw.githubusercontent.com/mesa-hills-research/telmo/main/docs/images/telmo-demo.gif" alt="A waveform of dictated speech fills in as Telmo writes what was said. Then the filler words are struck out and the cleaned sentence appears below." width="830">
+</picture>
 
 - IBM's [Granite Speech 5.0 470M TurboCTC](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc),
   for English, French, German, Spanish, Portuguese, Italian and Japanese. It's the default, with
